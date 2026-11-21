@@ -717,33 +717,39 @@ def test_the_lanes_group_is_the_targets_warp(backend, arch, options,
         assert group.lanes.registers <= registers
 
 
-@pytest.mark.parametrize('backend,arch,options,values', [
-    ('cuda', 'sm_90', {}, 'literal'), ('hip', 'gfx942', {}, 'memory'),
-    ('oneapi', 'pvc', {}, 'table'),
-    ('cuda', 'sm_90', {'multi_element_values': 'memory'}, 'memory'),
-    ('cuda', 'sm_90', {'multi_element_values': 'table'}, 'table'),
-    ('hip', 'gfx942', {'multi_element_values': 'literal'}, 'literal')],
-    ids=['sm_90', 'gfx942', 'pvc', 'sm_90-memory', 'sm_90-table',
-         'gfx942-literal'])
-def test_where_the_lanes_forms_numbers_come_from(backend, arch, options,
-                                                 values):
-    """Literals on NVIDIA, the operator's memory on AMD, a table of the
-    numbers in the order they are multiplied by on Intel
-    (`multi_element_values`): as literals the description's numbers are in
-    the kernel's text; read from memory the kernel reads the operators'
-    pointers; from the table it reads the table, a warp's width at a time,
-    and neither of the others.  Only literals count against
-    `inline_constants`."""
-    context = _context(arch, backend=backend, **options)
+@pytest.mark.parametrize('backend,arch,precision,options,values', [
+    ('cuda', 'sm_90', 's', {}, 'literal'),
+    ('hip', 'gfx942', 's', {}, 'literal'),
+    ('hip', 'gfx1150', 's', {}, 'literal'),
+    ('hip', 'gfx942', 'd', {}, 'memory'),
+    ('oneapi', 'pvc', 's', {}, 'table'),
+    ('cuda', 'sm_90', 's', {'multi_element_values': 'memory'}, 'memory'),
+    ('cuda', 'sm_90', 's', {'multi_element_values': 'table'}, 'table'),
+    ('hip', 'gfx942', 'd', {'multi_element_values': 'literal'}, 'literal')],
+    ids=['sm_90', 'gfx942', 'gfx1150', 'gfx942-f64', 'pvc', 'sm_90-memory',
+         'sm_90-table', 'gfx942-f64-literal'])
+def test_where_the_lanes_forms_numbers_come_from(backend, arch, precision,
+                                                 options, values):
+    """Literals on NVIDIA and on AMD at F32, the operator's memory on AMD
+    at F64, a table of the numbers in the order they are multiplied by on
+    Intel (`multi_element_values`): as literals the description's numbers
+    are in the kernel's text; read from memory the kernel reads the
+    operators' pointers; from the table it reads the table, a warp's width
+    at a time, and neither of the others.  Only literals count against
+    `inline_constants`, and not on AMD, where a literal is a dword of its
+    FMA (`LANE_LITERALS`)."""
+    context = _context(arch, precision, backend=backend, **options)
     assert eg.lane_values(context) == values
     assert eg.lane_literals(context) is (values == 'literal')
-    section = eg.classify(_volume(4, 's'))[0]
+    capped = values == 'literal' and backend != 'hip'
+    assert (eg.lane_literal_cap(context) is None) is (backend == 'hip')
+    section = eg.classify(_volume(4, precision))[0]
     lanes, why = eg.lanes_plan(section, _context(
-        arch, backend=backend, inline_constants=8, **options))
-    assert (lanes is None) is (values == 'literal')
-    gen = _generate(_volume(4, 's'), _context(arch, backend=backend,
-                                              inline_constants=4096,
-                                              **options, **LANES))
+        arch, precision, backend=backend, inline_constants=8, **options))
+    assert (lanes is None) is capped
+    gen = _generate(_volume(4, precision), _context(
+        arch, precision, backend=backend, inline_constants=4096, **options,
+        **LANES))
     kernel = gen.get_kernel()
     names = re.findall(r'//   (m\d+) \S+ \S+ none', kernel)
     assert len(names) == 3
@@ -756,14 +762,14 @@ def test_where_the_lanes_forms_numbers_come_from(backend, arch, options,
     assert reads == (names if values == 'memory' else [])
     operator = section.steps[-1].products[0].first.tensor
     value = next(v for v in operator.storage_values() if abs(v) > 1.5)
-    assert (Datatype.F32.literal(value) in '\n'.join(code)) is (
+    assert (_dtype(precision).literal(value) in '\n'.join(code)) is (
         values == 'literal')
     tables = [d for d in gen.module_table_definitions() if 'tf_mel_' in d]
     assert bool(tables) is (values == 'table')
     if values == 'table':
         name = re.search(r'(tf_mel_\w+)\[', tables[0]).group(1)
         assert any(name in line for line in code)
-        assert Datatype.F32.literal(value) in tables[0]
+        assert _dtype(precision).literal(value) in tables[0]
 
 
 @pytest.mark.parametrize('fission', ['auto', 2])
@@ -952,6 +958,58 @@ def test_a_range_costs_its_cone_and_ends_where_a_lane_no_longer_holds_it():
         assert ends == list(range(a + 1, last + 1))
         assert cones.live(range(a, last), 2) <= 84
         assert last == hi or cones.live(range(a, last + 1), 2) > 84
+
+
+@pytest.mark.parametrize('shape,arch,backend,precision,held', [
+    ('localFlux', 'gfx942', 'hip', 's', True),
+    ('localFluxAll', 'gfx1150', 'hip', 's', True),
+    ('volume', 'gfx942', 'hip', 's', False),
+    ('localFlux', 'gfx942', 'hip', 'd', False),
+    ('localFlux', 'sm_90', 'cuda', 's', False),
+    ('localFlux', 'pvc', 'oneapi', 's', False)])
+def test_the_lanes_form_holds_what_it_writes_on_amd(shape, arch, backend,
+                                                   precision, held):
+    """On AMD every value the lanes form writes under the lane's mask is
+    handed through an empty `asm` ahead of its guard (`opaque_value`), where
+    a walk holds a column an operator step computes -- the flux kernels'
+    faces -- and the numbers are literals: the compiler otherwise sinks the
+    value, and every FMA it takes, behind the guard and every load ahead of
+    it.  Not the volume, whose sums read what is held anyway; not with
+    numbers read from memory, whose loads the backend then gathers; not
+    off AMD."""
+    kernel = _generate(_descrs(shape, 4, precision), _context(
+        arch, precision, backend=backend, **LANES)).get_kernel()
+    stores = re.findall(r'if \(batchIdActive\d*\) \{\s*\n\s*\*?\(?[^=;]*'
+                        r'glb_m\d+\[[^\]]*\] = (v\d+_\w+);', kernel)
+    assert stores
+    passed = re.findall(r'(v\d+_w) = tensorforge::opaque\((v\d+_\w+)\);',
+                        kernel)
+    if not held:
+        assert not passed and 'tensorforge::opaque(' not in kernel
+        return
+    assert {name for name, _ in passed} == set(stores)
+
+
+@pytest.mark.parametrize('arch,backend,precision,form,off', [
+    ('gfx942', 'hip', 's', LANES, True),
+    ('gfx90a', 'hip', 's', LANES, True),
+    ('gfx942', 'hip', 'd', LANES, False),
+    ('gfx1150', 'hip', 's', LANES, False),
+    ('gfx942', 'hip', 's', {'multi_element': 'force'}, False),
+    ('gfx942', 'hip', 's', {}, False),
+    ('sm_90', 'cuda', 's', LANES, False)])
+def test_the_lanes_form_is_compiled_without_packed_fp32_on_cdna(
+        arch, backend, precision, form, off):
+    """The lanes form's kernel at F32 on a target with packed FP32
+    arithmetic (CDNA2 and later) is compiled without it
+    (`lane_features`): the SLP vectorizer pairs its FMAs otherwise, and
+    their numbers become registers gathered ahead of the pairs.  Not at
+    F64, not on RDNA, not the warp form or the default kernel, not CUDA."""
+    kernel = _generate(_volume(4, precision), _context(
+        arch, precision, backend=backend, **form)).get_kernel()
+    spelled = '__global__ void __attribute__((target("no-packed-fp32-ops")))'
+    assert (spelled in kernel) is off
+    assert kernel.count('__attribute__((target(') == int(off)
 
 
 # -- `auto` ------------------------------------------------------------------ #
@@ -1707,6 +1765,8 @@ SEED = 29
     ('volume', 4, 'd', {**LANES, 'arch': 'gfx942'}),
     ('localFluxAll', 4, 's', {**LANES, 'arch': 'gfx942'}),
     ('localFlux', 4, 'd', {**LANES, 'arch': 'gfx1150'}),
+    ('volume', 4, 's', {**LANES, 'arch': 'gfx942'}),
+    ('localFlux', 4, 's', {**LANES, 'arch': 'gfx1150'}),
     ('volume', 4, 's', {**LANES, 'multi_element_values': 'memory'}),
     ('volume', 4, 's', {**LANES, 'multi_element_values': 'table'}),
     ('localFlux', 4, 'd', {**LANES, 'arch': 'gfx942',
@@ -1727,6 +1787,7 @@ SEED = 29
          'matrix-chain-o4s-two-stages', 'gfx942-volume-o4d',
          'gfx1150-localFlux-o4s', 'gfx942-lanes-volume-o4d',
          'gfx942-lanes-localFluxAll-o4s', 'gfx1150-lanes-localFlux-o4d',
+         'gfx942-lanes-volume-o4s', 'gfx1150-lanes-localFlux-o4s',
          'lanes-volume-o4s-memory', 'lanes-volume-o4s-table',
          'gfx942-lanes-localFlux-o4d-table', 'lanes-volume-o4d-columns',
          'gfx942-lanes-localFluxAll-o4s-columns', 'sparse-star-o4d',

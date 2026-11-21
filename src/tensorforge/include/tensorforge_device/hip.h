@@ -532,6 +532,18 @@ __device__ __forceinline__ int opaqueZero() {
   return zero;
 }
 
+/// `x` as an empty `asm volatile` hands it back, read and written in vector
+/// registers: no instruction, and the arithmetic that makes `x` stays ahead
+/// of it.  A value used only under a later guard -- the multi-element lanes
+/// form's column, written back under each lane's mask -- has LLVM's
+/// InstCombine sink all the arithmetic it takes into that guard's block,
+/// behind every load of the block before it, and the column's reads are then
+/// every row at once (`Lexic.opaque_value`).
+template <typename T> __device__ __forceinline__ T opaque(T x) {
+  asm volatile("" : "+v"(x));
+  return x;
+}
+
 /// The row share as an instruction of its own: every lane of a 16-lane row
 /// gets lane `Row`'s value.  Any trivially copyable value -- `dpp` moves it
 /// in 64-bit units where the target can, so a float pair or a `double` is one

@@ -243,6 +243,17 @@ class HipLexic(CudaLexic):
     # nothing hoists, merges or folds.
     return 'tensorforge::opaqueZero()'
 
+  def opaque_value(self, value):
+    if self._underlying_hardware != 'amd':
+      return super().opaque_value(value)
+    # An empty `asm volatile` that reads and writes it (`hip.h`): InstCombine
+    # sinks a value used only under a guard into the guard's block, and with
+    # it every FMA the value takes -- the lanes form's column behind its
+    # loads: localFluxAll at o4 in F32 spilled 1.2 kB a lane on gfx942 and
+    # 2.2 kB on gfx1150 so, none and 1.0 kB with the column's values held
+    # here.
+    return f'tensorforge::opaque({value})'
+
   def loop_body_fence(self):
     if self._underlying_hardware != 'amd':
       return super().loop_body_fence()

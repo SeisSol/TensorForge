@@ -4853,14 +4853,17 @@ class Generator:
       launch_bounds += (waves,)
 
     grf = self._context.get_user_options().sycl_grf
+    features = None
     if self._element_group is not None and self._element_group.lanes:
       # The lanes form is sized for the large register file on Intel
-      # (`element_group.lane_grf`).
+      # (`element_group.lane_grf`), and on AMD compiled without the packed
+      # FP32 its column's FMAs would be paired into (`lane_features`).
       grf = element_group.lane_grf(self._context) or grf
+      features = element_group.lane_features(self._context)
     return lexic.kernel_definition(writer, launch_bounds, self._base_kernel_name, str_params, self._context.fp_as_str(),
                                          shr_total_size, global_symbols,
                                          lanes=self._num_threads,
-                                         grf=grf)
+                                         grf=grf, features=features)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()

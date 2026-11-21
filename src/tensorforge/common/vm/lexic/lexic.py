@@ -235,10 +235,12 @@ class Lexic(ABC):
   @abstractmethod
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None,
-                        lanes=None, grf=None):
+                        lanes=None, grf=None, features=None):
     """The kernel's head.  `grf` is the register file it asks for where the
     backend can (`Options.sycl_grf`): `'128'`, `'256'`, `'auto'`, or None
-    for the backend's default."""
+    for the backend's default.  `features`: target features the kernel's
+    compile turns on or off, as the backend's compiler spells them (HIP's
+    `target` attribute), or None."""
 
   @abstractmethod
   def sync_block(self):
@@ -262,6 +264,14 @@ class Lexic(ABC):
     it makes the address the iteration's own, which the compiler cannot
     take out of the loop and hold across it (the multi-element layout's
     lanes form, `element_group.lane_anchors`)."""
+    return None
+
+  def opaque_value(self, value: str):
+    """`value` as the compiler cannot see it come from: what keeps the
+    arithmetic that makes it where it stands, ahead of a guarded use the
+    compiler would otherwise sink all of it behind -- or None where the
+    backend needs none (the multi-element layout's lanes form,
+    `compute.multi_element`)."""
     return None
 
   def loop_body_fence(self) -> str:

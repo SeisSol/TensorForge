@@ -63,6 +63,7 @@ TRANSFERS = Path('src/tensorforge/backend/pir/transfers.py')
 TARGET = Path('src/tensorforge/common/target.py')
 LEXIC = Path('src/tensorforge/common/vm/lexic/lexic.py')
 HIP_LEXIC = Path('src/tensorforge/common/vm/lexic/hip_lexic.py')
+CUDA_LEXIC = Path('src/tensorforge/common/vm/lexic/cuda_lexic.py')
 HIP_WAVE = Path('src/tensorforge/include/tensorforge_device/hip_wave.h')
 SYCL_LEXIC = Path('src/tensorforge/common/vm/lexic/sycl_lexic.py')
 LEGALIZE = Path('src/tensorforge/generators/legalize.py')
@@ -4824,9 +4825,9 @@ GROUPS = {
          sub(ME_SECTION, '            if claim is not None and all((r, j) in trip.acc for r in tile):\n',
              '            if claim is not None:\n', 1)),
         ('a lane\'s write without its mask',
-         sub(ME_SECTION, '            b.store(target, value, _address(b, tensor, i, col),\n'
+         sub(ME_SECTION, '            b.store(target, held(value, fp), _address(b, tensor, i, col),\n'
                          '                    predicate=trip.mask)\n',
-             '            b.store(target, value, _address(b, tensor, i, col))\n', 1)),
+             '            b.store(target, held(value, fp), _address(b, tensor, i, col))\n', 1)),
         # Both of a walk's boundaries -- at its start, and after a product of
         # a held column -- through the builder: either alone keeps the walks'
         # reads apart in every shape the tests have.
@@ -5013,9 +5014,38 @@ GROUPS = {
              "    return grf\n", 1)),
         ('AMD\'s lanes budgeted for the AGPRs',
          sub(ME_GROUP, '        file = min(file, 1024)\n', '        pass\n', 1)),
-        ('the lanes form\'s numbers literals everywhere',
-         sub(ME_GROUP, "LANE_VALUES = {'nvidia': 'literal', 'amd': 'memory', 'intel': 'table'}\n",
-             "LANE_VALUES = {'nvidia': 'literal', 'amd': 'literal', 'intel': 'literal'}\n", 1)),
+        ('the lanes form\'s numbers literals on Intel',
+         sub(ME_GROUP, "    'intel': {Datatype.F32: 'table', Datatype.F64: 'table'}}\n",
+             "    'intel': {Datatype.F32: 'literal', Datatype.F64: 'literal'}}\n", 1)),
+        # AMD's lanes form: F32 literals uncapped, F64 from memory, the
+        # written values held where a walk holds a column, packed FP32 off.
+        ('AMD\'s F32 numbers read from memory',
+         sub(ME_GROUP, "    'amd': {Datatype.F32: 'literal', Datatype.F64: 'memory'},\n",
+             "    'amd': {Datatype.F32: 'memory', Datatype.F64: 'memory'},\n", 1)),
+        ('AMD\'s F64 numbers literals',
+         sub(ME_GROUP, "    'amd': {Datatype.F32: 'literal', Datatype.F64: 'memory'},\n",
+             "    'amd': {Datatype.F32: 'literal', Datatype.F64: 'literal'},\n", 1)),
+        ('AMD\'s lanes literals capped by `inline_constants`',
+         sub(ME_GROUP, "LANE_LITERALS = ('amd',)\n", 'LANE_LITERALS = ()\n', 1)),
+        ('AMD\'s written values not held',
+         sub(HIP_LEXIC, "    return f'tensorforge::opaque({value})'\n",
+             '    return super().opaque_value(value)\n', 1)),
+        ('a written value held where no walk holds a column',
+         sub(ME_SECTION, '               if (trip.mask is not None and held_columns\n',
+             '               if (trip.mask is not None and True\n', 1)),
+        ('a written value held under numbers read from memory',
+         sub(ME_SECTION, "                   and trip.values == 'literal') else None)\n",
+             '                   and True) else None)\n', 1)),
+        ('packed FP32 left on for AMD\'s lanes form',
+         sub(ME_GROUP, "LANE_FEATURES = {'amd': 'no-packed-fp32-ops'}\n", 'LANE_FEATURES = {}\n', 1)),
+        ('packed FP32 turned off at F64',
+         sub(ME_GROUP, '    if (vendor not in LANE_FEATURES or context.fp_type is not Datatype.F32\n',
+             '    if (vendor not in LANE_FEATURES or False\n', 1)),
+        ('a kernel\'s target features not spelled',
+         sub(CUDA_LEXIC, '    target = (f\' __attribute__((target("{features}")))\' if features\n',
+             '    target = (\'\' if features\n', 1)),
+        ('the oracle reading `opaque` as a call',
+         sub(ORACLE, "    e = re.sub(r'\\btensorforge::opaque\\s*\\(', '(', e)\n", '', 1)),
         ('the operator\'s memory read as the description\'s numbers',
          sub(ME_SECTION, "        if self.values == 'memory':\n",
              "        if self.values == 'memory' and False:\n", 1)),

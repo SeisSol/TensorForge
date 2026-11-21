@@ -988,21 +988,42 @@ def lane_registers(context, elements: int) -> int:
     return LANE_REGISTERS * (file // 4) // 255
 
 
-#: Where the lanes form takes its operators' nonzeros from by vendor, where
-#: `Options.multi_element_values` is `auto` (`lane_values`).  NVIDIA: literals
-#: of the code -- an FFMA takes its immediate and a DFMA reads its number from
-#: a constant bank as an operand, at no instruction (CUDA Binary Utilities,
-#: "Instruction Set Reference": FFMA32I, constant-bank operands).  Elsewhere a
-#: literal costs an instruction.  AMD: the operator's own memory at addresses
-#: every lane shares, a scalar load into SGPRs, which a VALU instruction takes
-#: as an operand -- gfx9 has no VOP3 literal, so a `v_fma_f64` cannot take its
-#: number from the code (AMD "CDNA3 ISA", VOP3 encoding, literal constants).
-#: Intel: an Xe `mad` takes no 32-bit immediate, and a uniform read is a
-#: message a number; a table of the numbers in the order they are multiplied
-#: by is read a sub-group's width at a time and each handed to the lanes from
-#: the lane that holds it, which IGC makes a register region of the `mad` --
-#: the PVC prototype's operands.
-LANE_VALUES = {'nvidia': 'literal', 'amd': 'memory', 'intel': 'table'}
+#: Where the lanes form takes its operators' nonzeros from by vendor and
+#: element type, where `Options.multi_element_values` is `auto`
+#: (`lane_values`).  NVIDIA: literals of the code -- an FFMA takes its
+#: immediate and a DFMA reads its number from a constant bank as an operand,
+#: at no instruction (CUDA Binary Utilities, "Instruction Set Reference":
+#: FFMA32I, constant-bank operands).  AMD: literals at F32, which a VOP2
+#: `v_fmac_f32` takes as a dword of the instruction, and so does a VOP3 from
+#: gfx11 on; the operator's own memory at F64, scalar loads into SGPRs --
+#: gfx9 has no VOP3 literal, so a `v_fma_f64` cannot take its number from the
+#: code (AMD "CDNA3 ISA", VOP3 encoding, literal constants).  Read from
+#: memory at F32, the numbers were what the AMDGPU backend held: the o6 volume
+#: spilled 1070 SGPRs on gfx942 and 64 on gfx1150, as literals none.  Intel:
+#: an Xe `mad` takes no 32-bit immediate, and a uniform read is a message a
+#: number; a table of the numbers in the order they are multiplied by is read
+#: a sub-group's width at a time and each handed to the lanes from the lane
+#: that holds it, which IGC makes a register region of the `mad` -- the PVC
+#: prototype's operands.
+LANE_VALUES: Dict[str, Dict[Datatype, str]] = {
+    'nvidia': {Datatype.F32: 'literal', Datatype.F64: 'literal'},
+    'amd': {Datatype.F32: 'literal', Datatype.F64: 'memory'},
+    'intel': {Datatype.F32: 'table', Datatype.F64: 'table'}}
+
+#: The vendors whose lanes form takes every nonzero of an operator as a
+#: literal where its numbers are literals (`lane_literals`), and not at most
+#: `Options.inline_constants`: that cap is the per-element kernels' -- 64 on
+#: AMD, whose literals there are scalar registers -- and the lanes form's
+#: literal on AMD is a dword of its FMA.  Elsewhere the option caps them.
+LANE_LITERALS = ('amd',)
+
+#: Target features the lanes form's kernel turns off, by vendor
+#: (`lane_features`).  AMD at F32, where the target has packed FP32
+#: arithmetic (`packed-fp32-ops`, CDNA2 and later): LLVM's SLP vectorizer
+#: pairs the column's FMAs into `v_pk_fma_f32`, whose numbers are registers
+#: -- pairs of SGPRs, gathered ahead of the pairs -- and on gfx942 the o6
+#: volume's literals then took 852 SGPRs of spill; none without the pairs.
+LANE_FEATURES = {'amd': 'no-packed-fp32-ops'}
 
 #: The vendors whose lanes form anchors what it reads to the column it reads
 #: it for (`lane_anchors`): an address that does not change from column to
@@ -1021,13 +1042,39 @@ LANE_ANCHORS = ('amd', 'intel')
 
 def lane_values(context) -> str:
     """Where the lanes form's operator nonzeros come from on the context's
-    target: `literal`, `memory` or `table` (`Options.multi_element_values`,
-    `LANE_VALUES`)."""
+    target at its element type: `literal`, `memory` or `table`
+    (`Options.multi_element_values`, `LANE_VALUES`)."""
     asked = context.get_user_options().multi_element_values
     if asked != 'auto':
         return asked
     return LANE_VALUES.get(getattr(context.target.hw, 'vendor', None),
-                           'memory')
+                           {}).get(context.fp_type, 'memory')
+
+
+def lane_literal_cap(context) -> Optional[int]:
+    """The most nonzeros of an operator the lanes form takes as literals on
+    the context's target, None for all of them (`LANE_LITERALS`,
+    `Options.inline_constants`)."""
+    if getattr(context.target.hw, 'vendor', None) in LANE_LITERALS:
+        return None
+    return context.get_user_options().inline_constants
+
+
+def lane_features(context) -> Optional[str]:
+    """The target features the lanes form's kernel turns off on the
+    context's target, as the compiler spells them, or None
+    (`LANE_FEATURES`): AMD's packed FP32 at F32, where the target has it."""
+    hw = context.target.hw
+    vendor = getattr(hw, 'vendor', None)
+    if (vendor not in LANE_FEATURES or context.fp_type is not Datatype.F32
+            or context.target.packed_fma_width(Datatype.F32) < 2):
+        return None
+    from tensorforge.backend.instructions.compute.primitives.amd.features \
+        import carries
+    level = hw.gfx_level()
+    return (LANE_FEATURES[vendor]
+            if level is not None and carries(level, 'packed-fp32-ops')
+            else None)
 
 
 def lane_literals(context) -> bool:
@@ -1352,7 +1399,8 @@ def lanes_plan(section: GroupSection,
     operands and not an intermediate -- which a lane would have to hold
     whole, every column of it -- and whose operators carry numbers, their
     pattern, at most `Options.inline_constants` nonzeros each where those
-    are literals (`lane_literals`).  An intermediate
+    are literals (`lane_literals`) and the target caps them
+    (`lane_literal_cap`).  An intermediate
     written again is another value each time (`Cones`), and the steps
     into the output -- a merged run's, one a member -- add into one column
     of registers in turn.  The output is cut into as few row ranges as
@@ -1363,7 +1411,6 @@ def lanes_plan(section: GroupSection,
     if len(section.outputs) != 1:
         return None, (f'the lanes form writes one output, not '
                       f'{len(section.outputs)}')
-    most = context.get_user_options().inline_constants
     for step in section.steps:
         for p in step.products:
             if p.kind is Kind.MIXING:
@@ -1376,9 +1423,11 @@ def lanes_plan(section: GroupSection,
                 return None, (f'{tensor.alias} carries no numbers, whose '
                               f'nonzeros the lanes form would walk')
     cones = Cones(section)
+    most = lane_literal_cap(context)
     for step in section.steps:
         for p in step.products:
-            if p.kind is Kind.MIXING or not lane_literals(context):
+            if (p.kind is Kind.MIXING or not lane_literals(context)
+                    or most is None):
                 continue
             tensor = p.first.tensor
             count = sum(len(v) for v in cones.nonzeros[id(p)].values())
@@ -1548,14 +1597,15 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
 
 __all__ = ['AUTO_LANES', 'Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS',
            'ElementGroup', 'FMA_FORMS', 'GroupSection', 'Kind',
-           'LANE_ANCHORS', 'LANE_CLASSES', 'LANE_COLUMNS', 'LANE_RANGES',
-           'LANE_REGISTERS', 'LANE_VALUES', 'LANE_WARPS', 'LOWERING', 'Lanes',
-           'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
-           'Product', 'Role', 'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage',
-           'Step', 'TARGETS', 'Terms', 'async_staging', 'auto_takes',
-           'classify', 'fill', 'fma_form', 'lane_anchors', 'lane_columns',
-           'lane_elements', 'lane_grf', 'lane_literals', 'lane_registers',
-           'lane_values', 'lanes_plan', 'lower', 'matrix_enabled',
-           'matrix_shape', 'nonzero_terms', 'operator_nonzeros', 'plan',
-           'second_stages', 'shared_bytes', 'split', 'table_elements',
-           'tiled']
+           'LANE_ANCHORS', 'LANE_CLASSES', 'LANE_COLUMNS', 'LANE_FEATURES',
+           'LANE_LITERALS', 'LANE_RANGES', 'LANE_REGISTERS', 'LANE_VALUES',
+           'LANE_WARPS', 'LOWERING', 'Lanes', 'MATRIX', 'MATRIX_LOWERINGS',
+           'MIN_ELEMENTS', 'POINTER_BYTES', 'Product', 'Role',
+           'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step', 'TARGETS',
+           'Terms', 'async_staging', 'auto_takes', 'classify', 'fill',
+           'fma_form', 'lane_anchors', 'lane_columns', 'lane_elements',
+           'lane_features', 'lane_grf', 'lane_literal_cap', 'lane_literals',
+           'lane_registers', 'lane_values', 'lanes_plan', 'lower',
+           'matrix_enabled', 'matrix_shape', 'nonzero_terms',
+           'operator_nonzeros', 'plan', 'second_stages', 'shared_bytes',
+           'split', 'table_elements', 'tiled']

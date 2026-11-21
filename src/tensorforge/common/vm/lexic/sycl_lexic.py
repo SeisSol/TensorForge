@@ -181,7 +181,7 @@ class SyclLexic(Lexic):
       raise ValueError(f'sycl_grf={grf!r}: 128, 256, auto or default')
     return f'sycl::ext::oneapi::experimental::properties{{{what}}}, '
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None, grf=None):
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None, grf=None, features=None):
     if self._explicit_simd:
       # The arena is reserved inside the kernel instead; see
       # `declare_shared_memory`.  Declaring an accessor as well would reserve

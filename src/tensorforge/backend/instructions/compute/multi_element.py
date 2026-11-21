@@ -1345,6 +1345,29 @@ def _column(trip) -> None:
         LOWERINGS[step.lowering](trip, step)
     width = trip.width
     lower = int(tensor.bbox.lower()[0])
+    # What is written under the lane's mask, held where it is computed, where
+    # the target says how (`Lexic.opaque_value`), a walk holds a column an
+    # operator step computes -- the flux kernels' faces -- and the numbers
+    # are literals: AMD's compiler otherwise sinks each value, and the FMAs
+    # it takes, into its write's guard, and the column's reads of the element
+    # came out every row at once.  Where no step's column is held -- the
+    # volume -- the sunk sums read registers that hold anyway, and held they
+    # cost: 248 VGPRs and no AGPRs for the o6 F32 volume on gfx942 as they
+    # are, 256 and 176 held.  Numbers read from memory are scalar loads,
+    # which the backend then gathers ahead of the held arithmetic: the o4 F64
+    # localFluxAll on gfx942 traded 3.7 kB of VGPR spill for 1228 SGPRs.
+    held_columns = any(trip.materialized(p) for step in trip.section.steps
+                       for p in step.products)
+    spelled = (trip.context.target.lexic.opaque_value('{0}')
+               if (trip.mask is not None and held_columns
+                   and trip.values == 'literal') else None)
+
+    def held(value, type_):
+        if spelled is None:
+            return value
+        return b.rawexpr(spelled, value, type_=type_, hint='w', pure=False,
+                         movable=False)
+
     for j in slots:
         col = trip.cols[j]
         done = set()
@@ -1358,15 +1381,16 @@ def _column(trip) -> None:
                 # A whole tile written: one access.
                 values = [trip.acc[(r, j)] if trip.acc[(r, j)] is not None
                           else b.const(0.0, fp) for r in tile]
-                b.store(target, b.pack(ScalarType(trip.section.dtype, width),
-                                       *values, hint='q'),
+                vector = ScalarType(trip.section.dtype, width)
+                b.store(target, held(b.pack(vector, *values, hint='q'),
+                                     vector),
                         _address(b, tensor, first, col),
                         predicate=trip.mask, align=claim)
                 done.update(tile)
                 continue
             value = (trip.acc[(i, j)] if trip.acc[(i, j)] is not None
                      else b.const(0.0, fp))
-            b.store(target, value, _address(b, tensor, i, col),
+            b.store(target, held(value, fp), _address(b, tensor, i, col),
                     predicate=trip.mask)
             done.add(i)
 
