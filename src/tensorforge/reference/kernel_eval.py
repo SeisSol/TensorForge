@@ -94,10 +94,12 @@ _VEC_ASSIGN = re.compile(r'^\*\s*\([^)]*\)\s*&\s*\w+\s*\[.*\]\s*=')
 
 #: `__pipeline_memcpy_async(&dst[i], &src[j], N)`.  The transfer half of
 #: CUDA's pipeline primitives; the commit and the wait are the other half and
-#: move nothing.
+#: move nothing.  With a fourth argument `Z`, the zero-fill form: the first
+#: `N - Z` bytes copied, the last `Z` zeros.
 _ASYNC_COPY = re.compile(
     r'^__pipeline_memcpy_async\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
-    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)'
+    r'(?:\s*,\s*(?P<zfill>[^,()]+))?\s*\)$')
 
 #: AMD's LDS-DMA as `HipLexic.copy_async` writes it, `global_load_lds` from
 #: `&src[i]` in global memory to `&dst[j]` in the LDS, `N` bytes a lane.
@@ -2331,14 +2333,21 @@ class Interp:
                         f'whose element size is {width!r}: {stmt!r}')
         di = int(self.ev(cp.group('di')))
         si = int(self.ev(cp.group('si')))
+        zfill = int(self.ev(cp.group('zfill'))) if cp.group('zfill') else 0
+        if zfill % width or not 0 <= zfill <= nbytes:
+            raise Abort(f'async copy filling {zfill} B of {nbytes} with zeros '
+                        f'in elements of {width}: {stmt!r}')
         # In flight until the wait that retires it, for `Races`; the values
         # land at once, which no race-free reader can tell apart.
         tracker = self.mem.tracker
         if tracker is not None:
             tracker.issuing = True
         try:
-            for k in range(nbytes // width):
+            copied = (nbytes - zfill) // width
+            for k in range(copied):
                 dst[di + k] = src[si + k]
+            for k in range(copied, nbytes // width):
+                dst[di + k] = 0.0
         finally:
             if tracker is not None:
                 tracker.issuing = False

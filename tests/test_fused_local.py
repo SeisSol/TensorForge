@@ -172,3 +172,47 @@ def test_each_piece_stages_its_own_operators():
     one = 32 * 32 * DTYPE.size()
     assert whole >= 2 * one
     assert by_section < whole
+
+
+def test_staged_by_section_on_the_host_oracle():
+    """The kernel cut at the operator boundary with each piece staging its
+    own operator, built for CUDA with the operators staged
+    (`preload_globals`, a zero-filling `cp.async`), on the host oracle
+    against NumPy: one element, every output."""
+    import numpy as np
+    from harness.driver_emit import collect_operands
+    from tensorforge.reference import kernel_eval as ke
+    descrs = _two_operators()
+    rng = np.random.default_rng(5)
+    numbers = {'A': rng.standard_normal((32, 32)),
+               'D': rng.standard_normal((32, 32)),
+               'B': rng.standard_normal((32, 9)),
+               'C': rng.standard_normal((9, 9))}
+    bc = numbers['B'] @ numbers['C']
+    want = {f'X{n}': numbers['A'] @ bc for n in range(3)}
+    want['Z'] = numbers['D'] @ bc
+    gen = Generator(descrs, Context(
+        arch='sm_90', backend='cuda', fp_type=DTYPE,
+        options=Options(fission=2, fission_cut='operators',
+                        preload_globals=True, preload_by_section=True,
+                        merge_variants=False)))
+    gen.generate()
+    assert len(gen.built._sections) == 2
+    assert 'memcpy_async' in gen.get_kernel()
+    lanes, mults = ke.launch_geometry(gen.get_launcher())
+    preset, ops = {}, {}
+    for op in collect_operands(gen):
+        ops[op.alias] = op
+        if op.alias in numbers:
+            flat = numbers[op.alias].flatten(order='F')
+            smap = op.pack_index
+            preset[op.kernel_name] = (list(flat) if smap is None else
+                                      [flat[i] if i >= 0 else 0.0
+                                       for i in smap])
+    mem = ke.evaluate_wave(gen.get_kernel(), lanes, seed=3, preset=preset,
+                           races=[], mults=mults, block=True, elements=1)
+    for alias, w in want.items():
+        name = ops[alias].kernel_name
+        got = np.array([mem[(name, i)] for i in range(w.size)]
+                       ).reshape(w.shape, order='F')
+        assert np.abs(got - w).max() < 1e-3 * np.abs(w).max(), alias
