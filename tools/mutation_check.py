@@ -4604,8 +4604,9 @@ GROUPS = {
          sub(ORACLE, '            address = start + row * pitch + at[-1] * width\n            address ^= ((address >> 7) & ((1 << bits) - 1)) << 4\n',
              '            address = row * pitch + at[-1] * width\n            address ^= ((address >> 7) & ((1 << bits) - 1)) << 4\n            address += start\n', 1)),
         ('the interpreter filling zeros for NaN',
-         sub(ORACLE, "        fill = float('nan') if tmap.nan else 0.0\n",
-             '        fill = 0.0\n', 1)),
+         sub(ORACLE, "        fill = float('nan') if tmap.nan else 0.0\n"
+             '        tracker = self.mem.tracker\n',
+             '        fill = 0.0\n        tracker = self.mem.tracker\n', 1)),
         ('the interpreter taking other bytes than the box',
          sub(ORACLE, "        if int(tl.group('bytes')) != volume * tmap.size:\n",
              '        if False:\n', 1)),
@@ -5725,7 +5726,8 @@ GROUPS = {
          sub(ENGINES, "            return 'true' if modifiers.get(name, 0) else 'false'\n",
              "            return '1' if modifiers.get(name, 0) else '0'\n", 1)),
         ('a WMMA lowered off HIP',
-         sub(ENGINES, "    if env.family not in ('hip', ''):\n        raise IRError(f'a WMMA on",
+         sub(ENGINES, '    if env.family and env.family not in AMD_FAMILIES:\n'
+             "        raise IRError(f'a WMMA on",
              "    if False:\n        raise IRError(f'a WMMA on", 1)),
         ("RDNA's WMMA spelled as gfx1250's",
          sub(ENGINES, "def _lower_wmma(s: Stmt, env: Spelling) -> Lowered:\n    return _wmma_call(s, env, gfx1250=False)\n",
