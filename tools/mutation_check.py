@@ -4729,8 +4729,11 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))\n',
              '    return ((0, 0), (0, 1)) if stage.split else ((0, 0),)\n', 1)),
         ('no wait for the products',
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "                    b.matrix_wait('wgmma', 0, registers=own, reads=bs)\n",
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "    b.matrix_wait('wgmma', keep, registers=registers,\n                  reads=[x for _, reads in done for x in reads])\n",
              '', 1)),
+        ('D read with its last products in flight',
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            _wgmma_retire(b, flight, 0, accs)\n',
+             '            _wgmma_retire(b, flight, 1, accs)\n', 1)),
         ('no fence of the registers',
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "                b.fence(FenceKind.REGISTERS, engine='wgmma', registers=own)\n",
              '', 1)),
@@ -4820,8 +4823,8 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n',
              '                          a_column=(upper_at, lower_at)[ia] + kt)\n', 1)),
         ("no barrier behind wgmma's chunk",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            b.fence(FenceKind.PROXY)\n            b.barrier(Participants.BLOCK)\n        # D: register',
-             '            b.fence(FenceKind.PROXY)\n        # D: register', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            b.fence(FenceKind.PROXY)\n            b.barrier(Participants.BLOCK)\n        if flight:',
+             '            b.fence(FenceKind.PROXY)\n        if flight:', 1)),
     ]),
     # The multi-element layout (`generators.element_group`, `compute.
     # multi_element`, `Trip.ELEMENT_GROUP`): the classification and its

@@ -189,6 +189,19 @@ def parse_multi_element_values(text: str) -> str:
 MATRIX_ENGINE = ('auto', 'mma_sync')
 
 
+#: What `Options.wgmma_pending` takes: the groups of products a step of K
+#: may leave in flight, each holding its A in registers of its own.
+WGMMA_PENDING = (0, 1, 2)
+
+
+def parse_wgmma_pending(text: str) -> int:
+  """0, 1 or 2 (`Options.wgmma_pending`)."""
+  value = int(text.strip())
+  if value not in WGMMA_PENDING:
+    raise ValueError(f'wgmma_pending is one of {WGMMA_PENDING}, not {value}')
+  return value
+
+
 def parse_matrix_engine(text: str) -> str:
   """`auto` or `mma_sync` (`Options.matrix_engine`)."""
   value = str(text).strip().lower()
@@ -2541,6 +2554,21 @@ declare('matrix_engine',
             'wgmma against 10.75 on mma_sync, on a GB200 11.06 on tcgen05 '
             'against 9.68 -- and 62.79 against 38.53 at o8.  F64 is DMMA\'s '
             'either way: neither engine has it.')
+
+declare('wgmma_pending',
+        default=0,
+        env='TF_WGMMA_PENDING',
+        parse=parse_wgmma_pending,
+        doc='The groups of wgmma products the multi-element tiling leaves in '
+            'flight behind a step of K (`multi_element._wgmma`, '
+            '`wgmma.wait_group`): 0 waits for each step before the next one '
+            'loads its A; 1 or 2 load the next steps\' A into registers of '
+            'their own while the last ones\' products run, and wait for the '
+            'step that many behind -- where B streams through the ring, the '
+            'chunk that many behind, whose slot the next copy may not write '
+            'before.  A search parameter: on a GH200 the wait of each step is '
+            'about 5 % of the o6 volume\'s time, and each group in flight '
+            'holds its A, eight registers a thread.')
 
 declare('mma_prefetch',
         default=None,

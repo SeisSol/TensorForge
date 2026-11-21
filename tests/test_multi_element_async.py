@@ -235,6 +235,48 @@ def test_the_wgmma_kernel():
     assert 'mma.sync' not in src
 
 
+@pytest.mark.parametrize('pending', [1, 2])
+def test_the_pipelined_wgmma_kernel(pending):
+    """`wgmma_pending`: the same 45 products, a fence and a commit a step
+    of K, but each step's wait leaves the `pending` latest groups in
+    flight -- 15 steps, so 15 - pending waits of their own and the last
+    for all of them, ahead of D."""
+    src = _kernel('sm_90a', wgmma_pending=pending).get_kernel()
+    assert src.count('wgmma.mma_async') == 45
+    assert src.count('tensorforge::ldmatrixX4') == 15
+    assert src.count('tensorforge::wgmmaFence()') == 15
+    assert src.count('tensorforge::wgmmaCommit()') == 15
+    assert src.count(f'tensorforge::wgmmaWait<{pending}>()') == 15 - pending
+    assert src.count('tensorforge::wgmmaWait<0>()') == 1
+    assert 'mma.sync' not in src
+
+
+def test_nothing_pending_is_the_kernel_as_it_was():
+    """`wgmma_pending` 0, the default, writes the kernel of a wait a step,
+    to the byte."""
+    def body(gen):
+        text = re.sub(r'kernel_kernel_[0-9a-f]+', 'kernel', gen.get_kernel())
+        return re.sub(r'// options: .*', '', text)
+    assert body(_kernel('sm_90a', wgmma_pending=0)) == body(_kernel('sm_90a'))
+
+
+def test_the_ring_waits_for_each_chunk_whatever_is_pending(monkeypatch):
+    """The block's next copy writes the slot the chunk before read, which
+    every warpgroup has to have retired: a chunk waits for itself."""
+    _streaming(monkeypatch, 'sm_90a')
+    src = _kernel('sm_90a', wgmma_pending=1).get_kernel()
+    assert src.count('tensorforge::wgmmaWait<0>()') == 15
+    assert 'tensorforge::wgmmaWait<1>()' not in src
+
+
+def test_wgmma_pending_takes_what_a_thread_has_registers_for():
+    from tensorforge.common.options import parse_wgmma_pending
+    assert [parse_wgmma_pending(t) for t in ('0', '1', '2')] == [0, 1, 2]
+    for text in ('3', '-1'):
+        with pytest.raises(ValueError):
+            parse_wgmma_pending(text)
+
+
 def test_the_tcgen05_kernel():
     """45 products, one commit and one wait a product of the step, the
     tensor memory allocated and freed, A stored in it -- 30 stores, both
@@ -294,7 +336,25 @@ def test_every_element_of_two_trips_on_the_oracle(shape, arch, monkeypatch):
     _two_trips(shape, arch, monkeypatch)
 
 
-def _two_trips(shape, arch, monkeypatch, streamed=False):
+@pytest.mark.parametrize('pending', [1, 2])
+@pytest.mark.parametrize('shape', ['volume', 'chain', 'reuse', 'assign',
+                                   'window'])
+def test_the_pipelined_steps_compute_on_the_oracle(shape, pending):
+    """With groups left in flight, the oracle checks every product's A
+    registers and B slots unchanged where the group retires, and D read
+    only behind the last wait."""
+    for alias, error in me._oracle_errors(
+            shape, 's', 'sm_90a', {**AUTO, 'wgmma_pending': pending}).items():
+        assert error <= 1e-6, (alias, error)
+
+
+@pytest.mark.parametrize('shape', ['volume', 'reuse'])
+def test_the_pipelined_steps_over_two_trips_on_the_oracle(shape,
+                                                          monkeypatch):
+    _two_trips(shape, 'sm_90a', monkeypatch, wgmma_pending=1)
+
+
+def _two_trips(shape, arch, monkeypatch, streamed=False, **options):
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
@@ -303,7 +363,7 @@ def _two_trips(shape, arch, monkeypatch, streamed=False):
     monkeypatch.setattr(eg, 'DEFAULT_ELEMENTS', group)
     if streamed:
         _streaming(monkeypatch, arch, shape, 4)
-    gen = _kernel(arch, shape, 4, 's')
+    gen = _kernel(arch, shape, 4, 's', **options)
     built = gen.built._element_group
     assert built.elements == group
     assert all(s.lowering in eg.ASYNC_LOWERINGS for s in built.section.steps
@@ -388,10 +448,11 @@ def _nvcc_builds(arch):
     return found
 
 
-def _sass(arch, tmp_path, shape='volume', order=6):
+def _sass(arch, tmp_path, shape='volume', order=6, **options):
     nvcc = _nvcc_builds(arch)
-    gen = _kernel(arch, shape, order, 's')
-    context = me._context(arch, 's', multi_element='force', **AUTO)
+    gen = _kernel(arch, shape, order, 's', **options)
+    context = me._context(arch, 's', multi_element='force',
+                          **{**AUTO, **options})
     headers = list(context.target.headers()) + list(gen.get_helper_headers())
     src = tmp_path / 'kernel.cu'
     src.write_text(''.join(f'#include "{h}"\n' for h in headers)
@@ -459,6 +520,28 @@ def test_the_section_computes_on_the_gpu(shape, order, target, cache_root,
         INPUT_TRANSFORM=me._known_zeros(me._descrs(shape, order, 's')),
         descr_list=lambda: me._descrs(shape, order, 's'),
         reference=me._reference(me._descrs(shape, order, 's')))
+    result = run_case(case, special, cache_root, tensorforge_include)
+    assert result.passed, (result.max_abs_err, result.max_rel_err,
+                           result.detail)
+
+
+@pytest.mark.parametrize('shape', ['volume', 'chain'])
+def test_the_pipelined_steps_compute_on_the_gpu(shape, target, cache_root,
+                                                tensorforge_include):
+    """`wgmma_pending` 1 on a GH200: the o6 volume and the chain against
+    NumPy, as `test_the_section_computes_on_the_gpu` runs them."""
+    if target.backend != 'cuda' or target.arch != 'sm_90':
+        pytest.skip('no GPU with wgmma')
+    from harness.runner import run_case
+    special = dataclasses.replace(target, arch='sm_90a')
+    _nvcc_builds(special.arch)
+    case = types.SimpleNamespace(
+        NAME=f'multi_element_pipelined_{shape}_o6s',
+        DTYPE=Datatype.F32, BATCH=4099, TOL=(1e-4, 1e-4),
+        OPTIONS={'multi_element': 'force', 'wgmma_pending': 1, **AUTO},
+        INPUT_TRANSFORM=me._known_zeros(me._descrs(shape, 6, 's')),
+        descr_list=lambda: me._descrs(shape, 6, 's'),
+        reference=me._reference(me._descrs(shape, 6, 's')))
     result = run_case(case, special, cache_root, tensorforge_include)
     assert result.passed, (result.max_abs_err, result.max_rel_err,
                            result.detail)
@@ -544,6 +627,16 @@ def test_the_ring_over_two_trips_on_the_oracle(shape, arch, monkeypatch):
     check at the retirement refuses, and an access a barrier does not
     order a race."""
     _two_trips(shape, arch, monkeypatch, streamed=True)
+
+
+def test_compiled_pipelined_each_product_is_one_hgmma_and_the_wait_keeps_one(
+        tmp_path):
+    """ptxas keeps the pipeline: 45 HGMMA, the steps' waits leave one
+    group in flight (`DEPBAR.LE gsb0, 0x1`) and the last none."""
+    sass = _sass('sm_90a', tmp_path, wgmma_pending=1)
+    assert _count(sass, 'HGMMA') == 45
+    waits = re.findall(r'WARPGROUP\.DEPBAR\.LE gsb0, (0x\d)', sass)
+    assert sorted(waits) == ['0x0'] + ['0x1'] * 14
 
 
 @pytest.mark.parametrize('arch,instruction', [('sm_90a', 'HGMMA'),

@@ -1470,14 +1470,21 @@ def _wgmma(trip, step) -> None:
     the product's stage in the canonical K-major order, its halves through
     two descriptors.  A step of K is the fence of the registers, the three
     products (`TF32_TERMS`), the commit and the wait for the group: the
-    next step's A rewrites registers the products read.
+    next step's A rewrites registers the products read.  Or, as
+    `Options.wgmma_pending` asks, the wait leaves that many of the latest
+    groups in flight: each step's A is in registers of its own, so the
+    next step loads and splits its A while the last one's products run,
+    and a wait retires the steps that many behind -- their A may be
+    written again behind it -- and the last one, D's.
 
     Where B is streamed (`_pieces`), the first chunk is copied ahead; a
     chunk's steps of K take their A into registers of their own, and one
     commit closes them; while the engine multiplies, the block converts
     the next chunk into the other slot -- last read by the chunk before,
     which its wait retired -- then the wait, the fence of the async proxy
-    and the block's barrier.
+    and the block's barrier.  A chunk waits for itself whatever
+    `wgmma_pending` says: the block's next copy writes the slot the chunk
+    before read, which every warpgroup has to have retired.
 
     The tile loop runs as often in every warpgroup -- the collective's
     arrival is the block's, a multiplication being a warp -- so that a
@@ -1528,6 +1535,11 @@ def _wgmma(trip, step) -> None:
         accs = [b.declare(fp, hint='c', uniform=Uniformity.LANE)
                 for _ in range(n // 2)]
         pieces, copy = _pieces(trip, step)
+        # The groups committed and not retired, oldest first: the A
+        # registers each read, and its descriptors.
+        flight = []
+        pending = (trip.context.get_user_options().wgmma_pending
+                   if copy is None else 0)
         if copy is not None:
             copy(0)
             b.fence(FenceKind.PROXY)
@@ -1556,7 +1568,9 @@ def _wgmma(trip, step) -> None:
                     first = False
                 if copy is None:
                     b.commit_group('wgmma')
-                    b.matrix_wait('wgmma', 0, registers=own, reads=bs)
+                    flight.append((halves[0] + halves[1], bs))
+                    if len(flight) > pending:
+                        flight = _wgmma_retire(b, flight, pending, accs)
                     continue
                 registers += halves[0] + halves[1]
                 reads += bs
@@ -1568,6 +1582,8 @@ def _wgmma(trip, step) -> None:
             b.matrix_wait('wgmma', 0, registers=registers, reads=reads)
             b.fence(FenceKind.PROXY)
             b.barrier(Participants.BLOCK)
+        if flight:
+            _wgmma_retire(b, flight, 0, accs)
         # D: register `i` of the lane is row `16 w + g + 8 ((i % 4) / 2)`,
         # column `8 (i / 4) + 2 t + i % 2` (PTX's D of m64nN).
         for i in range(n // 2):
@@ -1583,6 +1599,20 @@ def _wgmma(trip, step) -> None:
 #: Columns a warp loads of tensor memory at once in the epilogue: D's row
 #: a thread, a few of its columns live at a time.
 TMEM_CHUNK = 32
+
+
+def _wgmma_retire(b, flight, keep: int, accs) -> list:
+    """The wait that leaves the `keep` latest groups of `flight` in flight
+    (`wgmma.wait_group`): the A registers and the descriptors of the ones
+    it retires may be written again behind it, and where it retires all of
+    them, D's accumulators are valid.  The groups still in flight."""
+    done, rest = flight[:len(flight) - keep], flight[len(flight) - keep:]
+    registers = [r for regs, _ in done for r in regs]
+    if not keep:
+        registers = list(accs) + registers
+    b.matrix_wait('wgmma', keep, registers=registers,
+                  reads=[x for _, reads in done for x in reads])
+    return rest
 
 
 def _tcgen05(trip, step) -> None:
