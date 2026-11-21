@@ -673,7 +673,16 @@ def build(descr_factory, base: Context, candidate: Candidate,
     # the tuner does not stand aside when a geometry is given, so a trial that
     # kept `autotune` would open a walk of its own, once per trial, all the
     # way down.
-    ctx = candidate.context(base, autotune='off')
+    override = {'autotune': 'off'}
+    # Whole unless the candidate or the caller cuts it: on NVIDIA
+    # `fission='auto'` is the default (`Generator._decide_by_fetch`), and a
+    # trial that decided its own cut would probe once per trial and hand the
+    # tuner a cut it weighs itself (`FISSION_TWIN`).
+    if (str(base.target.hw.vendor).lower() == 'nvidia'
+            and 'fission' not in dict(base._asked_options.asked())
+            and 'fission' not in dict(candidate.options)):
+        override['fission'] = 0
+    ctx = candidate.context(base, **override)
     try:
         gen = generate(descr_factory(), ctx, candidate.lanes)
     except Exception as exc:

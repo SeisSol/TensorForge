@@ -101,8 +101,8 @@ def test_auto_on_intel_cuts_in_two_past_the_code_measured_there():
 
 @pytest.mark.parametrize('arch,backend,expected', [
     ('pvc', 'oneapi', 'auto'), ('pvc', 'esimd', 0), ('pvc', 'acpp', 0),
-    ('sm_90', 'cuda', 0), ('gfx942', 'hip', 0)])
-def test_auto_is_the_default_under_dpcpp_spmd_alone(arch, backend, expected):
+    ('sm_90', 'cuda', 'auto'), ('sm_86', 'cuda', 'auto'), ('gfx942', 'hip', 0)])
+def test_auto_is_the_default_under_dpcpp_spmd_and_cuda(arch, backend, expected):
     from tensorforge.common.basic_types import Datatype
     ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F64)
     assert ctx.get_user_options().fission == expected

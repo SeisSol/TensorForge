@@ -2130,9 +2130,11 @@ declare('k_unroll_max_tail',
             'its last two steps written out.')
 
 declare('fission',
-        rule=lambda target: ('auto' if (target.hw.vendor == 'intel'
-                                        and target.backend == 'oneapi'
-                                        and not target.explicit_simd)
+        rule=lambda target: ('auto' if ((target.hw.vendor == 'intel'
+                                         and target.backend == 'oneapi'
+                                         and not target.explicit_simd)
+                                        or (target.hw.vendor == 'nvidia'
+                                            and target.backend == 'cuda'))
                              else 0),
         env='TF_FISSION',
         parse=lambda text: 'auto' if text.strip() == 'auto' else int(text),
@@ -2146,15 +2148,25 @@ declare('fission',
             'element count.  What crosses a cut goes through memory: the '
             'piece after reads what the one before stored.  0 or 1 cuts '
             'nothing; a list with too few such points stays whole.  `auto` '
+            'on NVIDIA builds the kernel whole and keeps it so unless its '
+            'code is past the instruction cache; then it measures where the '
+            'code lies (a build cut at every legal point) and cuts into the '
+            'pieces whose loops fetch the least past the cache, counting what '
+            'the cut adds (`generator.plan_fission`), where that saves at '
+            'least `generator.FISSION_MIN_GAIN` -- SeisSol\'s order-8 '
+            'derivative and volume, not its orders 4 and 6.  Elsewhere `auto` '
             'cuts where the whole kernel\'s code is past one and a half '
             'times the instruction cache, into as few pieces as keep the '
             'largest under the share of the cache the part was measured at '
             '(`generator.FISSION_PIECE`); on a vendor whose parts state no '
             'cache, in two past the code measured there '
             '(`generator.FISSION_CODE`), and nowhere else.  `auto` by default '
-            'on Intel under DPC++\'s SPMD lowering: SeisSol\'s order-7 and '
-            'order-8 kernels it cuts 14 % faster (Max 1550), 0 everywhere '
-            'else.')
+            'under CUDA and on Intel under DPC++\'s SPMD lowering: SeisSol\'s '
+            'order-7 and order-8 kernels it cuts 14 % faster (Max 1550); on '
+            'GH200 the order-8 time derivative ran 35 % faster in double '
+            '(four pieces) and 49 % in single (five), the order-8 volume 29 % '
+            'in double (three) and 31 % in single (two) (Vista 1158567).  0 '
+            'everywhere else.')
 
 declare('fission_cut',
         default='flops',
