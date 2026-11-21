@@ -164,7 +164,8 @@ class CudaLexic(Lexic):
   def get_headers(self):
     return ["tensorforge_device/cuda.h", "cuda_pipeline.h"]
 
-  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None):
+  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None,
+                 valid=None):
     # The size is not only a count here.  Measured from what this toolchain
     # emits for sm_120: sixteen bytes lower to `cp.async.cg` and
     # `LDGSTS.E.BYPASS.128`, four and eight to `cp.async.ca`, which fills L1 on
@@ -175,6 +176,15 @@ class CudaLexic(Lexic):
     # global memory and zeroes the rest, and it stays on the bypass
     # (`LDGSTS.E.BYPASS.128.ZFILL`).  That is what lets a run whose length is
     # not a whole number of accesses be covered at sixteen anyway.
+    #
+    # A copy that fills (`valid`) takes the source size as a value: what it
+    # reads where the condition holds, zero where not.  Its own helper
+    # (`tensorforge::copyAsyncFill`): one `LDGSTS` with the source ignored
+    # under a predicate, where `__pipeline_memcpy_async`'s switch over a
+    # zero-fill it does not know is two (nvcc 13.4, sm_80, 2026-11-20).
+    if valid is not None:
+      return (f'tensorforge::copyAsyncFill<{nbytes}>({dst}, {src}, '
+              f'({valid}) ? {nbytes - zfill}u : 0u);')
     if zfill:
       return f'__pipeline_memcpy_async({dst}, {src}, {nbytes}, {zfill});'
     return f'__pipeline_memcpy_async({dst}, {src}, {nbytes});'

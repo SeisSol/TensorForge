@@ -45,7 +45,12 @@ asynchronous transfer names its engine and the kind it completes by
 (`engine`, `completes`), and the class `asyncmem` counts it in derives from
 that (`counter_of`).  Every transfer says how many bytes a lane moves
 (`width`), the cache policy where one is set (`cache`), and a block its
-`shape`.  The LDS-DMA's waits are TF's to write, on the counter
+`shape`.  A copy through an engine that fills (`TransferEngine.fill`:
+`cp.async`, whose source size is an operand) may end in the condition
+under which it reads (`Stmt.copy_valid`): issued by every lane it is
+for, it reads nothing where that fails and writes the fill, so it writes
+its destination whole and is no predicated copy to the passes.  The
+LDS-DMA's waits are TF's to write, on the counter
 (`waited_on`): the compiler places none in front of a read of what a copy
 wrote, and the instruction's one destination -- a base a wave, lane t's
 bytes t places past it -- is checked where the copy is written
@@ -384,6 +389,12 @@ class TransferEngine:
     #: it across the copy, merges two into one and drops a dead one, and a
     #: count that includes it can come out larger than what is in flight.
     one_to_one: bool = False
+    #: What a transfer through it writes where it reads nothing -- `zero`,
+    #: or None where it reads every byte it moves: a copy that fills
+    #: (`IRBuilder.copy_async`'s `valid`, `Stmt.copy_valid`) is issued by
+    #: every lane it is for, and where its condition fails moves no byte of
+    #: its source and this into its destination.
+    fill: Optional[str] = None
 
 
 TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
@@ -394,7 +405,9 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    'float4, a planar quad, a wide staging hop'),
     TransferEngine('cp_async', (Op.COPY_ASYNC,), Completion.GROUP,
                    'cp.async into shared memory, sm_80 and newer, counted in '
-                   'commit groups'),
+                   'commit groups; its source size, an operand, fills: zero '
+                   'reads nothing and writes zeros (PTX ISA, "cp.async")',
+                   fill='zero'),
     TransferEngine('lds_dma', (Op.COPY_ASYNC,), Completion.COUNTER,
                    "AMD's global_load_lds into the LDS (CDNA2/3), counted "
                    'in vmcnt one operation at a time; its waits are written '
@@ -489,6 +502,34 @@ def one_to_one(engine: Optional[str]) -> bool:
     may count (`TransferEngine.one_to_one`)."""
     found = TRANSFER_ENGINES.get(engine) if engine is not None else None
     return found is not None and found.one_to_one
+
+
+def fill_of(engine: Optional[str]) -> Optional[str]:
+    """What a copy through `engine` writes where it reads nothing
+    (`TransferEngine.fill`), or None where no copy through it fills."""
+    found = TRANSFER_ENGINES.get(engine) if engine is not None else None
+    return None if found is None else found.fill
+
+
+def fill_refusal(copy: Stmt) -> Optional[str]:
+    """Why `copy`, a copy that fills, is none its engine issues, or None.
+
+    Its engine fills, with what the copy says it writes (`fill`), and the
+    copy ends in the condition under which it reads -- a boolean value,
+    which every lane it is for evaluates for itself (`Stmt.copy_valid`)."""
+    fill = copy.attr('fill')
+    engine = copy.attr('engine')
+    if fill_of(engine) is None:
+        return (f'{engine} reads every byte it moves: no copy through it '
+                f'fills')
+    if fill != fill_of(engine):
+        return f'a fill of {fill!r}, where {engine} writes {fill_of(engine)!r}'
+    valid = copy.copy_valid
+    t = getattr(valid, 'type', None)
+    if not (isinstance(valid, Value) and getattr(t, 'length', 0) is None
+            and getattr(getattr(t, 'base', None), 'name', None) == 'BOOL'):
+        return f'it reads under {valid!r}, which is no boolean value'
+    return None
 
 
 def copy_engine(target: Any) -> str:
@@ -3614,4 +3655,5 @@ __all__ = [
     'MATRIX_TRANSFER_OPS', 'MATRIX_TRANSFER_SHAPE', 'MATRIX_TRANSFER_SM',
     'matrix_load', 'matrix_registers', 'matrix_store',
     'matrix_transfer_bits', 'matrix_transfer_refusal', 'units_of',
+    'fill_of', 'fill_refusal',
 ]

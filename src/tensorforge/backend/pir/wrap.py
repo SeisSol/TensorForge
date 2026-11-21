@@ -607,9 +607,10 @@ class _Loop(ElementLoop):
         elif alloc.attr('init') not in (None, '', '{}'):
             raise Refusal('the buffer is declared with an initializer, which '
                           'a declaration ahead of the loop would apply once')
-        if any(x.predicate is not None for x in walk_stmts(tuple(t.pieces))
-               if x.op is Op.COPY_ASYNC):
-            raise Refusal('a copy of the transfer is predicated already')
+        # A copy under a predicate of its own -- a ragged hop's lanes -- is
+        # taken with it: the predicate is an operand, computed again for the
+        # element the copy is for, and held together with the element's own
+        # guard where there is one (`_Rewrite._guarded`).
 
         mine = {id(x) for x in walk_stmts(tuple(t.stmts))}
         tokens = t.tokens()
@@ -775,7 +776,9 @@ class _Rewrite:
         groups in flight can tell, and the loop carrying its token would lose
         the steady state its waits are counted against.  The predicate is a
         branch per copy all the same, so a pointer is still not followed
-        where it may not be.
+        where it may not be.  A copy under a predicate of its own takes both,
+        their conjunction computed right ahead of it, where its own is
+        defined.
 
         A transfer into registers takes it into the predicate of each of its
         loads (`_predicated`): a masked element loads zeros it never reads,
@@ -795,15 +798,20 @@ class _Rewrite:
                     b.emit(s)
             return list(b.finish())
 
-        def predicate(s: Stmt) -> Stmt:
+        def predicate(s: Stmt) -> List[Stmt]:
             if s.op is Op.COPY_ASYNC:
-                return replace(s, predicate=cond)
+                if s.predicate is None:
+                    return [replace(s, predicate=cond)]
+                b = self.l.scratch()
+                both = b.op('and', BOOL, cond, s.predicate, hint='g')
+                return list(b.finish()) + [replace(s, predicate=both)]
             if s.regions:
-                return replace(s, regions=tuple(
-                    replace(r, body=tuple(predicate(x) for x in r.body))
-                    for r in s.regions))
-            return s
-        return [predicate(s) for s in stmts]
+                return [replace(s, regions=tuple(
+                    replace(r, body=tuple(x for y in r.body
+                                          for x in predicate(y)))
+                    for r in s.regions))]
+            return [s]
+        return [x for s in stmts for x in predicate(s)]
 
     def _predicated(self, stmts: List[Stmt],
                     cond: Value) -> Optional[List[Stmt]]:

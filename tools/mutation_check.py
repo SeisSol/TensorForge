@@ -3771,8 +3771,8 @@ GROUPS = {
              "_ASYNC_LDS_ELEMENT = {1: 'char', 4: 'int', 8: 'long',\n", 1)),
         ('the emitter not saying which engine a copy is',
          sub(EMIT, "                    self._copy_bytes(s), zfill * elem,\n"
-                   "                    engine=s.attr('engine'))\n",
-             "                    self._copy_bytes(s), zfill * elem)\n", 1)),
+                   "                    engine=s.attr('engine'), **fills)\n",
+             "                    self._copy_bytes(s), zfill * elem, **fills)\n", 1)),
         ('the interpreter landing every copy at any wait',
          sub(ORACLE, '        return int(cls._WAIT_ASYNC.match(stmt).group(1))\n',
              '        return 0\n', 1)),
@@ -4933,8 +4933,12 @@ GROUPS = {
     # `Op.MATRIX_STORE`) -- the fragment layout they carry, what the
     # verifier holds them to, the text and the targets, the figures, the
     # builder, the oracle's model, and the helpers in `cuda.h`, the last
-    # two caught on the local GPU (sm_90 or newer).
-    'pircons': ('tests/test_matrix_transfers.py '
+    # two caught on the local GPU (sm_90 or newer).  Copies that fill
+    # (`copy_async`'s `valid`) and copies under a predicate of their own:
+    # the engines that fill, the operand, the builder, the text and the
+    # synchronous form, the oracle's model of both zero-fills, `pir.wrap`
+    # taking both, and the helper (on the local GPU, sm_80 or newer).
+    'pircons': ('tests/test_matrix_transfers.py tests/test_copy_fill.py '
                 'tests/test_multi_element.py::test_ldmatrix_is_a_declared_read_of_its_buffer', [
         ('the rows of a matrix on the lane bits of its words',
          sub(ENGINES, '    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))\n',
@@ -5028,6 +5032,60 @@ GROUPS = {
              '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n',
              '__device__ __forceinline__ void stmatrixX1(float *base, int index, float r0) {\n'
              '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000\n', 1)),
+        # Copies that fill, and copies under a predicate of their own.
+        ('cp.async filling with nothing',
+         sub(ENGINES, "                   fill='zero'),\n", "                   fill=None),\n", 1)),
+        ('a fill of another value than its engine writes accepted',
+         sub(ENGINES, '    if fill != fill_of(engine):\n', '    if False:\n', 1)),
+        ('a fill under a condition that is no boolean accepted',
+         sub(ENGINES, "            and getattr(getattr(t, 'base', None), 'name', None) == 'BOOL'):\n",
+             '            ):\n', 1)),
+        ('the condition of a fill taken for an index',
+         sub(CORE, "        end = len(self.args) - (self.attr('fill') is not None)\n",
+             '        end = len(self.args)\n', 1)),
+        ('a copy that fills read as one that does not',
+         sub(CORE, "        return self.args[-1] if self.attr('fill') is not None else None\n",
+             '        return None\n', 1)),
+        ('a fill through an engine without one built',
+         sub(BUILD, '            why = engines.fill_refusal(s)\n            if why is not None:\n'
+                    "                raise IRError(f'a copy that fills: {why}')\n",
+             '            why = engines.fill_refusal(s)\n            if False:\n'
+             "                raise IRError(f'a copy that fills: {why}')\n", 1)),
+        ('the zero-filled tail of a copy that fills read',
+         sub(Path('src/tensorforge/common/vm/lexic/cuda_lexic.py'),
+             "              f'({valid}) ? {nbytes - zfill}u : 0u);')\n",
+             "              f'({valid}) ? {nbytes}u : 0u);')\n", 1)),
+        ('a copy that fills reading where its condition fails',
+         sub(Path('src/tensorforge/common/vm/lexic/cuda_lexic.py'),
+             "              f'({valid}) ? {nbytes - zfill}u : 0u);')\n",
+             "              f'({valid}) ? 0u : {nbytes - zfill}u);')\n", 1)),
+        ('the copies of AMD filling',
+         sub(Path('src/tensorforge/common/vm/lexic/hip_lexic.py'),
+             '    if zfill or valid is not None:\n', '    if zfill:\n', 1)),
+        ('a synchronous copy that fills reading everywhere',
+         sub(EMIT, "                    w(f'{dst_b}[{dst_a}] = ({valid}) ? {src_b}[{src_a}] : '\n"
+                   "                      f'{zero};')\n",
+             "                    w(f'{dst_b}[{dst_a}] = {src_b}[{src_a}];')\n", 1)),
+        ('the oracle copying what a copy fills',
+         sub(ORACLE, '                dst[di + k] = src[si + k] if k < read // width else 0.0\n',
+             '                dst[di + k] = src[si + k]\n', 1)),
+        ("the oracle reading the pipeline's zero-filled tail",
+         sub(ORACLE, "            read = nbytes - int(self.ev(groups['zfill']))\n",
+             '            read = nbytes\n', 1)),
+        ("wrap dropping a copy's own predicate behind the flag",
+         sub(WRAP, "                both = b.op('and', BOOL, cond, s.predicate, hint='g')\n"
+                   '                return list(b.finish()) + [replace(s, predicate=both)]\n',
+             "                both = b.op('and', BOOL, cond, s.predicate, hint='g')\n"
+             '                return list(b.finish()) + [replace(s, predicate=cond)]\n', 1)),
+        ('wrap refusing a predicated copy again',
+         sub(WRAP, "        # guard where there is one (`_Rewrite._guarded`).\n\n",
+             "        # guard where there is one (`_Rewrite._guarded`).\n"
+             "        if any(x.predicate is not None for x in walk_stmts(tuple(t.pieces))\n"
+             "               if x.op is Op.COPY_ASYNC):\n"
+             "            raise Refusal('a copy of the transfer is predicated already')\n\n", 1)),
+        ('the helper of a copy that fills reading every byte',
+         sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'),
+             '                 "l"(from), "r"(srcBytes)\n', '                 "l"(from), "r"(16u)\n', 1)),
     ]),
 }
 

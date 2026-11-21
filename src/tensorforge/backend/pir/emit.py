@@ -27,7 +27,7 @@ from tensorforge.common.operation import Operation
 from . import block_reads, engines
 from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants, Qual, ScalarType, Stmt, TokenType, Uniformity,
-                   Value, def_use, retires, walk_stmts)
+                   Value, base_elem, def_use, retires, walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
@@ -1988,10 +1988,12 @@ class Emitter:
                                   'target without the buffer form of it')
             elif self._async_lex is not None:
                 elem = self.elem_size(s.copy_dst)
+                fills = ({} if s.copy_valid is None else
+                         {'valid': _unwrap(self.operand(s.copy_valid))})
                 text = self._async_lex.copy_async(
                     f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]',
                     self._copy_bytes(s), zfill * elem,
-                    engine=s.attr('engine'))
+                    engine=s.attr('engine'), **fills)
             if text is not None:
                 w(text)
             elif zfill:
@@ -2002,6 +2004,22 @@ class Emitter:
                 raise IRError(
                     f'a copy of {elems} elements with {zfill} zero-filled is '
                     f'not available on this target')
+            elif s.copy_valid is not None:
+                # A copy that fills, as a load and a store: the source read
+                # where the condition holds -- the conditional's other arm
+                # reads nothing, and the address need be none -- and the
+                # fill, zero, written where it does not.
+                valid = _unwrap(self.operand(s.copy_valid))
+                zero = self.zero(ScalarType(base_elem(s.copy_dst)
+                                            or Datatype.F32))
+                if elems == 1:
+                    w(f'{dst_b}[{dst_a}] = ({valid}) ? {src_b}[{src_a}] : '
+                      f'{zero};')
+                else:
+                    c = f'c{s.target[0].id}'
+                    w(f'for (int {c} = 0; {c} < {elems}; ++{c}) '
+                      f'{{ {dst_b}[({dst_a}) + {c}] = ({valid}) ? '
+                      f'{src_b}[({src_a}) + {c}] : {zero}; }}')
             elif elems == 1:
                 w(f'{dst_b}[{dst_a}] = {src_b}[{src_a}];')
             else:

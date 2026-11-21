@@ -511,6 +511,38 @@ template <int Depth = 1> struct ClusterLaunchCursor {
 
 #endif
 
+/// `Bytes` bytes -- 4, 8 or 16 -- into shared memory at `dst` by `cp.async`,
+/// of which the first `srcBytes` are read from global memory at `src` and the
+/// rest written as zeros: the instruction's source size (PTX ISA, "cp.async",
+/// `src-size`), held in a register, so one copy is a read where its condition
+/// holds and a fill where not (`pir.engines`, a copy that fills).  At zero it
+/// reads nothing, and `src` need be the address of nothing.  Sixteen bytes go
+/// past L1 (`.cg`), four and eight through it (`.ca`), as
+/// `__pipeline_memcpy_async` takes them, and the copy joins the thread's open
+/// group, which `__pipeline_commit` closes.  A device without the instruction
+/// traps.
+template <int Bytes>
+__device__ __forceinline__ void copyAsyncFill(void *dst, const void *src,
+                                              uint32_t srcBytes) {
+  static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
+                "cp.async moves 4, 8 or 16 bytes");
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  const uint32_t at = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
+  const size_t from = __cvta_generic_to_global(src);
+  if constexpr (Bytes == 16) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(at),
+                 "l"(from), "r"(srcBytes)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], %2, %3;\n" ::"r"(at),
+                 "l"(from), "n"(Bytes), "r"(srcBytes)
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// A window copied into shared memory by the tensor memory accelerator: one
 /// `cp.async.bulk` for the whole window, issued by one thread of the
 /// multiplication and completing on an mbarrier in shared memory, where

@@ -1297,8 +1297,10 @@ class Stmt:
         assert self.op == Op.EXIT
         return self.args[0]
 
-    # copy.async: args = (dst, src, *dst_index, *src_index); the split is in
-    # the `ndst` attribute so that the positional convention stays local.
+    # copy.async: args = (dst, src, *dst_index, *src_index[, valid]); the
+    # split is in the `ndst` attribute so that the positional convention
+    # stays local, and a copy that fills (`fill`) ends in the condition
+    # under which it reads its source (`copy_valid`).
 
     @property
     def copy_dst(self) -> Operand:
@@ -1318,7 +1320,17 @@ class Stmt:
     @property
     def copy_src_index(self) -> Tuple[Operand, ...]:
         assert self.op == Op.COPY_ASYNC
-        return self.args[2 + self.attr('ndst', 0):]
+        end = len(self.args) - (self.attr('fill') is not None)
+        return self.args[2 + self.attr('ndst', 0):end]
+
+    @property
+    def copy_valid(self) -> Optional[Operand]:
+        """Where a copy that fills (`fill`) reads its source: the condition
+        it ends in, under which it moves its bytes, and everywhere else
+        reads nothing and writes its fill (`IRBuilder.copy_async`).  None
+        for a copy that does not fill, which reads wherever it is issued."""
+        assert self.op == Op.COPY_ASYNC
+        return self.args[-1] if self.attr('fill') is not None else None
 
     @property
     def load_base(self) -> Operand:

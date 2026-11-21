@@ -94,10 +94,20 @@ _VEC_ASSIGN = re.compile(r'^\*\s*\([^)]*\)\s*&\s*\w+\s*\[.*\]\s*=')
 
 #: `__pipeline_memcpy_async(&dst[i], &src[j], N)`.  The transfer half of
 #: CUDA's pipeline primitives; the commit and the wait are the other half and
-#: move nothing.
+#: move nothing.  With a fourth argument, `Z`, the zero-filling form: `N - Z`
+#: bytes read, the last `Z` written as zeros.
 _ASYNC_COPY = re.compile(
     r'^__pipeline_memcpy_async\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
-    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*'
+    r'(?:,\s*(?P<zfill>.+?)\s*)?\)$')
+
+#: `tensorforge::copyAsyncFill<N>(&dst[i], &src[j], S)` (`cuda.h`): a copy
+#: that fills, `S` bytes read -- an expression, zero where its condition
+#: fails -- and the rest of the `N` written as zeros.
+_ASYNC_FILL = re.compile(
+    r'^tensorforge::copyAsyncFill\s*<\s*(?P<bytes>\d+)\s*>\s*\(\s*&\s*'
+    r'(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,\s*&\s*(?P<src>\w+)\s*'
+    r'\[(?P<si>[^\]]*)\]\s*,\s*(?P<read>.+)\)$')
 
 #: AMD's LDS-DMA as `HipLexic.copy_async` writes it, `global_load_lds` from
 #: `&src[i]` in global memory to `&dst[j]` in the LDS, `N` bytes a lane.
@@ -2357,7 +2367,11 @@ class Interp:
                 self.run(node[1])
 
     def _async_copy(self, cp, stmt: str) -> None:
-        """Move `bytes` worth of elements from one buffer to another."""
+        """Move `bytes` worth of elements from one buffer to another: those
+        the copy reads, and zeros for the rest -- the last `zfill` bytes of
+        the pipeline's four-argument form, everything past the `read` bytes
+        of a copy that fills (`tensorforge::copyAsyncFill`), which at zero
+        reads nothing of its source, wherever it points."""
         dst = self.env.get(cp.group('dst'))
         src = self.env.get(cp.group('src'))
         if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
@@ -2367,6 +2381,16 @@ class Interp:
         if width is None or nbytes % width:
             raise Abort(f'async copy of {nbytes} B into {cp.group("dst")!r}, '
                         f'whose element size is {width!r}: {stmt!r}')
+        groups = cp.groupdict()
+        if groups.get('read') is not None:
+            read = int(self.ev(groups['read']))
+        elif groups.get('zfill') is not None:
+            read = nbytes - int(self.ev(groups['zfill']))
+        else:
+            read = nbytes
+        if not 0 <= read <= nbytes or read % width:
+            raise Abort(f'async copy reading {read} of {nbytes} B, in '
+                        f'elements of {width}: {stmt!r}')
         di = int(self.ev(cp.group('di')))
         si = int(self.ev(cp.group('si')))
         # In flight until the wait that retires it, for `Races`; the values
@@ -2376,7 +2400,7 @@ class Interp:
             tracker.issuing = True
         try:
             for k in range(nbytes // width):
-                dst[di + k] = src[si + k]
+                dst[di + k] = src[si + k] if k < read // width else 0.0
         finally:
             if tracker is not None:
                 tracker.issuing = False
@@ -2918,7 +2942,7 @@ class Interp:
             return
         if 'global_load_async_to_lds' in stmt:
             raise Abort(f'copy into the LDS not modeled: {stmt!r}')
-        cp = _ASYNC_COPY.match(stmt)
+        cp = _ASYNC_COPY.match(stmt) or _ASYNC_FILL.match(stmt)
         if cp:
             # The transfer half of the pipeline primitives.  It moves data, so
             # it is carried out here rather than left to the catch-all below
@@ -2933,10 +2957,10 @@ class Interp:
             # rounding of `cp.async` that no reader here can observe.
             self._async_copy(cp, stmt)
             return
-        if 'memcpy_async' in stmt:
-            # Another spelling -- the four-argument zero-fill form, say.
-            # Refused rather than swallowed: a transfer that quietly does
-            # nothing produces plausible numbers, as above.
+        if 'memcpy_async' in stmt or 'copyAsyncFill' in stmt:
+            # Another spelling.  Refused rather than swallowed: a transfer
+            # that quietly does nothing produces plausible numbers, as
+            # above.
             raise Abort(f'async copy not modeled: {stmt!r}')
         if (('pipeline' in stmt or '::' in stmt)
                 and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt

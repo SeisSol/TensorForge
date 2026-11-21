@@ -1893,6 +1893,7 @@ class IRBuilder:
                    src_space: Optional[MemSpace] = None,
                    predicate: Optional[Value] = None,
                    threads: Optional[int] = None,
+                   valid: Optional[Value] = None,
                    hint: str = 'cp') -> Value:
         """Issue an asynchronous copy ``src -> dst``; returns its token.
 
@@ -1932,6 +1933,17 @@ class IRBuilder:
         `threads` are the lanes of the multiplication issuing it, which an
         engine whose destination is one base a wave has to know of
         (`engines.lds_dma_refusal`).
+
+        ``valid`` makes it a copy that fills: issued by every lane the
+        predicate leaves in, it moves its bytes where `valid` holds, and
+        where it does not reads nothing of its source -- whose address need
+        not be one -- and writes its engine's fill into the destination
+        (`engines.TransferEngine.fill`: zeros, `cp.async`'s source size of
+        zero).  So the destination is written whole either way, by the one
+        transfer: a tile's padding or a box past its operand's end comes out
+        zero without a store of its own, and the copy is no predicated one
+        to the passes, which take it a trip ahead as any other
+        (`pir.wrap`).  Refused for an engine that reads every byte it moves.
         """
         dst_space = dst_space if dst_space is not None else self._space_of(dst)
         src_space = src_space if src_space is not None else self._space_of(src)
@@ -1970,12 +1982,22 @@ class IRBuilder:
             attrs += (('cache', cache),)
         if threads is not None and engines.waited_on(engine) is not None:
             attrs += (('threads', int(threads)),)
-        self._emit_op(Op.COPY_ASYNC, (tok,),
-                      (dst, src) + tuple(dst_index) + tuple(src_index),
-                      pure=False, movable=True, predicate=predicate,
-                      effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
-                      accesses=accesses,
-                      attrs=attrs + ((('zfill', zfill),) if zfill else ()))
+        if zfill:
+            attrs += (('zfill', zfill),)
+        fills = ()
+        if valid is not None:
+            attrs += (('fill', engines.fill_of(engine)),)
+            fills = (valid,)
+        s = Stmt(op=Op.COPY_ASYNC, target=(tok,),
+                 args=(dst, src) + tuple(dst_index) + tuple(src_index) + fills,
+                 pure=False, movable=True, predicate=predicate,
+                 effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                 accesses=accesses, attrs=attrs)
+        if valid is not None:
+            why = engines.fill_refusal(s)
+            if why is not None:
+                raise IRError(f'a copy that fills: {why}')
+        self.emit(s)
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
         self._token_engine[tok.id] = engine

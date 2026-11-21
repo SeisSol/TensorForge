@@ -567,6 +567,10 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 diag.extend(verify_tensor(s))
             if s.attr('form') == 'buffer':
                 diag.extend(verify_buffer(s))
+            if s.attr('fill') is not None:
+                why = engines.fill_refusal(s)
+                if why is not None:
+                    diag.append(f'copy.async: a copy that fills: {why}')
 
         elif s.op == Op.TENSOR_DESC:
             diag.extend(verify_tensor(s))

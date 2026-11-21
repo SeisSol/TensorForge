@@ -260,10 +260,11 @@ class HipLexic(CudaLexic):
   # and gfx1251 their copy into the LDS plus an explicit asynccnt wait
   # (`engine` 'async_lds'), each behind a fence of the compiler alone
   # (`_async_to_lds`): two lines.
-  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None):
+  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None,
+                 valid=None):
     if self._underlying_hardware != 'amd':
-      return super().copy_async(dst, src, nbytes, zfill, engine)
-    if zfill:
+      return super().copy_async(dst, src, nbytes, zfill, engine, valid)
+    if zfill or valid is not None:
       # `global_load_lds` has no src-size operand: it moves `nbytes` and reads
       # them.  Refused rather than approximated, so the caller narrows.
       # Nor has gfx1250's copy.
