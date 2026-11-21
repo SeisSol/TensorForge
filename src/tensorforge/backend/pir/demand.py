@@ -29,6 +29,7 @@ import functools
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from . import engines
 from .core import MemSpace, Op, Stmt, Value
 from .flow import Flow
 
@@ -152,6 +153,11 @@ class Demand:
                 continue
             elif u.op == Op.CALL:
                 out |= self._called(u, v, env, depth, u.attr('callee'))
+            elif u.op == Op.RELAYOUT:
+                # The lanes its strategy's call reads, as the call it
+                # replaced read them (`engines.relayout_callee`).
+                out |= self._called(u, v, env, depth,
+                                    engines.relayout_callee(u))
             elif u.op == Op.RAWEXPR and u.attr('crosslane'):
                 # The same primitives, spelled as text around the operand,
                 # and SYCL's broadcasts.

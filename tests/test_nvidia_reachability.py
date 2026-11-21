@@ -61,6 +61,12 @@ KEPT_UNREACHABLE: dict = {
     # `tests/test_wgmma.py` holds them to PTX's maps meanwhile.
     'wgmma_a_fragment_bits': 'the A layout of wgmma, for the tiling on sm_90a',
     'wgmma_d_fragment_bits': 'the D layout of wgmma, for the tiling on sm_90a',
+    # mma.sync's D read as the next product's A with no instruction, its K
+    # relabeled (`engines.relabeling`): the hand-off between the orders of
+    # the derivative's tiling, which no path takes yet; `tests/
+    # test_relayout.py` holds them to the relabel and runs a chain through it.
+    'chained_a_bits': "A's layout over D's columns, for the D-to-A hand-off",
+    'd_to_a': 'the relabel of D into the next A, for the D-to-A hand-off',
 }
 
 

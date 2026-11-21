@@ -409,6 +409,46 @@ def wgmma_a_fragment_bits() -> BitLayout:
     return BitLayout((rows, cols))
 
 
+def chained_a_bits(d_atom, a_atom) -> BitLayout:
+    """The A fragments of `a_atom` over the columns of a D tile of `d_atom`
+    -- the next product of a chain, its K the D's `n` columns: in k-blocks
+    of `a_atom.k`, each block's registers behind the last block's
+    (`a_fragment_bits`).  What D is held to where it is handed on as A
+    (`d_to_a`)."""
+    if d_atom.m != a_atom.m or d_atom.n % a_atom.k:
+        raise InternalError(f'the D of {d_atom.name} is no A of '
+                            f'{a_atom.name}: {d_atom.m} x {d_atom.n} over '
+                            f'k-blocks of {a_atom.k}')
+    rows, cols = a_fragment_bits(a_atom).axes
+    regs = (a_atom.m // 8) * (a_atom.k // 4)
+    blocks = d_atom.n // a_atom.k
+    cols = cols + tuple(Bit(Place.SLOT, regs << b)
+                        for b in range((blocks - 1).bit_length()))
+    return BitLayout((rows, cols))
+
+
+def d_to_a(d_atom, a_atom):
+    """How the accumulators of `d_atom` are the A fragments of the next
+    product of `a_atom`, with no instruction: `(relabel, order, layouts)`
+    -- the relabel of the indices (row, column) of D that A reads them
+    under, so that B's K rows are relabeled to match; A's registers as D's
+    in `order`; and the layouts a relabel op states (`IRBuilder.relabel`)
+    -- or None where no relabel does it (`engines.relabeling`).
+
+    mma.sync's D of m16n8 is the A of m16n8k8 over TF32 and of two
+    m16n8k4 over FP64 so, `(c0, c2, c1, c3)`, and m8n8's that of two
+    m8n8k4, `(c0, c1)`: in each, column `2t + b` of D is column `t + 4b`
+    of A (`d-to-a-is-a-column-relabel`, verified on sm_120)."""
+    from tensorforge.backend.pir import engines
+    source = d_fragment_bits(d_atom)
+    target = chained_a_bits(d_atom, a_atom)
+    found = engines.relabeling(source, target)
+    if found is None:
+        return None
+    relabel, order = found
+    return relabel, order, (source, target, relabel)
+
+
 def _fragment_cells(atom, threads: int = 32, bits=None):
     """`a_fragment_bits` inverted: which cell of a tile each slot and lane
     holds.

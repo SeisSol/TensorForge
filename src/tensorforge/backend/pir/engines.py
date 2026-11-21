@@ -101,6 +101,8 @@ What this increment keeps, on purpose:
 
 from __future__ import annotations
 
+import itertools
+import string
 from dataclasses import dataclass
 from enum import Enum
 from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
@@ -1180,6 +1182,286 @@ def matrix_transfer_refusal(s: Stmt) -> Optional[str]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Relayout: registers brought from one distribution over the lanes to another
+# --------------------------------------------------------------------------- #
+
+#: The backend families AMD's code generation runs under: HIP, and SYCL
+#: compiled for AMD (AdaptiveCpp's gfx targets), which writes the same
+#: calls and builtins.
+AMD_FAMILIES = ('hip', 'sycl')
+
+#: The forms a relayout is written in (`RelayoutStrategy.form`): a value of a
+#: value (`value`), returned by what it is written as; registers written
+#: through references (`in_place`), declared ahead of it -- the transposes
+#: of AMD's quads and sixteens, whose outputs are the first `written`
+#: operands; and registers renamed (`relabel`), each result a register the
+#: source holds already, which writes no instruction.
+RELAYOUT_FORMS = ('value', 'in_place', 'relabel')
+
+
+def _xlane(params: Mapping) -> Optional[str]:
+    return 'xlane'
+
+
+def _xlane_wide(params: Mapping) -> Optional[str]:
+    return 'xlane.wide'
+
+
+def _broadcast_pipe(params: Mapping) -> Optional[str]:
+    """A broadcast over a block wider than a row of sixteen lanes crosses
+    the rows (`emit._crosslane_category`, `analysis.pipeline`)."""
+    return 'xlane.wide' if int(params['threads']) > 16 else 'xlane'
+
+
+def _no_issue(params: Mapping) -> Optional[str]:
+    return None
+
+
+@dataclass(frozen=True)
+class RelayoutStrategy:
+    """One way of bringing registers from the distribution over the lanes
+    they have to another (`Op.RELAYOUT`): the instruction it is written as,
+    what it costs, and which lanes it reads.
+
+    `families` are the backends it is written for (`family`); `form` how
+    (`RELAYOUT_FORMS`); `callee` the function it is written as, a template
+    over its parameters (`params`) -- whose lanes `pir.demand` reads off
+    it, as it reads a call's (`demand.lane_map`); `units` and `pipe` what
+    it adds to the code count and the issue mix -- the figures the calls
+    it replaced were counted as.  `lossy` where the result holds fewer
+    distinct elements than the source, a sub-block repeated.
+
+    Which strategy closes a gap between two layouts is the target's
+    question (`amd.relayout.find_relayout`, which searches AMD's rows; a
+    relabel where the two agree but for the registers, `relabel_order`)."""
+
+    name: str
+    families: Tuple[str, ...]
+    form: str
+    callee: Optional[str] = None
+    pipe: Callable[[Mapping], Optional[str]] = _xlane
+    units: int = 1
+    lossy: bool = False
+    doc: str = ''
+
+    def spelled(self, params: Mapping) -> str:
+        """The function a relayout of these parameters is written as."""
+        return self.callee.format(**dict(params))
+
+    @property
+    def fields(self) -> Tuple[str, ...]:
+        """The parameters its callee names: what tells two relayouts of it
+        apart, as the text of the call they were did."""
+        if self.callee is None:
+            return ()
+        return tuple(name for _, name, _, _ in
+                     string.Formatter().parse(self.callee) if name)
+
+
+RELAYOUT_STRATEGIES: Dict[str, RelayoutStrategy] = {r.name: r for r in (
+    RelayoutStrategy(
+        'broadcast', AMD_FAMILIES, 'value',
+        'tensorforge::broadcast<{threads}, {step}, {lane}>',
+        pipe=_broadcast_pipe, lossy=True,
+        doc="AMD's DPP broadcast (`hip.h`): sub-block `lane` of `step` "
+            'lanes, repeated over each block of `threads`'),
+    RelayoutStrategy(
+        'movdpp16', AMD_FAMILIES, 'value', 'tensorforge::movdpp16<{row}>',
+        lossy=True,
+        doc="AMD's DPP row share: lane `row` of each row of sixteen"),
+    RelayoutStrategy(
+        'movdpp16_kept', AMD_FAMILIES, 'value',
+        'tensorforge::movdpp16Kept<{row}>', lossy=True,
+        doc='the row share, kept where it is issued (`hip.h`)'),
+    RelayoutStrategy(
+        'transpose4x4', AMD_FAMILIES, 'in_place', 'tensorforge::transpose4x4b32',
+        doc='the 4x4 transpose of (register, lane % 4) into four registers '
+            'declared ahead of it'),
+    RelayoutStrategy(
+        'transpose4x4_fused', AMD_FAMILIES, 'in_place',
+        'tensorforge::transpose4x4b32Fused',
+        doc='the same exchange, its shuffle and selection fused '
+            '(`Options.amd_fused_transpose`)'),
+    RelayoutStrategy(
+        'transpose16x16', AMD_FAMILIES, 'in_place',
+        'tensorforge::transpose16x16b32',
+        doc='the 16x16 transpose of (register, lane % 16), in place on its '
+            'sixteen operands'),
+    RelayoutStrategy(
+        'relabel', ('cuda', 'hip', 'sycl', 'esimd', ''), 'relabel',
+        pipe=_no_issue, units=0,
+        doc='the registers renamed: each result a register the source holds '
+            'already, where the two layouts agree but for the order of the '
+            'registers (`relabel_order`) -- a D fragment read as the next '
+            "product's A, its K relabeled; written as copies the compiler "
+            'folds, no instruction'),
+    RelayoutStrategy(
+        'shfl', ('cuda',), 'value', 'tensorforge::gather<32>',
+        pipe=_xlane_wide,
+        doc="NVIDIA's warp shuffle (`SHFL.IDX`, `cuda.h`'s gather): each "
+            'lane the register of the lane its second operand names'),
+)}
+
+
+def relayout_strategy(s: Stmt) -> RelayoutStrategy:
+    """The strategy a `RELAYOUT` names."""
+    found = RELAYOUT_STRATEGIES.get(s.attr('strategy'))
+    if found is None:
+        raise IRError(f'a relayout by {s.attr("strategy")!r}; there are '
+                      f'{", ".join(sorted(RELAYOUT_STRATEGIES))}')
+    return found
+
+
+def relayout_callee(s: Stmt) -> Optional[str]:
+    """The function a `RELAYOUT` is written as, or None for one written as
+    no call (a relabel): what `pir.demand`'s lane maps and the issue mix
+    read, as they read a call's."""
+    strategy = relayout_strategy(s)
+    if strategy.callee is None:
+        return None
+    return strategy.spelled(dict(s.attr('params') or ()))
+
+
+def relabel_order(source: Any, target: Any,
+                  relabel: Optional[Sequence[Callable[[int], int]]] = None
+                  ) -> Optional[Tuple[int, ...]]:
+    """Which register of the source each register of the target is, where
+    the two layouts (`BitLayout`s over the same indices) put every element
+    in the same lane -- the registers renamed, no instruction -- or None
+    where some element would change lanes.
+
+    `relabel`, one function an index, renames the indices of the target:
+    element `(i, j)` of the source is element `(relabel[0](i), relabel[1]
+    (j))` of the target.  So a D fragment is the next product's A where B's
+    K rows are relabeled to match (`d-to-a-is-a-column-relabel`): mma.sync's
+    D of m16n8 and its A of m16n8k8 over TF32 differ by a rotation of a
+    column's three bits, which a relabel of K undoes."""
+    if len(source.axes) != len(target.axes):
+        return None
+    sizes = []
+    for bits_s, bits_t in zip(source.axes, target.axes):
+        if len(bits_s) != len(bits_t):
+            return None
+        sizes.append(1 << len(bits_s))
+    order: Dict[int, int] = {}
+    for index in itertools.product(*(range(n) for n in sizes)):
+        renamed = tuple(index) if relabel is None else tuple(
+            f(i) for f, i in zip(relabel, index))
+        if any(not 0 <= i < n for i, n in zip(renamed, sizes)):
+            return None
+        at_s = source.locate(*index)
+        at_t = target.locate(*renamed)
+        if at_s.lane != at_t.lane or at_s.element != at_t.element:
+            return None
+        if order.setdefault(at_t.slot, at_s.slot) != at_s.slot:
+            return None
+    slots = sorted(order)
+    if slots != list(range(len(slots))) or sorted(order.values()) != slots:
+        return None
+    return tuple(order[j] for j in slots)
+
+
+def relabeling(source: Any, target: Any
+               ) -> Optional[Tuple[Tuple[Callable[[int], int], ...],
+                                   Tuple[int, ...]]]:
+    """The relabel of the indices under which `target` holds every element
+    in the lane `source` holds it -- a permutation of each index's bits --
+    and the order of the registers then (`relabel_order`), or None where no
+    relabel does it.
+
+    A bit of an index that lies on a lane, or inside a vector register, has
+    to land on the same lane bit or vector bit in the target, of the same
+    index; a bit that picks the register may land on any register bit of
+    it.  So a gap between two layouts that is the registers alone, once the
+    indices are renamed, is closed with no instruction: what a consumer
+    reading the same values under the renamed indices -- B's K rows
+    relabeled to match -- takes as it stands.  mma.sync's D of m16n8 is
+    the A of the next m16n8k8 over TF32 that way, its column's low bit the
+    register's and its two higher the lane's, where A's two low bits are
+    the lane's and its high bit the register's (`d-to-a-is-a-column-
+    relabel`)."""
+    from tensorforge.backend.instructions.compute.bitlayout import Place
+    if len(source.axes) != len(target.axes):
+        return None
+    maps = []
+    for bits_s, bits_t in zip(source.axes, target.axes):
+        if len(bits_s) != len(bits_t):
+            return None
+        mapping = [None] * len(bits_s)
+        free = [k for k, b in enumerate(bits_t) if b.place is Place.SLOT]
+        for k, b in enumerate(bits_s):
+            if b.place is Place.SLOT:
+                if not free:
+                    return None
+                mapping[k] = free.pop(0)
+                continue
+            hit = [m for m, c in enumerate(bits_t)
+                   if c.place is b.place and c.weight == b.weight]
+            if len(hit) != 1:
+                return None
+            mapping[k] = hit[0]
+        if sorted(mapping) != list(range(len(bits_s))):
+            return None
+
+        def move(i, mapping=tuple(mapping)):
+            return sum(1 << m for k, m in enumerate(mapping) if i >> k & 1)
+        maps.append(move)
+    relabel = tuple(maps)
+    order = relabel_order(source, target, relabel)
+    return None if order is None else (relabel, order)
+
+
+def relayout_refusal(s: Stmt) -> Optional[str]:
+    """Why `s` is no relayout its strategy writes, or None.
+
+    Its strategy one of `RELAYOUT_STRATEGIES`, in its form: a value of a
+    value -- and for a shuffle the lane it reads -- one result; registers
+    written through references, as many as `written` says, declared as a
+    read and a write each, and no result; registers renamed, a result a
+    register in the order `order` names, which is a permutation, and the
+    layouts a relabel in that order where it states them (`layouts`:
+    source, target and the relabel of the indices, `relabel_order`).  A
+    relayout reads other lanes' registers, so it is under no predicate."""
+    strategy = RELAYOUT_STRATEGIES.get(s.attr('strategy'))
+    if strategy is None:
+        return f'no strategy {s.attr("strategy")!r}'
+    form = strategy.form
+    if form == 'value':
+        want = 2 if strategy.name == 'shfl' else 1
+        if len(s.target) != 1 or len(s.args) != want:
+            return (f'{strategy.name} takes {want} operand(s) and gives one '
+                    f'value, not {len(s.args)} and {len(s.target)}')
+    elif form == 'in_place':
+        written = s.attr('written')
+        if s.target or not isinstance(written, int) or not (
+                0 < written <= len(s.args)):
+            return (f'{strategy.name} writes the first `written` of its '
+                    f'operands, and gives no value')
+        regs = list(s.args[:written])
+        if [a.base for a in s.accesses] != regs or any(
+                a.space != MemSpace.REGISTER
+                or a.kind != Effect.READ | Effect.WRITE for a in s.accesses):
+            return (f'{strategy.name} without a read and a write of each '
+                    f'register it writes')
+    else:
+        order = s.attr('order')
+        if (not isinstance(order, tuple) or len(order) != len(s.target)
+                or sorted(order) != list(range(len(s.args)))):
+            return (f'a relabel of {len(s.args)} registers into '
+                    f'{len(s.target)} in the order {order!r}: a permutation')
+        layouts = s.attr('layouts')
+        if layouts is not None:
+            source, target, relabel = (tuple(layouts) + (None,))[:3]
+            if relabel_order(source, target, relabel) != order:
+                return (f'the layouts are no relabel in the order {order!r}: '
+                        f'an element would change lanes')
+    if s.predicate is not None:
+        return ('a relayout reads the registers of other lanes, which a '
+                'predicate would leave out')
+    return None
+
+
 def element_of(type_: Any, base: Any) -> Any:
     """The element a transfer moves a lane of: the value's, or where the
     value has no type of its own -- a literal stored -- the buffer's."""
@@ -1949,6 +2231,51 @@ def _matrix_transfer_pipe(s: Stmt) -> Optional[str]:
     down (`emit._NO_CODE`) -- so that no figure of a kernel that loads its
     fragments by it moves; it is one issue of the shared memory pipe."""
     return 'shared.store' if s.op == Op.MATRIX_STORE else None
+
+
+def _lower_relayout(s: Stmt, env: Spelling) -> Lowered:
+    """A relayout as its strategy writes it (`RELAYOUT_STRATEGIES`): a value
+    returned by the function it is called as, the result's initializer --
+    the text the call it replaced wrote; registers written through
+    references, the function called on its operands; registers renamed, a
+    copy of each source register under the result's name, which the
+    compiler folds."""
+    strategy = relayout_strategy(s)
+    if env.family and env.family not in strategy.families:
+        raise IRError(f'{strategy.name} has no spelling on {env.family}')
+    why = relayout_refusal(s)
+    if why is not None:
+        raise IRError(why)
+    names = [env.name(a) for a in s.args]
+    if strategy.form == 'relabel':
+        lines = []
+        for v, at in zip(s.target, s.attr('order')):
+            if getattr(v.type, 'length', None) is not None:
+                raise IRError(f'a relabel of {v.type}: of scalar registers')
+            lines.append(f'{v.type.base.ctype()} {env.name(v)} = '
+                         f'{names[at]};')
+        return Lowered(tuple(lines))
+    callee = strategy.spelled(dict(s.attr('params') or ()))
+    if strategy.form == 'in_place':
+        return Lowered((f'{callee}({", ".join(names)});',))
+    return Lowered(result=f'{callee}({", ".join(names)})')
+
+
+def _check_relayout(s: Stmt) -> List[str]:
+    why = relayout_refusal(s)
+    return [] if why is None else [f'{s.op}: {why}']
+
+
+def _relayout_pipe(s: Stmt) -> Optional[str]:
+    """The issue category of a relayout, its strategy's: the one the call
+    it replaced was counted under."""
+    return relayout_strategy(s).pipe(dict(s.attr('params') or ()))
+
+
+def _relayout_units(s: Stmt) -> int:
+    """A relayout's code, its strategy's: one call, or no instruction for a
+    relabel."""
+    return relayout_strategy(s).units
 
 
 # --------------------------------------------------------------------------- #
@@ -2992,7 +3319,9 @@ def units_of(s: Stmt) -> int:
     the code count in the emitter's units: its entry's `units` for an engine
     op (`OpSpec.units`), one for any other (`transfers.executed`)."""
     spec = REGISTRY.get(s.op)
-    return 1 if spec is None else spec.units
+    if spec is None:
+        return 1
+    return spec.units(s) if callable(spec.units) else spec.units
 
 
 # --------------------------------------------------------------------------- #
@@ -3138,6 +3467,24 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            lower={'cuda': _lower_matrix_transfer,
                   '': _lower_matrix_transfer, '*': _no_matrix_transfer},
            check=_check_matrix_transfer),
+    # Registers from one distribution over the lanes to another
+    # (`RELAYOUT_STRATEGIES`): a value of a value, registers written through
+    # references, or registers renamed.  Pinned, as the cross-lane calls it
+    # replaced were -- defined only where the lanes it reads are converged
+    # -- and of no memory; a value pure where the caller says so, for CSE
+    # and inlining; one written through references declares the writes
+    # (`effect_of`).  The slots: the strategy, its parameters, the operands
+    # it writes, a relabel's order, and the layouts where they are stated
+    # as bits (source, target, the relabel of the indices).
+    OpSpec(Op.RELAYOUT, operands=(Slot('strategy', (str,)),
+                                  Slot('params', (tuple,), False),
+                                  Slot('written', _INT, False),
+                                  Slot('order', (tuple,), False),
+                                  Slot('layouts', (tuple,), False)),
+           results=('registers',), effect=Effect.NONE, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=_relayout_units, pipe=_relayout_pipe,
+           lower={'*': _lower_relayout}, check=_check_relayout),
     # D = A * B + C on a matrix engine (`MATRIX_ENGINES`).  The fragments
     # are values -- the operands, A's registers, B's, then C's -- and D the
     # result, or C itself where the instruction writes it in place
@@ -3245,6 +3592,8 @@ def effect_of(op: str, attrs: Tuple = ()) -> Effect:
     if op == Op.MATRIX_MAC and _matrix_effect(attrs) is not None:
         return _matrix_effect(attrs)
     if op == Op.MATRIX_MAC and dict(attrs).get('in_place'):
+        return Effect.WRITE
+    if op == Op.RELAYOUT and dict(attrs).get('written'):
         return Effect.WRITE
     if _retires_copies(op, attrs):
         return Effect.READ | Effect.WRITE | Effect.ASYNC
@@ -3575,6 +3924,39 @@ def matrix_store(base: Any, index: Any, registers: Sequence[Any], *,
                  args=(base, index) + tuple(registers), accesses=(access,))
 
 
+def relayout(strategy: str, params: Mapping, args: Sequence[Any],
+             targets: Sequence[Value] = (), *, pure: bool = True,
+             written: int = 0, order: Optional[Tuple[int, ...]] = None,
+             layouts: Optional[Tuple] = None,
+             no_inline: bool = False) -> Stmt:
+    """A relayout by `strategy` (`RELAYOUT_STRATEGIES`) of `args`: into
+    `targets` -- one value, or the registers renamed in `order` -- or, with
+    `written`, into its first `written` operands through references,
+    declared as a read and a write each.  `params` the strategy's, in a
+    fixed order; `pure` whether CSE may merge two alike, as the call it
+    replaced said; `no_inline` keeps a value in a variable of its own."""
+    attrs: Tuple = (('strategy', strategy),)
+    fields = RELAYOUT_STRATEGIES[strategy].fields
+    params = {k: v for k, v in dict(params).items() if k in fields}
+    if params:
+        attrs += (('params', tuple(sorted(params.items()))),)
+    if written:
+        attrs += (('written', int(written)),)
+    if order is not None:
+        attrs += (('order', tuple(order)),)
+    if layouts is not None:
+        attrs += (('layouts', tuple(layouts)),)
+    if no_inline:
+        attrs += (('no_inline', True),)
+    accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER, w)
+                     for w in args[:written] if isinstance(w, Value))
+    return Stmt(op=Op.RELAYOUT, target=tuple(targets), args=tuple(args),
+                pure=pure and not written, movable=movable_of(
+                    Op.RELAYOUT, attrs),
+                effect=effect_of(Op.RELAYOUT, attrs), accesses=accesses,
+                attrs=attrs)
+
+
 def matrix_wait(engine: str, count: int, registers: Sequence[Value] = (),
                 reads: Sequence[Any] = ()) -> Stmt:
     """Wait until at most `count` of the groups `engine` committed are in
@@ -3656,4 +4038,8 @@ __all__ = [
     'matrix_load', 'matrix_registers', 'matrix_store',
     'matrix_transfer_bits', 'matrix_transfer_refusal', 'units_of',
     'fill_of', 'fill_refusal',
+    'AMD_FAMILIES', 'RELAYOUT_FORMS', 'RELAYOUT_STRATEGIES', 'RelayoutStrategy',
+    'relabel_order', 'relabeling', 'relayout', 'relayout_callee',
+    'relayout_refusal',
+    'relayout_strategy',
 ]

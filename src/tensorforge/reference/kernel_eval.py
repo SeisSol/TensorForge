@@ -1404,10 +1404,11 @@ def _py(expr: str) -> str:
     # an expression the emitter inlined (`_lane_reads`).
     e = _lane_reads(e)
     # `gather<Block>(v, L)`, the same with `L` a value of each lane's own
-    # (`MultilinearInstruction._ell_plan`).  `L` may hold one level of
-    # parentheses -- a table read the emitter inlined.
+    # (`MultilinearInstruction._ell_plan`, a shuffle's `engines.
+    # RELAYOUT_STRATEGIES`).  `L` may hold two levels of parentheses -- a
+    # table read the emitter inlined, a lane computed in place.
     e = re.sub(r'\btensorforge::gather\s*<\s*(\d+)\s*>\s*\(\s*(\w+)\s*,'
-               r'\s*([^()]*(?:\([^()]*\)[^()]*)*)\)',
+               r'\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)',
                r'GATHER("\2", \1, \3)', e)
     # `tensorforge::fma(a, b, c)`, the vector FMA CUDA's lexic names so that
     # sm_100 can pair it.  The same `a * b + c` the infix spelling computes.

@@ -1075,6 +1075,11 @@ class Op:
     # `args = (base, index, *registers)`.
     MATRIX_LOAD = 'matrix.load'
     MATRIX_STORE = 'matrix.store'
+    # Registers brought from one distribution over the lanes to another
+    # (`engines.RELAYOUT_STRATEGIES`): a broadcast, a shuffle, a transpose
+    # of registers and lanes, or a renaming of registers that writes no
+    # instruction -- the target's to pick, the op's to state.
+    RELAYOUT = 'relayout'
     # D = A * B + C on the fragments of a matrix engine, a collective of the
     # wave (`engines.MATRIX_ENGINES`): the fragments are values, D the
     # result -- or C itself, written in place, where the instruction

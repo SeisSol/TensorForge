@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
@@ -678,6 +678,77 @@ class IRBuilder:
         return self._emit_op(Op.CALL, (), tuple(args), pure=False,
                              movable=movable, effect=effect,
                              accesses=accesses, attrs=(('callee', callee),))
+
+    def relayout(self, strategy: str, params: Mapping, *args: Operand,
+                 type_, hint: str = '',
+                 layout: Optional[RegisterLayout] = None, uniform=None,
+                 pure: bool = True, materialize: bool = False) -> Value:
+        """`args` brought to another distribution over the lanes by
+        `strategy` (`engines.RELAYOUT_STRATEGIES`): a value of `type_` laid
+        out as `layout` -- a broadcast, a row share, a shuffle.
+
+        What `call` made of the cross-lane call it replaces, an op of its
+        own: pinned where it stands, since it reads other lanes, which are
+        only defined where they are converged; a pure function of its
+        operands where `pure` says so -- CSE and inlining stay correct and
+        are the point -- and shared within a scope on the same terms as a
+        call's result, its strategy, parameters, layout and uniformity in
+        the key.  `uniform` may narrow the operands' join, never widen it;
+        `materialize` keeps the result in a variable of its own."""
+        uniform = _stated(uniform, _join(args), strategy)
+        fields = engines.RELAYOUT_STRATEGIES[strategy].fields
+        params = {k: v for k, v in dict(params).items() if k in fields}
+        key = (_cons_key(Op.RELAYOUT, type_, args,
+                         extra=(strategy, tuple(sorted(params.items())),
+                                layout, uniform))
+               if pure and not materialize else None)
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
+        v = self.value(type_, hint=hint, uniform=uniform, layout=layout)
+        self.emit(engines.relayout(strategy, params, args, (v,), pure=pure,
+                                   no_inline=materialize))
+        self._share(key, v)
+        return v
+
+    def relayout_in_place(self, strategy: str, written: Sequence[Value],
+                          args: Sequence[Operand] = (),
+                          params: Optional[Mapping] = None) -> Stmt:
+        """`written` filled by `strategy` from `args` -- or from `written`
+        themselves, transposed in place -- through references
+        (`engines.RELAYOUT_STRATEGIES`, form `in_place`): the transposes of
+        registers and lanes.  As `call_stmt` wrote the call it replaces: a
+        read and a write of each register written, declared, its producer
+        pinned so that its name stays the one the reference binds."""
+        for w in written:
+            self._require_addressable(w, strategy)
+        for w in written:
+            self.pin(w)
+        return self.emit(engines.relayout(
+            strategy, params or {}, tuple(written) + tuple(args),
+            written=len(written), pure=False))
+
+    def relabel(self, registers: Sequence[Value], order: Sequence[int], *,
+                layouts: Optional[Tuple] = None, hint: str = 'rl',
+                layout: Optional[RegisterLayout] = None) -> Tuple[Value, ...]:
+        """`registers` renamed: result `j` is register `order[j]` of them, in
+        the same lanes -- no instruction (`engines.RELAYOUT_STRATEGIES`,
+        `relabel`).  `layouts`, where the caller states them as bits --
+        source, target, and the relabel of the target's indices -- are held
+        to the order (`engines.relabel_order`): a D fragment read as the
+        next product's A, its K relabeled, is the case in point."""
+        order = tuple(int(i) for i in order)
+        targets = tuple(self.value(registers[i].type, hint=hint,
+                                   uniform=registers[i].uniformity,
+                                   layout=layout)
+                        for i in order)
+        s = engines.relayout('relabel', {}, tuple(registers), targets,
+                             order=order, layouts=layouts)
+        why = engines.relayout_refusal(s)
+        if why is not None:
+            raise IRError(why)
+        self.emit(s)
+        return targets
 
     def split_op(self, name: str, types: Sequence, *args: Operand,
                  hints: Sequence[str] = (), attrs: Tuple = ()

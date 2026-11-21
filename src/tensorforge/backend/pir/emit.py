@@ -374,7 +374,7 @@ class Emitter:
                      * self._work_scale * self._lane_scale)
         record(self._work_scale if work else 0, flops)
 
-    def _record_code(self, op) -> None:
+    def _record_code(self, op, s: Optional[Stmt] = None) -> None:
         """What a statement puts into the instruction stream
         (`BuildMetrics.record_code`), once per copy of it (`_code_scale`).
         One unit a statement, two for a branch; a loop's counter, test and
@@ -385,8 +385,11 @@ class Emitter:
             return
         spec = engines.spec_of(op)
         if spec is not None:
-            if spec.units:
-                self._record_code_units(spec.units)
+            # An engine op's own count, which a relayout's strategy says
+            # (`engines.units_of`).
+            units = engines.units_of(s) if s is not None else spec.units
+            if units:
+                self._record_code_units(units)
             return
         self._record_code_units(2 if op == Op.IF
                                 else _LOOP_OVERHEAD if op == Op.WHILE else 1)
@@ -1456,7 +1459,7 @@ class Emitter:
         unit.  The wait behind is not counted, as it was not when it came in:
         under `always` the figures stay what they were."""
         for s in run:
-            self._record_code(s.op)
+            self._record_code(s.op, s)
             self._record_mix(s)
         self._record_code_units(blocks.waits_in(run))
         self.writer(blocks.render(run, self.operand, after=self._dpp_after))
@@ -1609,7 +1612,7 @@ class Emitter:
             # A statement that only says what is touched where it stands
             # (`IRBuilder.touches`) writes nothing, like a mark.
             return
-        self._record_code(op)
+        self._record_code(op, s)
         if op == Op.MATRIX_MAC:
             self._record_code_units(self._issues(s) - 1)
         self._record_mix(s)

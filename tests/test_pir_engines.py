@@ -59,11 +59,11 @@ def test_every_engine_op_is_a_name_pir_knows():
         Op.BARRIER, Op.SYNC_INIT, Op.ARRIVE, Op.WAIT_PHASE, Op.FENCE,
         Op.WAIT_COUNTER, Op.SET_PRIORITY, Op.COMMIT_GROUP, Op.MATRIX_MAC,
         Op.TMEM_ALLOC, Op.TMEM_DEALLOC, Op.TMEM_LD, Op.TMEM_ST,
-        Op.MATRIX_LOAD, Op.MATRIX_STORE}
+        Op.MATRIX_LOAD, Op.MATRIX_STORE, Op.RELAYOUT}
     for name, spec in engines.REGISTRY.items():
         assert name in Op.KNOWN and spec.name == name
         assert '*' in spec.lower
-        assert spec.units >= 0 and spec.pipe
+        assert (callable(spec.units) or spec.units >= 0) and spec.pipe
 
 
 def _built():

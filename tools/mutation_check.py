@@ -4940,8 +4940,10 @@ GROUPS = {
     # taking both, and the helper (on the local GPU, sm_80 or newer).  A
     # buffer's own request of the transfer into it (`alloc`'s `ahead`):
     # what the builder takes, and which transfers wrap picks, at what stages.
+    # RELAYOUT: AMD's relayouts as the calls they were, the relabel and its
+    # solver, the shuffle and the oracle's reading of it.
     'pircons': ('tests/test_matrix_transfers.py tests/test_copy_fill.py '
-                'tests/test_wrap_ahead.py '
+                'tests/test_wrap_ahead.py tests/test_relayout.py '
                 'tests/test_multi_element.py::test_ldmatrix_is_a_declared_read_of_its_buffer', [
         ('the rows of a matrix on the lane bits of its words',
          sub(ENGINES, '    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))\n',
@@ -5116,6 +5118,41 @@ GROUPS = {
         ('the windows of a second stage asking again',
          sub(WRAP, "                     if k not in ('identity', 'stages', 'extern', 'ahead')]\n",
              "                     if k not in ('identity', 'stages', 'extern')]\n", 1)),
+        # RELAYOUT (`engines.RELAYOUT_STRATEGIES`): AMD's relayouts as the
+        # calls they were, the relabel, the shuffle.
+        ('a broadcast within a row counted as crossing the rows',
+         sub(ENGINES, "    return 'xlane.wide' if int(params['threads']) > 16 else 'xlane'\n",
+             "    return 'xlane.wide' if int(params['threads']) >= 16 else 'xlane'\n", 1)),
+        ('a relabel counted as an instruction',
+         sub(ENGINES, '        pipe=_no_issue, units=0,\n', '        pipe=_no_issue, units=1,\n', 1)),
+        ('a relabel moving elements between lanes accepted',
+         sub(ENGINES, '        if at_s.lane != at_t.lane or at_s.element != at_t.element:\n',
+             '        if at_s.element != at_t.element:\n', 1)),
+        ('a lane bit relabeled onto another lane bit',
+         sub(ENGINES, '                   if c.place is b.place and c.weight == b.weight]\n',
+             '                   if c.place is b.place][:1]\n', 1)),
+        ('a relabel written in the order of its source',
+         sub(ENGINES, "        for v, at in zip(s.target, s.attr('order')):\n",
+             '        for at, v in enumerate(s.target):\n', 1)),
+        ('a transpose without its writes declared accepted',
+         sub(ENGINES, '        regs = list(s.args[:written])\n',
+             '        regs = [a.base for a in s.accesses]\n', 1)),
+        ('a transpose declared as writing nothing',
+         sub(ENGINES, "    if op == Op.RELAYOUT and dict(attrs).get('written'):\n",
+             "    if False:\n", 1)),
+        ('two broadcasts of other lanes shared',
+         sub(BUILD, '                         extra=(strategy, tuple(sorted(params.items())),\n',
+             '                         extra=(strategy, (),\n', 1)),
+        ("a transpose's outputs not pinned",
+         sub(BUILD, '        for w in written:\n            self.pin(w)\n        return self.emit(engines.relayout(\n',
+             '        return self.emit(engines.relayout(\n', 1)),
+        ("demand reading every lane of a relayout's source",
+         sub(DEMAND, '            elif u.op == Op.RELAYOUT:\n', '            elif False:\n', 1)),
+        ('the code of a relayout counted without the statement',
+         sub(EMIT, '        self._record_code(op, s)\n', '        self._record_code(op)\n', 1)),
+        ("the oracle's gather taking one level of parentheses",
+         sub(ORACLE, r"               r'\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)'," + "\n",
+             r"               r'\s*([^()]*(?:\([^()]*\)[^()]*)*)\)'," + "\n", 1)),
     ]),
     # An `if` whose first arm writes nothing: the writer leaves that arm out,
     # its head with it, and the second is written under the negated
