@@ -511,6 +511,115 @@ template <int Depth = 1> struct ClusterLaunchCursor {
 
 #endif
 
+/// `Bytes` bytes -- 4, 8 or 16 -- into shared memory at `dst` by `cp.async`,
+/// of which the first `srcBytes` are read from global memory at `src` and the
+/// rest written as zeros: the instruction's source size (PTX ISA, "cp.async",
+/// `src-size`), held in a register, so one copy is a read where its condition
+/// holds and a fill where not (`pir.engines`, a copy that fills).  At zero it
+/// reads nothing, and `src` need be the address of nothing.  Sixteen bytes go
+/// past L1 (`.cg`), four and eight through it (`.ca`), as
+/// `__pipeline_memcpy_async` takes them, and the copy joins the thread's open
+/// group, which `__pipeline_commit` closes.  A device without the instruction
+/// traps.
+template <int Bytes>
+__device__ __forceinline__ void copyAsyncFill(void *dst, const void *src,
+                                              uint32_t srcBytes) {
+  static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
+                "cp.async moves 4, 8 or 16 bytes");
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  const uint32_t at = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
+  const size_t from = __cvta_generic_to_global(src);
+  if constexpr (Bytes == 16) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(at),
+                 "l"(from), "r"(srcBytes)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], %2, %3;\n" ::"r"(at),
+                 "l"(from), "n"(Bytes), "r"(srcBytes)
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The priority L2 gives the lines an access touches through a cache policy
+/// (`engines.CACHE_POLICIES`, `evict_first` and `evict_last`).
+enum class L2Evict { First, Last };
+
+/// A cache policy of priority `P` for every line an access touches: the
+/// 64-bit operand `.L2::cache_hint` takes (PTX ISA, "createpolicy":
+/// `.fractional`, a fraction of 1.0; sm_80 and newer).  Not volatile: two
+/// of the same policy are one value, which the compiler keeps once.
+template <L2Evict P> __device__ __forceinline__ uint64_t l2Policy() {
+  uint64_t policy = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  if constexpr (P == L2Evict::Last) {
+    asm("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(policy));
+  } else {
+    asm("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(policy));
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return policy;
+}
+
+/// A load from global memory under the cache policy `P` (PTX ISA, "ld":
+/// `.L2::cache_hint`; sm_80 and newer).  The "memory" clobber keeps it in
+/// its place among the other accesses, as a load the compiler knows is.
+template <L2Evict P> __device__ __forceinline__ float ldL2(const float *at) {
+  float value = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm("ld.global.L2::cache_hint.f32 %0, [%1], %2;"
+      : "=f"(value)
+      : "l"(__cvta_generic_to_global(at)), "l"(l2Policy<P>())
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return value;
+}
+
+template <L2Evict P> __device__ __forceinline__ double ldL2(const double *at) {
+  double value = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm("ld.global.L2::cache_hint.f64 %0, [%1], %2;"
+      : "=d"(value)
+      : "l"(__cvta_generic_to_global(at)), "l"(l2Policy<P>())
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return value;
+}
+
+/// A store to global memory under the cache policy `P` (PTX ISA, "st":
+/// `.L2::cache_hint`; sm_80 and newer).
+template <L2Evict P>
+__device__ __forceinline__ void stL2(float *at, float value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm volatile("st.global.L2::cache_hint.f32 [%0], %1, %2;" ::"l"(
+                   __cvta_generic_to_global(at)),
+               "f"(value), "l"(l2Policy<P>())
+               : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+template <L2Evict P>
+__device__ __forceinline__ void stL2(double *at, double value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm volatile("st.global.L2::cache_hint.f64 [%0], %1, %2;" ::"l"(
+                   __cvta_generic_to_global(at)),
+               "d"(value), "l"(l2Policy<P>())
+               : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// A window copied into shared memory by the tensor memory accelerator: one
 /// `cp.async.bulk` for the whole window, issued by one thread of the
 /// multiplication and completing on an mbarrier in shared memory, where
@@ -865,7 +974,8 @@ __device__ __forceinline__ void splitFloatTF32(tf32 &upper, tf32 &lower,
 /// memory, 16-byte aligned.
 ///
 /// `volatile` and no memory clobber: the read must not move across the
-/// block's barriers, and nothing else is ordered against it.
+/// block's barriers, and nothing else is ordered against it.  A device
+/// without the instruction traps (`engines.MATRIX_TRANSFER_SM`).
 __device__ __forceinline__ void ldmatrixX4(float &r0, float &r1, float &r2,
                                            float &r3, const float *base,
                                            int index) {
@@ -881,6 +991,96 @@ __device__ __forceinline__ void ldmatrixX4(float &r0, float &r1, float &r2,
   r1 = __uint_as_float(x1);
   r2 = __uint_as_float(x2);
   r3 = __uint_as_float(x3);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// One 8x8 matrix, as `ldmatrixX4` loads four (`.x1`): lanes 0-7 name its
+/// rows -- the others' addresses are not read -- and lane `t` receives the
+/// word `t % 4` of row `t / 4`.
+__device__ __forceinline__ void ldmatrixX1(float &r0, const float *base,
+                                           int index) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+  uint32_t x0;
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];\n"
+               : "=r"(x0)
+               : "r"(at));
+  r0 = __uint_as_float(x0);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// Two 8x8 matrices (`.x2`): lanes 0-15 name their rows.
+__device__ __forceinline__ void ldmatrixX2(float &r0, float &r1,
+                                           const float *base, int index) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+  uint32_t x0, x1;
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+               : "=r"(x0), "=r"(x1)
+               : "r"(at));
+  r0 = __uint_as_float(x0);
+  r1 = __uint_as_float(x1);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The registers of a warp into 8x8 matrices of 16-bit elements in shared
+/// memory, as `stmatrix` stores them (PTX ISA, "Warp-level matrix store
+/// instruction: stmatrix", sm_90): `ldmatrixX4` the other way round -- lane
+/// `l` names the 16-byte row `l % 8` of matrix `l / 8`, and register `i` of
+/// lane `t` is the 32-bit word `t % 4` of row `t / 4` of matrix `i`; `.x1`
+/// and `.x2` take the rows lanes 0-7 and 0-15 name.
+///
+/// `volatile` and a memory clobber: the store writes memory no operand
+/// names, so a read of it behind the store must not be answered from before
+/// it, nor a write ahead of it moved behind.  A device without the
+/// instruction traps.
+__device__ __forceinline__ void stmatrixX1(float *base, int index, float r0) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile(
+      "stmatrix.sync.aligned.m8n8.x1.shared.b16 [%0], {%1};\n" ::"r"(at),
+      "r"(__float_as_uint(r0))
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void stmatrixX2(float *base, int index, float r0,
+                                           float r1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile(
+      "stmatrix.sync.aligned.m8n8.x2.shared.b16 [%0], {%1,%2};\n" ::"r"(at),
+      "r"(__float_as_uint(r0)), "r"(__float_as_uint(r1))
+      : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+__device__ __forceinline__ void stmatrixX4(float *base, int index, float r0,
+                                           float r1, float r2, float r3) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const uint32_t at =
+      static_cast<uint32_t>(__cvta_generic_to_shared(base + index));
+  asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], "
+               "{%1,%2,%3,%4};\n" ::"r"(at),
+               "r"(__float_as_uint(r0)), "r"(__float_as_uint(r1)),
+               "r"(__float_as_uint(r2)), "r"(__float_as_uint(r3))
+               : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
 #endif
 }
 

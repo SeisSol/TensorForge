@@ -34,6 +34,10 @@ class Block:
     self.writer = writer
     self.argument = argument
     self.foot = foot
+    #: Whether nothing was written inside, so that the block was left out
+    #: whole, its head with it (`Writer.speculate`): what was to follow it
+    #: -- an `else` -- follows nothing.
+    self.elided = False
 
   def __enter__(self):
     space = ' ' if self.argument else ''
@@ -42,7 +46,7 @@ class Block:
 
   def __exit__(self, type, value, traceback):
     self.writer.indent -= 1
-    self.writer.speculateClear('}' + self.foot)
+    self.elided = self.writer.speculateClear('}' + self.foot)
 
   def __call__(self, line):
     self.writer(line)
@@ -110,10 +114,14 @@ class Writer:
     self.stack += [substack]
 
   def speculateClear(self, code):
+    """Close what `speculate` opened: with `code` where anything was written
+    since, and by leaving the head out where nothing was -- which it says,
+    True."""
     if len(self.stack) > 0:
       self.stack.pop()
-    else:
-      self(code)
+      return True
+    self(code)
+    return False
 
   def new_line(self):
     self.__call__('')

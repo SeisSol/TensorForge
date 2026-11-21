@@ -375,6 +375,15 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                     f'level; the threads that took another path never arrive '
                     f'(deadlock, not a wrong answer)')
 
+        # -- a transfer goes through an engine of its op ------------------ #
+        why = engines.transfer_engine_refusal(s)
+        if why is not None:
+            diag.append(why)
+        # ... with a cache policy its engine takes
+        why = engines.cache_refusal(s)
+        if why is not None:
+            diag.append(why)
+
         # -- op-specific --------------------------------------------------- #
         if s.op == Op.IF:
             if not 1 <= len(s.regions) <= 2:
@@ -567,6 +576,10 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                 diag.extend(verify_tensor(s))
             if s.attr('form') == 'buffer':
                 diag.extend(verify_buffer(s))
+            if s.attr('fill') is not None:
+                why = engines.fill_refusal(s)
+                if why is not None:
+                    diag.append(f'copy.async: a copy that fills: {why}')
 
         elif s.op == Op.TENSOR_DESC:
             diag.extend(verify_tensor(s))

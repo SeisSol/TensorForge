@@ -25,6 +25,11 @@ row disagrees.
 A primitive whose lane map is not established has no row.  That is the
 intended outcome rather than a gap: no row means no relayout is offered, and a
 pass that cannot find one stays where it is instead of acting on a guess.
+
+A row says how to reach a layout; how it is written, what it costs and which
+lanes it reads is the engines layer's: each row is a strategy of the relayout
+op by its `name` (`pir.engines.RELAYOUT_STRATEGIES`), which the emitters build
+(`IRBuilder.relayout`, `relayout_in_place`) where they wrote the call.
 """
 
 from dataclasses import dataclass

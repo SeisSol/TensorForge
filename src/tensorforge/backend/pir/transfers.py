@@ -39,6 +39,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence
 
 from .core import Access, Effect, MemSpace, Op, Stmt, Value, walk_stmts, retires
+from .engines import units_of
 
 
 
@@ -262,9 +263,10 @@ _NO_CODE = frozenset({Op.CONST, Op.YIELD, Op.DECLARE, Op.ALLOC, Op.EXTRACT,
 
 def executed(stmts: Sequence[Stmt]) -> int:
     """How much `stmts` issue when they run, in the emitter's units of code
-    -- one a statement, two a branch -- and a counted loop's body once per
-    trip: the cover a transfer issued ahead of them has.  A branch counts its
-    longer arm, and a loop whose trips are not known its body once.
+    -- one a statement, an engine op what its entry says (`engines.
+    units_of`), two a branch -- and a counted loop's body once per trip: the
+    cover a transfer issued ahead of them has.  A branch counts its longer
+    arm, and a loop whose trips are not known its body once.
     """
     n = 0
     for s in stmts:
@@ -279,7 +281,7 @@ def executed(stmts: Sequence[Stmt]) -> int:
         elif s.regions:
             n += 1 + sum(executed(r.body) for r in s.regions)
         elif s.op not in _NO_CODE:
-            n += 1
+            n += units_of(s)
     return n
 
 

@@ -6,6 +6,7 @@
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
+from tensorforge.backend.pir import engines
 from tensorforge.backend.pir.core import ScalarType
 from .arch import cdna2, gfx1251, rdna
 from .catalog import mfma_tile_for
@@ -38,6 +39,27 @@ PACK_BF16 = 'tensorforge::packBF16x4'
 #: FMA cannot pair.  Off until the measurement on gfx1150 says which way it
 #: goes.
 PIN_MOVED = False
+
+
+def _moved() -> str:
+    """The relayout strategy of the moved row share (`engines.
+    RELAYOUT_STRATEGIES`): kept where `PIN_MOVED` asks for it."""
+    return 'movdpp16_kept' if PIN_MOVED else MOVDPP16.name
+
+
+#: The relayout strategy each transpose the tiling feeds A through is
+#: (`engines.RELAYOUT_STRATEGIES`), by the function it is written as.
+_TRANSPOSES = {s.callee: s.name for s in engines.RELAYOUT_STRATEGIES.values()
+               if s.form == 'in_place'}
+
+
+def _transposed_by(callee: str) -> str:
+    """The relayout strategy that is the transpose `callee`."""
+    found = _TRANSPOSES.get(callee)
+    if found is None:
+        raise GenerationError(f'{callee} is no transpose a relayout names; '
+                              f'there are {", ".join(sorted(_TRANSPOSES))}')
+    return found
 
 #: How the fused chain walks its products.  `'columns'` is the order `hfma`
 #: is written for: every `A(i, k)` read first (`_load_a`) and held while the
@@ -182,9 +204,8 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                     # Cross-lane: reads other lanes' registers, so it is only
                     # defined where the wave is converged -- pure (CSE and
                     # inlining stay correct) but not hoistable.
-                    a += [writer.call(
-                        entry.callee.format(**params),
-                        ftype, aa, hint='bc', movable=False,
+                    a += [writer.relayout(
+                        entry.name, params, aa, type_=ftype, hint='bc',
                         layout=entry.produces(**params))]
 
             for j in range(min(len(B[0][i*repeat:]) // repeat, step)):
@@ -200,12 +221,10 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                     # is that these multiplies carry no modifier and may
                     # therefore be issued in pairs.
                     mv = dict(threads=threads, row=j)
-                    callee = (f'tensorforge::movdpp16Kept<{j}>' if PIN_MOVED
-                              else MOVDPP16.callee.format(**mv))
-                    ax = [writer.call(callee, ftype, aa,
-                                      hint='bc', movable=False,
-                                      layout=MOVDPP16.produces(**mv),
-                                      pure=not moved_on_cdna(ctx))
+                    ax = [writer.relayout(_moved(), mv, aa, type_=ftype,
+                                          hint='bc',
+                                          layout=MOVDPP16.produces(**mv),
+                                          pure=not moved_on_cdna(ctx))
                           for aa in a]
                     usebcst = True
                 elif bcst and all((B[bx][idx + jj] if idx + jj < len(B[bx]) else None) is not None for bx in range(localstep) for jj in range(repeat)):
@@ -215,9 +234,9 @@ def hfma(writer: Writer, Cs, As, Bs, repeat, datatype, threads, ctx):
                     # exactly when taking the layout from a checked row rather
                     # than writing one out by hand is worth most.
                     mv = dict(threads=threads, row=j)
-                    aa2 = writer.call(MOVDPP16.callee.format(**mv), vtype, aa,
-                                      hint='bc', movable=False,
-                                      layout=MOVDPP16.produces(**mv))
+                    aa2 = writer.relayout(MOVDPP16.name, mv, aa, type_=vtype,
+                                          hint='bc',
+                                          layout=MOVDPP16.produces(**mv))
                     ax = ([writer.extract(aa2, bx, ftype) for bx in range(localstep)]
                           if localstep > 1 else [aa2])
                     usebcst = True
@@ -286,7 +305,7 @@ def _transpose(writer, tile, ftype, threads, regs):
     if tile.transpose is None:
         return list(regs)
     if not tile.transpose_has_separate_outputs:
-        writer.call_stmt(tile.transpose, *regs, writes=tuple(regs))
+        writer.relayout_in_place(_transposed_by(tile.transpose), regs)
         return list(regs)
     out = [writer.declare(ftype, hint='tp',
                           layout=TRANSPOSE4X4.produces(threads=threads))
@@ -301,7 +320,7 @@ def _transpose(writer, tile, ftype, threads, regs):
         # The same exchange, shuffle and selection fused
         # (`Options.amd_fused_transpose`); `hip.h` falls back off gfx9.
         callee = FUSED_TRANSPOSE4X4
-    writer.call_stmt(callee, *out, *regs, writes=tuple(out))
+    writer.relayout_in_place(_transposed_by(callee), out, regs)
     return out
 
 
@@ -894,15 +913,15 @@ def _row_source(writer, src, vtype, threads, step, lane):
                          f'threads')
     entry, params = found
     params = dict(params, lane=lane)
-    return writer.call(entry.callee.format(**params), vtype, src, hint='bc',
-                       movable=False, layout=entry.produces(**params))
+    return writer.relayout(entry.name, params, src, type_=vtype, hint='bc',
+                           layout=entry.produces(**params))
 
 
 def _move_row(writer, src, vtype, threads, row):
     """`movdpp16<row>`: lane `row` of each 16-lane row, to all of it."""
     mv = dict(threads=threads, row=row)
-    return writer.call(MOVDPP16.callee.format(**mv), vtype, src, hint='bc',
-                       movable=False, layout=MOVDPP16.produces(**mv))
+    return writer.relayout(MOVDPP16.name, mv, src, type_=vtype, hint='bc',
+                           layout=MOVDPP16.produces(**mv))
 
 
 #: The rows the row order reads ahead where `Options.amd_row_lookahead` is left
@@ -1092,10 +1111,8 @@ def _row_products(writer, form, step, src, ftype, threads, row, terms,
     emit = _FUSED[step]
     if form is BroadcastForm.MOVED:
         mv = dict(threads=threads, row=row)
-        callee = (f'tensorforge::movdpp16Kept<{row}>' if PIN_MOVED
-                  else MOVDPP16.callee.format(**mv))
-        src = writer.call(callee, ftype, src, hint='bc', movable=False,
-                          layout=MOVDPP16.produces(**mv), pure=not own)
+        src = writer.relayout(_moved(), mv, src, type_=ftype, hint='bc',
+                              layout=MOVDPP16.produces(**mv), pure=not own)
         emit = fmascalar
     for acc, a in terms:
         emit(writer, acc, src, a, row)

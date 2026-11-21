@@ -1066,6 +1066,20 @@ class Op:
     TMEM_DEALLOC = 'tmem.dealloc'
     TMEM_LD = 'tmem.ld'
     TMEM_ST = 'tmem.st'
+    # A warp's matrices between shared memory and the registers of its lanes,
+    # as one collective transfer (`engines.TRANSFER_ENGINES`: NVIDIA's
+    # `ldmatrix` and `stmatrix`): each lane names the row of one matrix, and
+    # holds a word of every matrix in a register of its own, where the
+    # instruction's fragment layout puts it (`engines.matrix_transfer_bits`).
+    # A load defines the registers; a store reads them,
+    # `args = (base, index, *registers)`.
+    MATRIX_LOAD = 'matrix.load'
+    MATRIX_STORE = 'matrix.store'
+    # Registers brought from one distribution over the lanes to another
+    # (`engines.RELAYOUT_STRATEGIES`): a broadcast, a shuffle, a transpose
+    # of registers and lanes, or a renaming of registers that writes no
+    # instruction -- the target's to pick, the op's to state.
+    RELAYOUT = 'relayout'
     # D = A * B + C on the fragments of a matrix engine, a collective of the
     # wave (`engines.MATRIX_ENGINES`): the fragments are values, D the
     # result -- or C itself, written in place, where the instruction
@@ -1288,8 +1302,10 @@ class Stmt:
         assert self.op == Op.EXIT
         return self.args[0]
 
-    # copy.async: args = (dst, src, *dst_index, *src_index); the split is in
-    # the `ndst` attribute so that the positional convention stays local.
+    # copy.async: args = (dst, src, *dst_index, *src_index[, valid]); the
+    # split is in the `ndst` attribute so that the positional convention
+    # stays local, and a copy that fills (`fill`) ends in the condition
+    # under which it reads its source (`copy_valid`).
 
     @property
     def copy_dst(self) -> Operand:
@@ -1309,7 +1325,17 @@ class Stmt:
     @property
     def copy_src_index(self) -> Tuple[Operand, ...]:
         assert self.op == Op.COPY_ASYNC
-        return self.args[2 + self.attr('ndst', 0):]
+        end = len(self.args) - (self.attr('fill') is not None)
+        return self.args[2 + self.attr('ndst', 0):end]
+
+    @property
+    def copy_valid(self) -> Optional[Operand]:
+        """Where a copy that fills (`fill`) reads its source: the condition
+        it ends in, under which it moves its bytes, and everywhere else
+        reads nothing and writes its fill (`IRBuilder.copy_async`).  None
+        for a copy that does not fill, which reads wherever it is issued."""
+        assert self.op == Op.COPY_ASYNC
+        return self.args[-1] if self.attr('fill') is not None else None
 
     @property
     def load_base(self) -> Operand:

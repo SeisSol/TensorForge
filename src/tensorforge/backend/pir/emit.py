@@ -27,7 +27,7 @@ from tensorforge.common.operation import Operation
 from . import block_reads, engines
 from .core import (BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants, Qual, ScalarType, Stmt, TokenType, Uniformity,
-                   Value, def_use, retires, walk_stmts)
+                   Value, base_elem, def_use, retires, walk_stmts)
 
 _ATOM = __import__('re').compile(r'^(?:[A-Za-z_][A-Za-z0-9_.:]*|\d[\w.]*)$')
 
@@ -374,7 +374,7 @@ class Emitter:
                      * self._work_scale * self._lane_scale)
         record(self._work_scale if work else 0, flops)
 
-    def _record_code(self, op) -> None:
+    def _record_code(self, op, s: Optional[Stmt] = None) -> None:
         """What a statement puts into the instruction stream
         (`BuildMetrics.record_code`), once per copy of it (`_code_scale`).
         One unit a statement, two for a branch; a loop's counter, test and
@@ -385,8 +385,11 @@ class Emitter:
             return
         spec = engines.spec_of(op)
         if spec is not None:
-            if spec.units:
-                self._record_code_units(spec.units)
+            # An engine op's own count, which a relayout's strategy says
+            # (`engines.units_of`).
+            units = engines.units_of(s) if s is not None else spec.units
+            if units:
+                self._record_code_units(units)
             return
         self._record_code_units(2 if op == Op.IF
                                 else _LOOP_OVERHEAD if op == Op.WHILE else 1)
@@ -1456,7 +1459,7 @@ class Emitter:
         unit.  The wait behind is not counted, as it was not when it came in:
         under `always` the figures stay what they were."""
         for s in run:
-            self._record_code(s.op)
+            self._record_code(s.op, s)
             self._record_mix(s)
         self._record_code_units(blocks.waits_in(run))
         self.writer(blocks.render(run, self.operand, after=self._dpp_after))
@@ -1609,7 +1612,7 @@ class Emitter:
             # A statement that only says what is touched where it stands
             # (`IRBuilder.touches`) writes nothing, like a mark.
             return
-        self._record_code(op)
+        self._record_code(op, s)
         if op == Op.MATRIX_MAC:
             self._record_code_units(self._issues(s) - 1)
         self._record_mix(s)
@@ -1946,7 +1949,12 @@ class Emitter:
             # coordinates innermost first, as PTX counts them.
             coords = ', '.join(self.operand(c)
                                for c in reversed(s.copy_src_index))
-            w(f'tensorforge::tmaLoad({self.name(s.attr("object"))}, '
+            # A cache policy is the copy's `.L2::cache_hint`, its policy
+            # the template's (`engines.CACHE_POLICIES`).
+            evict = engines.l2_evict_of(s.attr('cache'))
+            policy = (f'<tensorforge::L2Evict::{evict}>' if evict is not None
+                      else '')
+            w(f'tensorforge::tmaLoad{policy}({self.name(s.attr("object"))}, '
               f'&{self.base_name(s.copy_dst)}'
               f'[{self.address(s.copy_dst, s.copy_dst_index)}], '
               f'&{s.attr("map").name}, {self._copy_bytes(s)}, {coords});')
@@ -1988,10 +1996,12 @@ class Emitter:
                                   'target without the buffer form of it')
             elif self._async_lex is not None:
                 elem = self.elem_size(s.copy_dst)
+                fills = ({} if s.copy_valid is None else
+                         {'valid': _unwrap(self.operand(s.copy_valid))})
                 text = self._async_lex.copy_async(
                     f'&{dst_b}[{dst_a}]', f'&{src_b}[{src_a}]',
                     self._copy_bytes(s), zfill * elem,
-                    engine=s.attr('engine'))
+                    engine=s.attr('engine'), **fills)
             if text is not None:
                 w(text)
             elif zfill:
@@ -2002,6 +2012,22 @@ class Emitter:
                 raise IRError(
                     f'a copy of {elems} elements with {zfill} zero-filled is '
                     f'not available on this target')
+            elif s.copy_valid is not None:
+                # A copy that fills, as a load and a store: the source read
+                # where the condition holds -- the conditional's other arm
+                # reads nothing, and the address need be none -- and the
+                # fill, zero, written where it does not.
+                valid = _unwrap(self.operand(s.copy_valid))
+                zero = self.zero(ScalarType(base_elem(s.copy_dst)
+                                            or Datatype.F32))
+                if elems == 1:
+                    w(f'{dst_b}[{dst_a}] = ({valid}) ? {src_b}[{src_a}] : '
+                      f'{zero};')
+                else:
+                    c = f'c{s.target[0].id}'
+                    w(f'for (int {c} = 0; {c} < {elems}; ++{c}) '
+                      f'{{ {dst_b}[({dst_a}) + {c}] = ({valid}) ? '
+                      f'{src_b}[({src_a}) + {c}] : {zero}; }}')
             elif elems == 1:
                 w(f'{dst_b}[{dst_a}] = {src_b}[{src_a}];')
             else:
@@ -2372,7 +2398,9 @@ class Emitter:
         converged = self._converged
         diverges = share is not None or getattr(
             s.cond, 'uniformity', Uniformity.LANE) < Uniformity.MULT
-        with w.If(_unwrap(self.operand(s.cond))):
+        cond = _unwrap(self.operand(s.cond))
+        then = w.If(cond)
+        with then:
             if share is not None:
                 self._lane_scale = outer * share
             self._converged = converged and not diverges
@@ -2382,7 +2410,13 @@ class Emitter:
                 self._lane_scale = outer
                 self._converged = converged
         if len(s.regions) > 1:
-            with w.Block('else'):
+            # An arm that writes nothing is left out by the writer, its head
+            # with it (`Writer.speculate`): behind such a first arm the
+            # second is no `else` of anything, and is written under the
+            # condition negated.
+            other = (w.If(f'!({cond})') if getattr(then, 'elided', False)
+                     else w.Block('else'))
+            with other:
                 if share is not None:
                     self._lane_scale = outer * max(0.0, 1.0 - share)
                 self._converged = converged and not diverges

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
@@ -51,6 +51,36 @@ def access_of(symbol: Any, kind: Effect) -> Access:
     """Build an :class:`Access` from a ``backend.symbol.Symbol``."""
     space = MemSpace.from_symbol_type(getattr(symbol, 'stype', None))
     return Access(kind=kind, space=space, base=symbol)
+
+
+#: The stages a buffer may ask the transfer into it for (`IRBuilder.alloc`'s
+#: `ahead`): the ones `pir.wrap` builds -- one, or a second for a shared
+#: buffer.  A ring of more is not built.
+AHEAD_STAGES = (1, 2)
+
+
+def _ahead(ahead, space: MemSpace) -> Tuple[int, int]:
+    """A buffer's request of the transfer into it, checked: `(stages,
+    distance)`, the stages one or two -- a second for a buffer in shared
+    memory alone, whose copies the hardware carries out while the trip runs
+    -- and the distance a count of transfers, 0 or more."""
+    try:
+        stages, distance = ahead
+    except (TypeError, ValueError):
+        raise IRError(f'a request of {ahead!r} for the transfer into a '
+                      f'buffer: (stages, distance)')
+    if stages not in AHEAD_STAGES:
+        raise IRError(f'{stages!r} stages asked for a buffer; a transfer '
+                      f'is issued into one stage or two '
+                      f'({AHEAD_STAGES}): a ring of more is not built')
+    if stages > 1 and space != MemSpace.SHARED:
+        raise IRError(f'a second stage asked for a buffer in {space.name.lower()}'
+                      f'; it is for a shared buffer\'s copies')
+    if not isinstance(distance, int) or isinstance(distance, bool) \
+            or distance < 0:
+        raise IRError(f'a distance of {distance!r} asked for a buffer: a '
+                      f'count of transfers, 0 or more')
+    return int(stages), int(distance)
 
 
 def _unroll_pragma(unroll) -> str:
@@ -649,9 +679,80 @@ class IRBuilder:
                              movable=movable, effect=effect,
                              accesses=accesses, attrs=(('callee', callee),))
 
+    def relayout(self, strategy: str, params: Mapping, *args: Operand,
+                 type_, hint: str = '',
+                 layout: Optional[RegisterLayout] = None, uniform=None,
+                 pure: bool = True, materialize: bool = False) -> Value:
+        """`args` brought to another distribution over the lanes by
+        `strategy` (`engines.RELAYOUT_STRATEGIES`): a value of `type_` laid
+        out as `layout` -- a broadcast, a row share, a shuffle.
+
+        What `call` made of the cross-lane call it replaces, an op of its
+        own: pinned where it stands, since it reads other lanes, which are
+        only defined where they are converged; a pure function of its
+        operands where `pure` says so -- CSE and inlining stay correct and
+        are the point -- and shared within a scope on the same terms as a
+        call's result, its strategy, parameters, layout and uniformity in
+        the key.  `uniform` may narrow the operands' join, never widen it;
+        `materialize` keeps the result in a variable of its own."""
+        uniform = _stated(uniform, _join(args), strategy)
+        fields = engines.RELAYOUT_STRATEGIES[strategy].fields
+        params = {k: v for k, v in dict(params).items() if k in fields}
+        key = (_cons_key(Op.RELAYOUT, type_, args,
+                         extra=(strategy, tuple(sorted(params.items())),
+                                layout, uniform))
+               if pure and not materialize else None)
+        shared = self._shared(key)
+        if shared is not None:
+            return shared
+        v = self.value(type_, hint=hint, uniform=uniform, layout=layout)
+        self.emit(engines.relayout(strategy, params, args, (v,), pure=pure,
+                                   no_inline=materialize))
+        self._share(key, v)
+        return v
+
+    def relayout_in_place(self, strategy: str, written: Sequence[Value],
+                          args: Sequence[Operand] = (),
+                          params: Optional[Mapping] = None) -> Stmt:
+        """`written` filled by `strategy` from `args` -- or from `written`
+        themselves, transposed in place -- through references
+        (`engines.RELAYOUT_STRATEGIES`, form `in_place`): the transposes of
+        registers and lanes.  As `call_stmt` wrote the call it replaces: a
+        read and a write of each register written, declared, its producer
+        pinned so that its name stays the one the reference binds."""
+        for w in written:
+            self._require_addressable(w, strategy)
+        for w in written:
+            self.pin(w)
+        return self.emit(engines.relayout(
+            strategy, params or {}, tuple(written) + tuple(args),
+            written=len(written), pure=False))
+
+    def relabel(self, registers: Sequence[Value], order: Sequence[int], *,
+                layouts: Optional[Tuple] = None, hint: str = 'rl',
+                layout: Optional[RegisterLayout] = None) -> Tuple[Value, ...]:
+        """`registers` renamed: result `j` is register `order[j]` of them, in
+        the same lanes -- no instruction (`engines.RELAYOUT_STRATEGIES`,
+        `relabel`).  `layouts`, where the caller states them as bits --
+        source, target, and the relabel of the target's indices -- are held
+        to the order (`engines.relabel_order`): a D fragment read as the
+        next product's A, its K relabeled, is the case in point."""
+        order = tuple(int(i) for i in order)
+        targets = tuple(self.value(registers[i].type, hint=hint,
+                                   uniform=registers[i].uniformity,
+                                   layout=layout)
+                        for i in order)
+        s = engines.relayout('relabel', {}, tuple(registers), targets,
+                             order=order, layouts=layouts)
+        why = engines.relayout_refusal(s)
+        if why is not None:
+            raise IRError(why)
+        self.emit(s)
+        return targets
+
     def split_op(self, name: str, types: Sequence, *args: Operand,
-                 hints: Sequence[str] = (), attrs: Tuple = (),
-                 reads: Sequence[Any] = ()) -> Tuple[Value, ...]:
+                 hints: Sequence[str] = (), attrs: Tuple = ()
+                 ) -> Tuple[Value, ...]:
         """A pure operation with more than one result.
 
         `splitFloatTF32(uint32_t &upper, uint32_t &lower, float value)` is a
@@ -672,23 +773,10 @@ class IRBuilder:
         prints.  `_cse_key` reads `attrs`, so two different callees still hash
         apart.
 
-        `reads` names the shared buffers an operation reads through its
-        arguments -- `ldmatrixX4`, which loads a warp's fragments from the
-        rows its lanes name.  Then it is no pure function of its arguments:
-        it is declared a read of each, pinned where it stands, and every pass
-        orders it against the buffers' writes as it orders a load; and its
-        results are the lanes' own.
+        An operation that reads memory through its arguments is none of
+        these: ldmatrix, which once was one, is a transfer of its own
+        (`matrix_load`).
         """
-        if reads:
-            vs = tuple(self.value(t, hint=h, uniform=Uniformity.LANE)
-                       for t, h in zip(types, list(hints) + [''] * len(types)))
-            accesses = tuple(Access(Effect.READ, self._space_of(r),
-                                    self.alias_root(r)) for r in reads)
-            self._emit_op(Op.SPLIT, vs, tuple(args), pure=False,
-                          movable=False, effect=Effect.READ,
-                          accesses=accesses,
-                          attrs=(('callee', name),) + tuple(attrs))
-            return vs
         vs = tuple(self.value(t, hint=h)
                    for t, h in zip(types, list(hints) + [''] * len(types)))
         self._emit_op(Op.SPLIT, vs, tuple(args), pure=True,
@@ -1024,6 +1112,72 @@ class IRBuilder:
         """A warp's store of `values` to its quarter of `tmem`'s lanes, one
         column each from `column` on (`engines.tmem_st`)."""
         return self.emit(engines.tmem_st(tmem, column, values))
+
+    def _matrix_rows(self, base: Any, index: Operand,
+                     origins: Optional[Sequence[Tuple[int, int]]]):
+        """The lane's row of a matrix transfer, in `base` as it is
+        addressed, and the layout `origins` gives the fragments: a row is 16
+        bytes that move as one, permuted as one where the buffer is
+        swizzled (`_check_width`); a placement that is no layout of bits is
+        refused rather than carried untracked."""
+        elem = base_elem(base) or self._fptype
+        self._check_width(base, engines.MATRIX_ROW_BYTES // elem.size())
+        layout = None
+        if origins is not None:
+            layout = engines.matrix_transfer_bits(origins)
+            if layout is None:
+                raise IRError(f'matrices at {tuple(origins)!r}: no layout of '
+                              f'bits places them (`engines.'
+                              f'matrix_transfer_bits`)')
+        return self._swizzled(base, index), layout
+
+    def matrix_load(self, base: Any, index: Operand, *, count: int = 4,
+                    type_=None, origins: Optional[Sequence] = None,
+                    hint: str = 'frag') -> Tuple[Value, ...]:
+        """`count` 8x8 matrices from the shared buffer `base` into registers
+        of the warp, by ldmatrix (`engines.matrix_load`): lane `l` names row
+        `l % 8` of matrix `l / 8` at `base + index`, and holds in register
+        `i` the word `l % 4` of row `l / 4` of matrix `i` -- an element of
+        32 bits, of `type_` (the buffer's where None).  `origins`, the
+        element of the tile the caller reads that each matrix starts at,
+        gives the op its fragment layout (`engines.matrix_transfer_bits`).
+
+        A read of the buffer, declared, and pinned where it stands, as the
+        warp's collective: every pass orders it against the buffer's writes
+        as it orders a load, and the registers are the lanes' own."""
+        if type_ is None:
+            type_ = ScalarType(base_elem(base) or self._fptype)
+        index, layout = self._matrix_rows(base, index, origins)
+        registers = tuple(self.value(type_, hint=hint,
+                                     uniform=Uniformity.LANE)
+                          for _ in range(count))
+        access = Access(Effect.READ, self._space_of(base),
+                        self.alias_root(base))
+        self._emit_transfer(engines.matrix_load(
+            base, index, registers, access=access, layout=layout))
+        return registers
+
+    def _emit_transfer(self, s: Stmt) -> Stmt:
+        """`s`, a matrix transfer, refused here where the instruction is not
+        what it states (`engines.matrix_transfer_refusal`)."""
+        why = engines.matrix_transfer_refusal(s)
+        if why is not None:
+            raise IRError(why)
+        return self.emit(s)
+
+    def matrix_store(self, base: Any, index: Operand,
+                     registers: Sequence[Value], *,
+                     origins: Optional[Sequence] = None) -> Stmt:
+        """`registers` into `len(registers)` 8x8 matrices of the shared
+        buffer `base`, by stmatrix (`engines.matrix_store`): ldmatrix the
+        other way round -- lane `l` names row `l % 8` of matrix `l / 8` at
+        `base + index`, and its register `i` is the word `l % 4` of row
+        `l / 4` of matrix `i`.  A write of the buffer, declared and pinned."""
+        index, layout = self._matrix_rows(base, index, origins)
+        access = Access(Effect.WRITE, self._space_of(base),
+                        self.alias_root(base))
+        return self._emit_transfer(engines.matrix_store(
+            base, index, registers, access=access, layout=layout))
 
     def commit_group(self, engine: str, object: Optional[Value] = None,
                      issue: Optional[Value] = None) -> Stmt:
@@ -1370,7 +1524,8 @@ class IRBuilder:
               place_align: Optional[int] = None,
               lifetime: Optional[str] = None,
               permutable: Optional[int] = None,
-              own: bool = False) -> Value:
+              own: bool = False,
+              ahead: Optional[Tuple[int, int]] = None) -> Value:
         """Request a buffer *symbolically*.
 
         No offset and no address: for registers the compiler assigns those,
@@ -1395,6 +1550,14 @@ class IRBuilder:
         the body exists.  `own`: every lane reads only what it wrote itself
         there, which together with the `'body'` lifetime owes no barrier
         (`barriers.own_buffers`).
+
+        `ahead` is the buffer's own request of the transfer into it, `(stages,
+        distance)`, which `pir.wrap` honors in place of the pass's: the
+        transfer is issued a trip ahead where fewer than `distance` transfers
+        of its pipeline precede it in the body -- 0 keeps it in its trip --
+        into `stages` copies of the buffer, two putting it at the head of the
+        trip ahead (`wrap.wrap_loads`).  None leaves both to the pass's
+        settings (`move_distance`, `enable_multibuffer`).
         """
         v = self.value(BufferType(elem, tuple(shape), space, swizzle),
                        hint=hint, quals=quals)
@@ -1453,6 +1616,8 @@ class IRBuilder:
             attrs = attrs + (('identity', identity),)
         if permutable is not None:
             attrs = attrs + (('permutable', permutable),)
+        if ahead is not None:
+            attrs = attrs + (('ahead', _ahead(ahead, space)),)
         args = (stage,) if stage is not None and stages > 1 else ()
         self._emit_op(Op.ALLOC, (v,), args, pure=False, movable=False,
                       attrs=attrs)
@@ -1631,6 +1796,11 @@ class IRBuilder:
         """``layout`` is how the loaded value ends up spread over the lanes.
 
         ``shift`` is added to the index after the swizzle -- see `_shifted`.
+
+        ``nontemporal`` asks for a cache policy (`engines.requested_policy`):
+        the kind `hints.cache_hint` gives, or a policy of
+        `engines.CACHE_POLICIES` by name -- `evict_first`, `evict_last` --
+        which the target spells where it can (`_transfer`).
 
         A load is where a distribution *enters* the IR: every later layout is
         derived from one of these or from an explicit relayout, so dropping it
@@ -1840,6 +2010,7 @@ class IRBuilder:
                    src_space: Optional[MemSpace] = None,
                    predicate: Optional[Value] = None,
                    threads: Optional[int] = None,
+                   valid: Optional[Value] = None,
                    hint: str = 'cp') -> Value:
         """Issue an asynchronous copy ``src -> dst``; returns its token.
 
@@ -1879,6 +2050,17 @@ class IRBuilder:
         `threads` are the lanes of the multiplication issuing it, which an
         engine whose destination is one base a wave has to know of
         (`engines.lds_dma_refusal`).
+
+        ``valid`` makes it a copy that fills: issued by every lane the
+        predicate leaves in, it moves its bytes where `valid` holds, and
+        where it does not reads nothing of its source -- whose address need
+        not be one -- and writes its engine's fill into the destination
+        (`engines.TransferEngine.fill`: zeros, `cp.async`'s source size of
+        zero).  So the destination is written whole either way, by the one
+        transfer: a tile's padding or a box past its operand's end comes out
+        zero without a store of its own, and the copy is no predicated one
+        to the passes, which take it a trip ahead as any other
+        (`pir.wrap`).  Refused for an engine that reads every byte it moves.
         """
         dst_space = dst_space if dst_space is not None else self._space_of(dst)
         src_space = src_space if src_space is not None else self._space_of(src)
@@ -1917,12 +2099,22 @@ class IRBuilder:
             attrs += (('cache', cache),)
         if threads is not None and engines.waited_on(engine) is not None:
             attrs += (('threads', int(threads)),)
-        self._emit_op(Op.COPY_ASYNC, (tok,),
-                      (dst, src) + tuple(dst_index) + tuple(src_index),
-                      pure=False, movable=True, predicate=predicate,
-                      effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
-                      accesses=accesses,
-                      attrs=attrs + ((('zfill', zfill),) if zfill else ()))
+        if zfill:
+            attrs += (('zfill', zfill),)
+        fills = ()
+        if valid is not None:
+            attrs += (('fill', engines.fill_of(engine)),)
+            fills = (valid,)
+        s = Stmt(op=Op.COPY_ASYNC, target=(tok,),
+                 args=(dst, src) + tuple(dst_index) + tuple(src_index) + fills,
+                 pure=False, movable=True, predicate=predicate,
+                 effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                 accesses=accesses, attrs=attrs)
+        if valid is not None:
+            why = engines.fill_refusal(s)
+            if why is not None:
+                raise IRError(f'a copy that fills: {why}')
+        self.emit(s)
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
         self._token_engine[tok.id] = engine
@@ -2086,7 +2278,8 @@ class IRBuilder:
 
     def copy_tma(self, dst: Value, src: Any, tmap: 'engines.TensorMap',
                  coords: Sequence[Operand], *, barrier: Value,
-                 dst_index: Operand = 0, hint: str = 'tma') -> Value:
+                 dst_index: Operand = 0, hint: str = 'tma',
+                 cache: Optional[str] = None) -> Value:
         """Issue one copy of a box of the tensor `tmap` describes through
         the tensor memory accelerator (`tma`), into the shared buffer `dst`
         from element `dst_index` on; returns its token.
@@ -2108,6 +2301,10 @@ class IRBuilder:
         is the buffer's; on 128 bytes without one.  A start that is a value
         is the caller's to keep on 128 bytes.  What the copy cannot do is
         refused here (`engines.tma_refusal`).
+
+        `cache` is the cache policy the box's lines get in L2
+        (`engines.CACHE_POLICIES`, `evict_first` or `evict_last`), through
+        the copy's `.L2::cache_hint`; None for none.
         """
         if not isinstance(tmap, engines.TensorMap):
             raise IRError(f'a tensor copy through {tmap!r}, which is no '
@@ -2131,12 +2328,14 @@ class IRBuilder:
                  ('engine', 'tma'), ('completes', engines.completes_of('tma')),
                  ('object', barrier), ('width', tmap.box_bytes()),
                  ('shape', tuple(tmap.box)), ('map', tmap))
+        if cache is not None:
+            attrs += (('cache', cache),)
         s = self._emit_op(Op.COPY_ASYNC, (tok,),
                           (dst, src, dst_index) + tuple(coords),
                           pure=False, movable=True,
                           effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                           accesses=accesses, attrs=attrs)
-        why = engines.tma_refusal(s)
+        why = engines.tma_refusal(s) or engines.cache_refusal(s)
         if why is not None:
             raise IRError(f'the tensor memory accelerator cannot copy into '
                           f'{dst}: {why}')

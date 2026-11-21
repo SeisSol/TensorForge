@@ -956,20 +956,26 @@ def test_the_barrier_placement_sees_the_ldmatrix_reads():
 
 
 def test_ldmatrix_is_a_declared_read_of_its_buffer():
-    """Every pass orders ldmatrix by what it says it reads: each
-    `ldmatrixX4` is a read of the buffer its lanes name, in shared memory,
-    and no pure function a pass may move or merge."""
+    """Every pass orders ldmatrix by what it says it reads: each load of
+    four matrices (`Op.MATRIX_LOAD`) is a read of the buffer its lanes
+    name, in shared memory, and no pure function a pass may move or merge;
+    and its fragments are where the instruction that reads them takes A
+    (`engines.matrix_transfer_bits`, `nvidia.a_fragment_bits`)."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
     from tensorforge.backend.pir.core import Effect, MemSpace, Op, walk_stmts
     gen = _generate(_volume(6, 's'), _context(multi_element='force'))
     loads = [st for section in gen.built._sections
              for st in walk_stmts(section.body)
-             if st.op == Op.SPLIT
-             and st.attr('callee') == 'tensorforge::ldmatrixX4']
+             if st.op == Op.MATRIX_LOAD and st.attr('engine') == 'ldmatrix']
     assert len(loads) == 15
+    atom = next(a for a in nvidia.INSTRS if (a.m, a.n, a.k) == (16, 8, 8)
+                and a.mode == nvidia.MMAMode.TF32)
     for st in loads:
         assert not st.pure and not st.movable
         assert [(a.kind, a.space) for a in st.accesses] == [
             (Effect.READ, MemSpace.SHARED)]
+        assert st.attr('count') == 4
+        assert st.attr('layout') == nvidia.a_fragment_bits(atom)
 
 
 def _stores(lines, pattern, zeros=False):

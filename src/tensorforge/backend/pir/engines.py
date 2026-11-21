@@ -45,7 +45,12 @@ asynchronous transfer names its engine and the kind it completes by
 (`engine`, `completes`), and the class `asyncmem` counts it in derives from
 that (`counter_of`).  Every transfer says how many bytes a lane moves
 (`width`), the cache policy where one is set (`cache`), and a block its
-`shape`.  The LDS-DMA's waits are TF's to write, on the counter
+`shape`.  A copy through an engine that fills (`TransferEngine.fill`:
+`cp.async`, whose source size is an operand) may end in the condition
+under which it reads (`Stmt.copy_valid`): issued by every lane it is
+for, it reads nothing where that fails and writes the fill, so it writes
+its destination whole and is no predicated copy to the passes.  The
+LDS-DMA's waits are TF's to write, on the counter
 (`waited_on`): the compiler places none in front of a read of what a copy
 wrote, and the instruction's one destination -- a base a wave, lane t's
 bytes t places past it -- is checked where the copy is written
@@ -61,7 +66,12 @@ as the bulk copy is (`tma_refusal`), into shared memory in the layout of
 the map's swizzle, which is a TensorForge swizzle (`swizzle_form`); and it
 adds such a box back into the tensor (`tma_reduce`), one thread's, counted
 in that thread's bulk groups.  Which of these stages an operand's batch is
-the batch's stride's question (`staging_engine`).
+the batch's stride's question (`staging_engine`).  NVIDIA's `ldmatrix` and
+`stmatrix` move a warp's 8x8 matrices between shared memory and the
+registers of its lanes as one collective (`Op.MATRIX_LOAD`,
+`Op.MATRIX_STORE`): each lane names a row, holds a word of every matrix,
+and the op carries where that puts each element of the tile the matrices
+lie in (`matrix_transfer_bits`).
 
 What this increment keeps, on purpose:
 
@@ -91,6 +101,8 @@ What this increment keeps, on purpose:
 
 from __future__ import annotations
 
+import itertools
+import string
 from dataclasses import dataclass
 from enum import Enum
 from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
@@ -379,6 +391,12 @@ class TransferEngine:
     #: it across the copy, merges two into one and drops a dead one, and a
     #: count that includes it can come out larger than what is in flight.
     one_to_one: bool = False
+    #: What a transfer through it writes where it reads nothing -- `zero`,
+    #: or None where it reads every byte it moves: a copy that fills
+    #: (`IRBuilder.copy_async`'s `valid`, `Stmt.copy_valid`) is issued by
+    #: every lane it is for, and where its condition fails moves no byte of
+    #: its source and this into its destination.
+    fill: Optional[str] = None
 
 
 TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
@@ -389,7 +407,9 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    'float4, a planar quad, a wide staging hop'),
     TransferEngine('cp_async', (Op.COPY_ASYNC,), Completion.GROUP,
                    'cp.async into shared memory, sm_80 and newer, counted in '
-                   'commit groups'),
+                   'commit groups; its source size, an operand, fills: zero '
+                   'reads nothing and writes zeros (PTX ISA, "cp.async")',
+                   fill='zero'),
     TransferEngine('lds_dma', (Op.COPY_ASYNC,), Completion.COUNTER,
                    "AMD's global_load_lds into the LDS (CDNA2/3), counted "
                    'in vmcnt one operation at a time; its waits are written '
@@ -442,6 +462,29 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    'else; its waits are written out, and a barrier behind '
                    'the wait shows the tile to the other waves',
                    waited_on='tensorcnt', one_to_one=True),
+    TransferEngine('block', (Op.LOAD,), Completion.SYNC,
+                   'a block message read as one: a window of shared memory '
+                   'under the explicit vector (`slmLoad`), or a run of reads '
+                   'of one buffer at consecutive offsets, a sub-group block '
+                   'read under SPMD -- into a vector its reads become the '
+                   'parts of (`block_reads`)'),
+    TransferEngine('block2d', (Op.LOAD,), Completion.SYNC,
+                   "Intel's LSC 2D block read (PVC): `shape` rows x columns "
+                   'of a surface `pitch` bytes a row apart, handed to a '
+                   'sub-group of 16 a column a lane, or transposed a row a '
+                   'lane (`transpose`; `vnni` for 8- and 16-bit data, not '
+                   'built), in one message (`block_reads.load_block2d`, '
+                   '`block2d_refusal`)'),
+    TransferEngine('ldmatrix', (Op.MATRIX_LOAD,), Completion.SYNC,
+                   "NVIDIA's ldmatrix (sm_75 on): one, two or four 8x8 "
+                   'matrices of 16-byte rows from shared memory into the '
+                   'registers of a warp, as one collective of it -- each '
+                   'lane names a row and holds a word of every matrix, '
+                   'where the fragment layout puts it '
+                   '(`matrix_transfer_bits`)'),
+    TransferEngine('stmatrix', (Op.MATRIX_STORE,), Completion.SYNC,
+                   "NVIDIA's stmatrix (sm_90 on): ldmatrix the other way "
+                   "round, a warp's registers into the rows its lanes name"),
 )}
 
 #: The class `asyncmem` counts a transfer in, by the kind of completion its
@@ -474,6 +517,57 @@ def one_to_one(engine: Optional[str]) -> bool:
     may count (`TransferEngine.one_to_one`)."""
     found = TRANSFER_ENGINES.get(engine) if engine is not None else None
     return found is not None and found.one_to_one
+
+
+#: The ops whose `engine` names a transfer engine (`TRANSFER_ENGINES`):
+#: the others that say an engine name a matrix engine or the one a fence,
+#: a wait or a commit orders.
+TRANSFER_OPS = (Op.LOAD, Op.STORE, Op.COPY_ASYNC, Op.LOAD_ASYNC,
+                Op.MATRIX_LOAD, Op.MATRIX_STORE)
+
+
+def transfer_engine_refusal(s: Stmt) -> Optional[str]:
+    """Why the engine a transfer names is none it goes through, or None: a
+    transfer that names one names a registered engine whose ops are its own
+    (`TRANSFER_ENGINES`)."""
+    engine = s.attr('engine')
+    if engine is None or s.op not in TRANSFER_OPS:
+        return None
+    found = TRANSFER_ENGINES.get(engine)
+    if found is None:
+        return (f'{s.op} through {engine!r}, which is no transfer engine; '
+                f'there are {", ".join(sorted(TRANSFER_ENGINES))}')
+    if s.op not in found.ops:
+        return f'{s.op} through {engine}, which moves {", ".join(found.ops)}'
+    return None
+
+
+def fill_of(engine: Optional[str]) -> Optional[str]:
+    """What a copy through `engine` writes where it reads nothing
+    (`TransferEngine.fill`), or None where no copy through it fills."""
+    found = TRANSFER_ENGINES.get(engine) if engine is not None else None
+    return None if found is None else found.fill
+
+
+def fill_refusal(copy: Stmt) -> Optional[str]:
+    """Why `copy`, a copy that fills, is none its engine issues, or None.
+
+    Its engine fills, with what the copy says it writes (`fill`), and the
+    copy ends in the condition under which it reads -- a boolean value,
+    which every lane it is for evaluates for itself (`Stmt.copy_valid`)."""
+    fill = copy.attr('fill')
+    engine = copy.attr('engine')
+    if fill_of(engine) is None:
+        return (f'{engine} reads every byte it moves: no copy through it '
+                f'fills')
+    if fill != fill_of(engine):
+        return f'a fill of {fill!r}, where {engine} writes {fill_of(engine)!r}'
+    valid = copy.copy_valid
+    t = getattr(valid, 'type', None)
+    if not (isinstance(valid, Value) and getattr(t, 'length', 0) is None
+            and getattr(getattr(t, 'base', None), 'name', None) == 'BOOL'):
+        return f'it reads under {valid!r}, which is no boolean value'
+    return None
 
 
 def copy_engine(target: Any) -> str:
@@ -999,6 +1093,411 @@ def staging_engine(target: Any, addressing: Any, *,
     return copy_engine(target), tuple(why)
 
 
+# --------------------------------------------------------------------------- #
+# Matrix transfers: a warp's 8x8 matrices between shared memory and registers
+# --------------------------------------------------------------------------- #
+
+#: The matrices one transfer moves (`.x1`, `.x2`, `.x4`), each eight rows of
+#: 16 bytes -- PTX's `.m8n8` of 16-bit elements (`MATRIX_TRANSFER_SHAPE`),
+#: four of 32 bits a row (PTX ISA, "Warp-level matrix load instruction:
+#: ldmatrix" and "Warp-level matrix store instruction: stmatrix").
+MATRIX_TRANSFER_COUNTS = (1, 2, 4)
+MATRIX_TRANSFER_SHAPE = (8, 8)
+MATRIX_ROWS = 8
+MATRIX_ROW_BYTES = 16
+
+#: The first architecture each is on: ldmatrix's `.m8n8` from sm_75 (PTX ISA
+#: 6.5), stmatrix's from sm_90 (PTX ISA 7.8).
+MATRIX_TRANSFER_SM = {'ldmatrix': 75, 'stmatrix': 90}
+
+#: The op of each, by its engine.
+MATRIX_TRANSFER_OPS = {'ldmatrix': Op.MATRIX_LOAD, 'stmatrix': Op.MATRIX_STORE}
+
+
+def matrix_transfer_bits(origins: Sequence[Tuple[int, int]]) -> Any:
+    """The fragment layout of a matrix transfer of 32-bit elements -- a
+    `BitLayout` over the rows and the columns of the tile its matrices lie
+    in -- or None where that is no layout of bits.  `origins` is the element
+    of the tile each matrix starts at, (row, column): matrix `i`, the one
+    whose rows lanes `8 i` to `8 i + 7` name.
+
+    What the instruction states (PTX ISA, "ldmatrix", "stmatrix"): lane `t`
+    holds in register `i` the 32-bit word `t % 4` of row `t / 4` of matrix
+    `i`.  Over 32-bit elements a word is one, so a matrix's row is the lane's
+    bits 2 to 4 and its element the lane's bits 0 and 1, and the matrix is
+    the register: a bit of the register's number for each bit of the tile
+    past a matrix's eight rows or four columns.  That takes a placement in
+    which each bit of a matrix's number moves it by one such bit -- `origins`
+    the sums of the steps of their numbers' bits -- and the steps along each
+    axis fill its bits from the matrix's own up.  `((0, 0), (8, 0), (0, 4),
+    (8, 4))` is the A fragment of `mma.sync`'s m16n8k8 over TF32
+    (`nvidia.a_fragment_bits`).
+    """
+    from tensorforge.backend.instructions.compute.bitlayout import (
+        Bit, BitLayout, Place)
+    origins = tuple(tuple(o) for o in origins)
+    count = len(origins)
+    if count not in MATRIX_TRANSFER_COUNTS or origins[0] != (0, 0):
+        return None
+    steps = [origins[1 << b] for b in range((count - 1).bit_length())]
+    for i, at in enumerate(origins):
+        want = tuple(sum(step[axis] for b, step in enumerate(steps)
+                         if i >> b & 1) for axis in (0, 1))
+        if at != want:
+            return None
+    words = MATRIX_ROW_BYTES // 4
+    down = sorted((r, b) for b, (r, c) in enumerate(steps) if c == 0 and r)
+    across = sorted((c, b) for b, (r, c) in enumerate(steps) if r == 0 and c)
+    if len(down) + len(across) != len(steps):
+        return None
+    if any(r != MATRIX_ROWS << k for k, (r, _) in enumerate(down)) or any(
+            c != words << k for k, (c, _) in enumerate(across)):
+        return None
+    rows = (tuple(Bit(Place.LANE, 4 << k) for k in range(3))
+            + tuple(Bit(Place.SLOT, 1 << b) for _, b in down))
+    cols = (tuple(Bit(Place.LANE, 1 << k) for k in range(2))
+            + tuple(Bit(Place.SLOT, 1 << b) for _, b in across))
+    return BitLayout((rows, cols))
+
+
+def matrix_registers(s: Stmt) -> Tuple[Any, ...]:
+    """The registers of a matrix transfer: what a load defines, what a store
+    reads (its operands behind the base and the index)."""
+    return tuple(s.target) if s.op == Op.MATRIX_LOAD else tuple(s.args[2:])
+
+
+def matrix_transfer_refusal(s: Stmt) -> Optional[str]:
+    """Why `s` is no matrix transfer this lowering writes, or None.
+
+    The engine's own op -- ldmatrix loads, stmatrix stores -- of one, two or
+    four matrices of `MATRIX_TRANSFER_SHAPE`, a register of each, and each
+    register an element of 32 bits: a word of a row, which the transposing
+    form (`.trans`) and the 16-bit elements would split, and neither is
+    built.  Every lane of the warp takes part (`.aligned`), so there is no
+    predicate; the operands are the buffer and the lane's row in it, which
+    the op declares as one read or one write of shared memory; a layout it
+    carries is one of bits (`matrix_transfer_bits`).
+    """
+    engine = s.attr('engine')
+    if MATRIX_TRANSFER_OPS.get(engine) != s.op:
+        return (f'{s.op} through {engine!r}: ldmatrix loads and stmatrix '
+                f'stores')
+    count = s.attr('count')
+    if count not in MATRIX_TRANSFER_COUNTS:
+        return (f'{count!r} matrices; the instruction moves one of '
+                f'{MATRIX_TRANSFER_COUNTS}')
+    if s.attr('shape') != MATRIX_TRANSFER_SHAPE:
+        return (f'matrices of {s.attr("shape")!r}; the instruction moves '
+                f'{MATRIX_TRANSFER_SHAPE} of 16-bit elements')
+    registers = matrix_registers(s)
+    want = 2 if s.op == Op.MATRIX_LOAD else 2 + count
+    if len(s.args) != want or len(registers) != count:
+        return f'{len(registers)} registers for {count} matrices'
+    for v in registers:
+        t = getattr(v, 'type', None)
+        size = getattr(getattr(t, 'base', None), 'size', None)
+        if not (isinstance(v, Value) and getattr(t, 'length', 0) is None
+                and callable(size) and size() == 4):
+            return (f'{v!r} is no register of a 32-bit element, a word of a '
+                    f'row of a matrix')
+    if s.predicate is not None:
+        return ('every lane of the warp takes part (`.aligned`): a predicate '
+                'would leave lanes out')
+    kind = Effect.READ if s.op == Op.MATRIX_LOAD else Effect.WRITE
+    if len(s.accesses) != 1 or s.accesses[0].kind != kind or \
+            s.accesses[0].space != MemSpace.SHARED:
+        return (f'{s.op} declares {s.accesses!r}, where it is one '
+                f'{"read" if kind == Effect.READ else "write"} of shared '
+                f'memory')
+    layout = s.attr('layout')
+    if layout is not None:
+        from tensorforge.backend.instructions.compute.bitlayout import (
+            BitLayout)
+        if not isinstance(layout, BitLayout):
+            return f'a fragment layout of {layout!r}, which is no BitLayout'
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Relayout: registers brought from one distribution over the lanes to another
+# --------------------------------------------------------------------------- #
+
+#: The backend families AMD's code generation runs under: HIP, and SYCL
+#: compiled for AMD (AdaptiveCpp's gfx targets), which writes the same
+#: calls and builtins.
+AMD_FAMILIES = ('hip', 'sycl')
+
+#: The forms a relayout is written in (`RelayoutStrategy.form`): a value of a
+#: value (`value`), returned by what it is written as; registers written
+#: through references (`in_place`), declared ahead of it -- the transposes
+#: of AMD's quads and sixteens, whose outputs are the first `written`
+#: operands; and registers renamed (`relabel`), each result a register the
+#: source holds already, which writes no instruction.
+RELAYOUT_FORMS = ('value', 'in_place', 'relabel')
+
+
+def _xlane(params: Mapping) -> Optional[str]:
+    return 'xlane'
+
+
+def _xlane_wide(params: Mapping) -> Optional[str]:
+    return 'xlane.wide'
+
+
+def _broadcast_pipe(params: Mapping) -> Optional[str]:
+    """A broadcast over a block wider than a row of sixteen lanes crosses
+    the rows (`emit._crosslane_category`, `analysis.pipeline`)."""
+    return 'xlane.wide' if int(params['threads']) > 16 else 'xlane'
+
+
+def _no_issue(params: Mapping) -> Optional[str]:
+    return None
+
+
+@dataclass(frozen=True)
+class RelayoutStrategy:
+    """One way of bringing registers from the distribution over the lanes
+    they have to another (`Op.RELAYOUT`): the instruction it is written as,
+    what it costs, and which lanes it reads.
+
+    `families` are the backends it is written for (`family`); `form` how
+    (`RELAYOUT_FORMS`); `callee` the function it is written as, a template
+    over its parameters (`params`) -- whose lanes `pir.demand` reads off
+    it, as it reads a call's (`demand.lane_map`); `units` and `pipe` what
+    it adds to the code count and the issue mix -- the figures the calls
+    it replaced were counted as.  `lossy` where the result holds fewer
+    distinct elements than the source, a sub-block repeated.
+
+    Which strategy closes a gap between two layouts is the target's
+    question (`amd.relayout.find_relayout`, which searches AMD's rows; a
+    relabel where the two agree but for the registers, `relabel_order`)."""
+
+    name: str
+    families: Tuple[str, ...]
+    form: str
+    callee: Optional[str] = None
+    pipe: Callable[[Mapping], Optional[str]] = _xlane
+    units: int = 1
+    lossy: bool = False
+    doc: str = ''
+
+    def spelled(self, params: Mapping) -> str:
+        """The function a relayout of these parameters is written as."""
+        return self.callee.format(**dict(params))
+
+    @property
+    def fields(self) -> Tuple[str, ...]:
+        """The parameters its callee names: what tells two relayouts of it
+        apart, as the text of the call they were did."""
+        if self.callee is None:
+            return ()
+        return tuple(name for _, name, _, _ in
+                     string.Formatter().parse(self.callee) if name)
+
+
+RELAYOUT_STRATEGIES: Dict[str, RelayoutStrategy] = {r.name: r for r in (
+    RelayoutStrategy(
+        'broadcast', AMD_FAMILIES, 'value',
+        'tensorforge::broadcast<{threads}, {step}, {lane}>',
+        pipe=_broadcast_pipe, lossy=True,
+        doc="AMD's DPP broadcast (`hip.h`): sub-block `lane` of `step` "
+            'lanes, repeated over each block of `threads`'),
+    RelayoutStrategy(
+        'movdpp16', AMD_FAMILIES, 'value', 'tensorforge::movdpp16<{row}>',
+        lossy=True,
+        doc="AMD's DPP row share: lane `row` of each row of sixteen"),
+    RelayoutStrategy(
+        'movdpp16_kept', AMD_FAMILIES, 'value',
+        'tensorforge::movdpp16Kept<{row}>', lossy=True,
+        doc='the row share, kept where it is issued (`hip.h`)'),
+    RelayoutStrategy(
+        'transpose4x4', AMD_FAMILIES, 'in_place', 'tensorforge::transpose4x4b32',
+        doc='the 4x4 transpose of (register, lane % 4) into four registers '
+            'declared ahead of it'),
+    RelayoutStrategy(
+        'transpose4x4_fused', AMD_FAMILIES, 'in_place',
+        'tensorforge::transpose4x4b32Fused',
+        doc='the same exchange, its shuffle and selection fused '
+            '(`Options.amd_fused_transpose`)'),
+    RelayoutStrategy(
+        'transpose16x16', AMD_FAMILIES, 'in_place',
+        'tensorforge::transpose16x16b32',
+        doc='the 16x16 transpose of (register, lane % 16), in place on its '
+            'sixteen operands'),
+    RelayoutStrategy(
+        'relabel', ('cuda', 'hip', 'sycl', 'esimd', ''), 'relabel',
+        pipe=_no_issue, units=0,
+        doc='the registers renamed: each result a register the source holds '
+            'already, where the two layouts agree but for the order of the '
+            'registers (`relabel_order`) -- a D fragment read as the next '
+            "product's A, its K relabeled; written as copies the compiler "
+            'folds, no instruction'),
+    RelayoutStrategy(
+        'shfl', ('cuda',), 'value', 'tensorforge::gather<32>',
+        pipe=_xlane_wide,
+        doc="NVIDIA's warp shuffle (`SHFL.IDX`, `cuda.h`'s gather): each "
+            'lane the register of the lane its second operand names'),
+)}
+
+
+def relayout_strategy(s: Stmt) -> RelayoutStrategy:
+    """The strategy a `RELAYOUT` names."""
+    found = RELAYOUT_STRATEGIES.get(s.attr('strategy'))
+    if found is None:
+        raise IRError(f'a relayout by {s.attr("strategy")!r}; there are '
+                      f'{", ".join(sorted(RELAYOUT_STRATEGIES))}')
+    return found
+
+
+def relayout_callee(s: Stmt) -> Optional[str]:
+    """The function a `RELAYOUT` is written as, or None for one written as
+    no call (a relabel): what `pir.demand`'s lane maps and the issue mix
+    read, as they read a call's."""
+    strategy = relayout_strategy(s)
+    if strategy.callee is None:
+        return None
+    return strategy.spelled(dict(s.attr('params') or ()))
+
+
+def relabel_order(source: Any, target: Any,
+                  relabel: Optional[Sequence[Callable[[int], int]]] = None
+                  ) -> Optional[Tuple[int, ...]]:
+    """Which register of the source each register of the target is, where
+    the two layouts (`BitLayout`s over the same indices) put every element
+    in the same lane -- the registers renamed, no instruction -- or None
+    where some element would change lanes.
+
+    `relabel`, one function an index, renames the indices of the target:
+    element `(i, j)` of the source is element `(relabel[0](i), relabel[1]
+    (j))` of the target.  So a D fragment is the next product's A where B's
+    K rows are relabeled to match (`d-to-a-is-a-column-relabel`): mma.sync's
+    D of m16n8 and its A of m16n8k8 over TF32 differ by a rotation of a
+    column's three bits, which a relabel of K undoes."""
+    if len(source.axes) != len(target.axes):
+        return None
+    sizes = []
+    for bits_s, bits_t in zip(source.axes, target.axes):
+        if len(bits_s) != len(bits_t):
+            return None
+        sizes.append(1 << len(bits_s))
+    order: Dict[int, int] = {}
+    for index in itertools.product(*(range(n) for n in sizes)):
+        renamed = tuple(index) if relabel is None else tuple(
+            f(i) for f, i in zip(relabel, index))
+        if any(not 0 <= i < n for i, n in zip(renamed, sizes)):
+            return None
+        at_s = source.locate(*index)
+        at_t = target.locate(*renamed)
+        if at_s.lane != at_t.lane or at_s.element != at_t.element:
+            return None
+        if order.setdefault(at_t.slot, at_s.slot) != at_s.slot:
+            return None
+    slots = sorted(order)
+    if slots != list(range(len(slots))) or sorted(order.values()) != slots:
+        return None
+    return tuple(order[j] for j in slots)
+
+
+def relabeling(source: Any, target: Any
+               ) -> Optional[Tuple[Tuple[Callable[[int], int], ...],
+                                   Tuple[int, ...]]]:
+    """The relabel of the indices under which `target` holds every element
+    in the lane `source` holds it -- a permutation of each index's bits --
+    and the order of the registers then (`relabel_order`), or None where no
+    relabel does it.
+
+    A bit of an index that lies on a lane, or inside a vector register, has
+    to land on the same lane bit or vector bit in the target, of the same
+    index; a bit that picks the register may land on any register bit of
+    it.  So a gap between two layouts that is the registers alone, once the
+    indices are renamed, is closed with no instruction: what a consumer
+    reading the same values under the renamed indices -- B's K rows
+    relabeled to match -- takes as it stands.  mma.sync's D of m16n8 is
+    the A of the next m16n8k8 over TF32 that way, its column's low bit the
+    register's and its two higher the lane's, where A's two low bits are
+    the lane's and its high bit the register's (`d-to-a-is-a-column-
+    relabel`)."""
+    from tensorforge.backend.instructions.compute.bitlayout import Place
+    if len(source.axes) != len(target.axes):
+        return None
+    maps = []
+    for bits_s, bits_t in zip(source.axes, target.axes):
+        if len(bits_s) != len(bits_t):
+            return None
+        mapping = [None] * len(bits_s)
+        free = [k for k, b in enumerate(bits_t) if b.place is Place.SLOT]
+        for k, b in enumerate(bits_s):
+            if b.place is Place.SLOT:
+                if not free:
+                    return None
+                mapping[k] = free.pop(0)
+                continue
+            hit = [m for m, c in enumerate(bits_t)
+                   if c.place is b.place and c.weight == b.weight]
+            if len(hit) != 1:
+                return None
+            mapping[k] = hit[0]
+        if sorted(mapping) != list(range(len(bits_s))):
+            return None
+
+        def move(i, mapping=tuple(mapping)):
+            return sum(1 << m for k, m in enumerate(mapping) if i >> k & 1)
+        maps.append(move)
+    relabel = tuple(maps)
+    order = relabel_order(source, target, relabel)
+    return None if order is None else (relabel, order)
+
+
+def relayout_refusal(s: Stmt) -> Optional[str]:
+    """Why `s` is no relayout its strategy writes, or None.
+
+    Its strategy one of `RELAYOUT_STRATEGIES`, in its form: a value of a
+    value -- and for a shuffle the lane it reads -- one result; registers
+    written through references, as many as `written` says, declared as a
+    read and a write each, and no result; registers renamed, a result a
+    register in the order `order` names, which is a permutation, and the
+    layouts a relabel in that order where it states them (`layouts`:
+    source, target and the relabel of the indices, `relabel_order`).  A
+    relayout reads other lanes' registers, so it is under no predicate."""
+    strategy = RELAYOUT_STRATEGIES.get(s.attr('strategy'))
+    if strategy is None:
+        return f'no strategy {s.attr("strategy")!r}'
+    form = strategy.form
+    if form == 'value':
+        want = 2 if strategy.name == 'shfl' else 1
+        if len(s.target) != 1 or len(s.args) != want:
+            return (f'{strategy.name} takes {want} operand(s) and gives one '
+                    f'value, not {len(s.args)} and {len(s.target)}')
+    elif form == 'in_place':
+        written = s.attr('written')
+        if s.target or not isinstance(written, int) or not (
+                0 < written <= len(s.args)):
+            return (f'{strategy.name} writes the first `written` of its '
+                    f'operands, and gives no value')
+        regs = list(s.args[:written])
+        if [a.base for a in s.accesses] != regs or any(
+                a.space != MemSpace.REGISTER
+                or a.kind != Effect.READ | Effect.WRITE for a in s.accesses):
+            return (f'{strategy.name} without a read and a write of each '
+                    f'register it writes')
+    else:
+        order = s.attr('order')
+        if (not isinstance(order, tuple) or len(order) != len(s.target)
+                or sorted(order) != list(range(len(s.args)))):
+            return (f'a relabel of {len(s.args)} registers into '
+                    f'{len(s.target)} in the order {order!r}: a permutation')
+        layouts = s.attr('layouts')
+        if layouts is not None:
+            source, target, relabel = (tuple(layouts) + (None,))[:3]
+            if relabel_order(source, target, relabel) != order:
+                return (f'the layouts are no relabel in the order {order!r}: '
+                        f'an element would change lanes')
+    if s.predicate is not None:
+        return ('a relayout reads the registers of other lanes, which a '
+                'predicate would leave out')
+    return None
+
+
 def element_of(type_: Any, base: Any) -> Any:
     """The element a transfer moves a lane of: the value's, or where the
     value has no type of its own -- a literal stored -- the buffer's."""
@@ -1037,6 +1536,93 @@ def engine_of(s: Stmt) -> Optional[str]:
     return 'scalar' if length is None else 'vector'
 
 
+#: The element types an access through an L2 policy is spelled for
+#: (`tensorforge::ldL2`, `stL2`): the scalars of a kernel's data.
+L2_HINT_TYPES = (Datatype.F32, Datatype.F64)
+
+
+@dataclass(frozen=True)
+class CachePolicy:
+    """What the caches are told about the lines a transfer touches: a
+    transfer's `cache`, which moves the same numbers whatever it says.
+
+    `l1` is what L1 does with the lines -- `allocate`s them (the default),
+    `bypass`es them (cached at L2 alone) or keeps them to `evict_first` --
+    and `l2` what L2 does: `normal`, `evict_first` or `evict_last`.
+    `engines` are the transfer engines that take it (`engine_of`).
+    `l2_evict` names the priority of the policy operand an access takes
+    through `.L2::cache_hint`, made by `createpolicy`
+    (`tensorforge::L2Evict`), on CUDA from sm `sm` on -- None for a policy
+    spelled as a cache operator of the instruction itself."""
+
+    name: str
+    l1: str
+    l2: str
+    engines: Tuple[str, ...]
+    sm: int = 0
+    l2_evict: Optional[str] = None
+    doc: str = ''
+
+    def spelled_on(self, target: Any, datatype: Any, length: int = 1) -> bool:
+        """Whether `target` spells this policy on an access of `length` x
+        `datatype`.  A cache operator wherever the target has the hint for
+        that type (`Target.nontemporal`); a policy operand on CUDA from its
+        sm on, on one element of `L2_HINT_TYPES` -- elsewhere the access is
+        written plainly, which costs the policy and nothing else."""
+        if self.l2_evict is None:
+            return bool(target.nontemporal(datatype, length))
+        sm_level = getattr(getattr(target, 'hw', None), 'sm_level', None)
+        level = sm_level() if callable(sm_level) else None
+        return (getattr(target, 'backend', None) == 'cuda'
+                and level is not None and level >= self.sm
+                and length == 1 and datatype in L2_HINT_TYPES)
+
+
+CACHE_POLICIES: Dict[str, CachePolicy] = {p.name: p for p in (
+    CachePolicy(
+        'ca', 'allocate', 'normal', ('cp_async',),
+        doc='cached at every level: `cp.async.ca`, a copy of four or eight '
+            'bytes (PTX ISA, "cp.async": `.ca`), as a load without a hint '
+            'is cached'),
+    CachePolicy(
+        'cg', 'bypass', 'normal', ('scalar', 'vector', 'cp_async'),
+        doc='the L1 bypass, cached at L2 alone: `ld.global.cg` and '
+            '`st.global.cg` (`__ldcg`, `__stcg`; PTX ISA, "Cache '
+            'Operators"), `cp.async.cg` of sixteen bytes; on AMD the '
+            'nontemporal builtins'),
+    CachePolicy(
+        'cs', 'evict_first', 'evict_first', ('scalar', 'vector'),
+        doc='streamed, evicted first at every level: `ld.global.cs` and '
+            '`st.global.cs` (`__ldcs`, `__stcs`; PTX ISA, "Cache '
+            'Operators"); on AMD the nontemporal builtins'),
+    CachePolicy(
+        'evict_first', 'allocate', 'evict_first',
+        ('scalar', 'vector', 'tma'), sm=80, l2_evict='First',
+        doc='evicted first from L2: the policy `createpolicy.fractional.'
+            'L2::evict_first` makes of every line (PTX ISA, "createpolicy"; '
+            'sm_80), taken by `ld.global.L2::cache_hint` and `st.global.'
+            'L2::cache_hint` (PTX ISA, "ld", "st"; `tensorforge::ldL2`, '
+            '`stL2`) and by a box through a tensor map (PTX ISA, '
+            '"cp.async.bulk.tensor": `.L2::cache_hint`; `tmaLoad<P>`)'),
+    CachePolicy(
+        'evict_last', 'allocate', 'evict_last',
+        ('scalar', 'vector', 'tma'), sm=80, l2_evict='Last',
+        doc='evicted last from L2: the same through `createpolicy.'
+            'fractional.L2::evict_last` -- for what every block reads '
+            'again, an operator'),
+)}
+
+
+def requested_policy(request: Any) -> Optional[str]:
+    """The cache policy an access's request (`nontemporal`) names: the
+    kind `hints.cache_hint` gives (`'cg'`, `'cs'`), a policy of
+    `CACHE_POLICIES` by name, or a bare True, which asks for the L1 bypass
+    (`CudaLexic._hint_kind`); None for no request."""
+    if not request:
+        return None
+    return 'cg' if request is True else request
+
+
 def copy_cache(engine: str, width: Optional[int]) -> Optional[str]:
     """The cache policy a copy's width gives it: sixteen bytes of `cp.async`
     lower to `cp.async.cg` and go past L1, four and eight to `cp.async.ca`
@@ -1054,18 +1640,52 @@ UNRESOLVED = object()
 
 def cache_policy(request: Any, target: Any, datatype: Any,
                  length: int = 1) -> Any:
-    """The cache hint an access that asks for `request` (`hints.cache_hint`:
-    `'cg'`, `'cs'`, or False) gets on `target`, for an access of `length` x
-    `datatype`: the request where the target spells it for that type
-    (`Target.nontemporal`), None where it does not -- and `UNRESOLVED`
-    without a target, for the emitter to ask the one it lowers for."""
-    if not request:
+    """The cache policy (`CACHE_POLICIES`) a load or store that asks for
+    `request` (`requested_policy`) gets on `target`, for an access of
+    `length` x `datatype`: the policy where the target spells it for that
+    type (`CachePolicy.spelled_on`), None where it does not -- and
+    `UNRESOLVED` without a target, for the emitter to ask the one it lowers
+    for.  A request for no policy a load or store takes is refused."""
+    name = requested_policy(request)
+    if name is None:
         return None
+    policy = CACHE_POLICIES.get(name)
+    if policy is None or not {'scalar', 'vector'} & set(policy.engines):
+        raise IRError(f'a load or store asking for the cache policy '
+                      f'{request!r}; they take '
+                      + ', '.join(p.name for p in CACHE_POLICIES.values()
+                                  if 'scalar' in p.engines))
     if target is None:
         return UNRESOLVED
-    if datatype is None or not target.nontemporal(datatype, length):
+    if datatype is None or not policy.spelled_on(target, datatype, length):
         return None
-    return request
+    return name
+
+
+def l2_evict_of(cache: Any) -> Optional[str]:
+    """The priority of the policy operand an access with the cache policy
+    `cache` takes (`CachePolicy.l2_evict`): `tensorforge::L2Evict`'s
+    enumerator, or None for a policy without one."""
+    policy = CACHE_POLICIES.get(cache) if isinstance(cache, str) else None
+    return policy.l2_evict if policy is not None else None
+
+
+def cache_refusal(s: Stmt) -> Optional[str]:
+    """Why the cache policy a transfer states (`cache`) is none it takes,
+    or None: a policy of `CACHE_POLICIES` its engine takes
+    (`CachePolicy.engines`, `engine_of`)."""
+    cache = s.attr('cache')
+    if cache is None or s.op not in TRANSFER_OPS:
+        return None
+    policy = CACHE_POLICIES.get(cache) if isinstance(cache, str) else None
+    if policy is None:
+        return (f'{s.op} with the cache policy {cache!r}, which is none; '
+                f'there are {", ".join(CACHE_POLICIES)}')
+    engine = engine_of(s)
+    if engine not in policy.engines:
+        return (f'{s.op} through {engine} with the cache policy {cache}, '
+                f'which {", ".join(policy.engines)} take')
+    return None
 
 
 #: The attributes of an access that are global memory's alone, which a pass
@@ -1708,6 +2328,114 @@ def _lower_set_priority(s: Stmt, env: Spelling) -> Lowered:
 
 
 # --------------------------------------------------------------------------- #
+# Matrix transfers
+# --------------------------------------------------------------------------- #
+
+def _matrix_transfer_available(s: Stmt, env: Spelling) -> None:
+    """Refuse a CUDA target older than the architecture the engine is on
+    (`MATRIX_TRANSFER_SM`); every other backend has no lowering at all
+    (`_no_matrix_transfer`).  Without a target it is written as for one."""
+    engine = s.attr('engine')
+    sm_level = getattr(env.hw, 'sm_level', None)
+    level = sm_level() if callable(sm_level) else None
+    floor = MATRIX_TRANSFER_SM.get(engine, 0)
+    if level is not None and level < floor:
+        raise IRError(f'{engine} on {env.model}: sm_{floor} and newer have '
+                      f'it')
+
+
+def _lower_matrix_transfer(s: Stmt, env: Spelling) -> Lowered:
+    """A matrix transfer as `cuda.h` writes it: `tensorforge::ldmatrixX{n}(
+    r0, ..., base, index)`, the registers declared ahead of it and written
+    through references, and `tensorforge::stmatrixX{n}(base, index, r0,
+    ...)` -- the lane's row `base + index`, 16 bytes on 16.  The helpers
+    move floats."""
+    _matrix_transfer_available(s, env)
+    why = matrix_transfer_refusal(s)
+    if why is not None:
+        raise IRError(why)
+    registers = matrix_registers(s)
+    for v in registers:
+        if v.type.base != Datatype.F32:
+            raise IRError(f'{s.attr("engine")} of {v.type.base}: the '
+                          f'helpers move floats (`cuda.h`)')
+    names = [env.name(v) for v in registers]
+    where = f'{env.name(s.args[0])}, {env.name(s.args[1])}'
+    count = s.attr('count')
+    if s.op == Op.MATRIX_LOAD:
+        return Lowered(tuple(f'{v.type.base.ctype()} {n}{{}};'
+                             for v, n in zip(registers, names))
+                       + (f'tensorforge::ldmatrixX{count}('
+                          f'{", ".join(names)}, {where});',))
+    return Lowered((f'tensorforge::stmatrixX{count}({where}, '
+                    f'{", ".join(names)});',))
+
+
+def _no_matrix_transfer(s: Stmt, env: Spelling) -> Lowered:
+    raise IRError(f'{s.attr("engine")} has no spelling on '
+                  f'{env.family or "no target"}: it is NVIDIA\'s, on CUDA')
+
+
+def _check_matrix_transfer(s: Stmt) -> List[str]:
+    why = matrix_transfer_refusal(s)
+    return [] if why is None else [f'{s.op}: {why}']
+
+
+def _matrix_transfer_pipe(s: Stmt) -> Optional[str]:
+    """The issue category of a matrix transfer: a store of shared memory for
+    stmatrix.  ldmatrix counts as nothing -- as the call it was written as
+    before it was an op, which the emitter took for one that lays no code
+    down (`emit._NO_CODE`) -- so that no figure of a kernel that loads its
+    fragments by it moves; it is one issue of the shared memory pipe."""
+    return 'shared.store' if s.op == Op.MATRIX_STORE else None
+
+
+def _lower_relayout(s: Stmt, env: Spelling) -> Lowered:
+    """A relayout as its strategy writes it (`RELAYOUT_STRATEGIES`): a value
+    returned by the function it is called as, the result's initializer --
+    the text the call it replaced wrote; registers written through
+    references, the function called on its operands; registers renamed, a
+    copy of each source register under the result's name, which the
+    compiler folds."""
+    strategy = relayout_strategy(s)
+    if env.family and env.family not in strategy.families:
+        raise IRError(f'{strategy.name} has no spelling on {env.family}')
+    why = relayout_refusal(s)
+    if why is not None:
+        raise IRError(why)
+    names = [env.name(a) for a in s.args]
+    if strategy.form == 'relabel':
+        lines = []
+        for v, at in zip(s.target, s.attr('order')):
+            if getattr(v.type, 'length', None) is not None:
+                raise IRError(f'a relabel of {v.type}: of scalar registers')
+            lines.append(f'{v.type.base.ctype()} {env.name(v)} = '
+                         f'{names[at]};')
+        return Lowered(tuple(lines))
+    callee = strategy.spelled(dict(s.attr('params') or ()))
+    if strategy.form == 'in_place':
+        return Lowered((f'{callee}({", ".join(names)});',))
+    return Lowered(result=f'{callee}({", ".join(names)})')
+
+
+def _check_relayout(s: Stmt) -> List[str]:
+    why = relayout_refusal(s)
+    return [] if why is None else [f'{s.op}: {why}']
+
+
+def _relayout_pipe(s: Stmt) -> Optional[str]:
+    """The issue category of a relayout, its strategy's: the one the call
+    it replaced was counted under."""
+    return relayout_strategy(s).pipe(dict(s.attr('params') or ()))
+
+
+def _relayout_units(s: Stmt) -> int:
+    """A relayout's code, its strategy's: one call, or no instruction for a
+    relabel."""
+    return relayout_strategy(s).units
+
+
+# --------------------------------------------------------------------------- #
 # Matrix engines
 # --------------------------------------------------------------------------- #
 
@@ -2032,6 +2760,58 @@ def _lower_mfma(s: Stmt, env: Spelling) -> Lowered:
     args += [str(modifiers.get(name, 0)) for name in MFMA_MODIFIERS]
     return Lowered(result=f'__builtin_amdgcn_{s.attr("instruction")}('
                           f'{", ".join(args)})')
+
+
+#: The modifiers of gfx1250's and gfx1251's WMMA builtins, in the order they
+#: stand among the operands (`(a_neg, A, b_neg, B, c_mod, C, reuse_a,
+#: reuse_b)`, `amd.catalog.Call.WMMA_MODS`): A or B negated, C's modifier,
+#: and the hint that A or B is the previous product's, which saves its
+#: fetch.  Zero where a modifier is not stated.
+WMMA_MODIFIERS = ('a_neg', 'b_neg', 'c_mod', 'reuse_a', 'reuse_b')
+
+
+def _wmma_call(s: Stmt, env: Spelling, gfx1250: bool) -> Lowered:
+    """A WMMA as its builtin, D what it returns, the result's initializer:
+    `__builtin_amdgcn_<instruction>(A, B, C)` on RDNA 3 and 4, and on
+    gfx1250 and gfx1251 with the modifiers among the operands --
+    `(a_neg, A, b_neg, B, c_mod, C, reuse_a, reuse_b)`, the flags as
+    `bool`s and `c_mod` a number (`amd.catalog.Call`)."""
+    if not s.target or s.attr('instruction') is None:
+        raise IRError('a WMMA returns D and names its instruction: its matrix '
+                      'op has a result and an `instruction`')
+    if env.family and env.family not in AMD_FAMILIES:
+        raise IRError(f'a WMMA on {env.family}: AMD\'s, on HIP or SYCL '
+                      f'for AMD')
+    a, b, c = fragments(s)
+    if (len(a), len(b), len(c)) != (1, 1, 1):
+        raise IRError('a WMMA takes one register vector each of A, B and C')
+    a, b, c = (env.name(v[0]) for v in (a, b, c))
+    modifiers = dict(s.attr('modifiers', ()))
+    if not gfx1250:
+        if modifiers:
+            raise IRError(f'a WMMA of RDNA takes no modifiers, not '
+                          f'{sorted(modifiers)}')
+        args = [a, b, c]
+    else:
+        unknown = sorted(set(modifiers) - set(WMMA_MODIFIERS))
+        if unknown:
+            raise IRError(f'a WMMA of gfx1250 has no modifier {unknown}')
+
+        def flag(name):
+            return 'true' if modifiers.get(name, 0) else 'false'
+        args = [flag('a_neg'), a, flag('b_neg'), b,
+                str(int(modifiers.get('c_mod', 0))), c, flag('reuse_a'),
+                flag('reuse_b')]
+    return Lowered(result=f'__builtin_amdgcn_{s.attr("instruction")}('
+                          f'{", ".join(args)})')
+
+
+def _lower_wmma(s: Stmt, env: Spelling) -> Lowered:
+    return _wmma_call(s, env, gfx1250=False)
+
+
+def _lower_wmma_gfx1250(s: Stmt, env: Spelling) -> Lowered:
+    return _wmma_call(s, env, gfx1250=True)
 
 
 def _other(s: Stmt) -> str:
@@ -2399,6 +3179,21 @@ MATRIX_ENGINES: Dict[str, MatrixEngine] = {e.name: e for e in (
     # Intel's DPAS counts as other code, and as no work: the figures it was
     # counted under as a call and as raw text, kept as they were -- so a
     # build that issues it counts its arithmetic short.
+    # AMD's WMMA, issued by the wave together as an MFMA is, and counted as
+    # matrix work: RDNA 3's (`wmma-256b-insts`, A and B held twice over a
+    # wave of 32) and RDNA 4's (`wmma-128b-insts`) take A, B and C; gfx1250's
+    # and gfx1251's take their modifiers among them (`WMMA_MODIFIERS`).
+    # Priced as the matrix instruction of NVIDIA's is, not by its shape:
+    # `analysis.pipeline` measures CDNA's MFMAs alone.
+    MatrixEngine('wmma', Participants.WAVE, True, _matrix, _lower_wmma,
+                 "AMD's WMMA of RDNA 3 and 4, one builtin returning D "
+                 '(`amd.catalog`, `Call.WMMA`)'),
+    MatrixEngine('wmma_gfx1250', Participants.WAVE, True, _matrix,
+                 _lower_wmma_gfx1250,
+                 "AMD's WMMA of gfx1250 and gfx1251 -- F32 16x16x4, F64 "
+                 '16x16x4 on gfx1251, F16 and BF16 16x16x32 -- one builtin '
+                 'returning D, its modifiers among the operands '
+                 '(`Call.WMMA_MODS`)'),
     MatrixEngine('dpas_spmd', Participants.WAVE, False, _other,
                  _lower_dpas_spmd,
                  "Intel's DPAS from the SPMD lowering, TF32 into FP32 at an "
@@ -2743,6 +3538,16 @@ def pipe_of(s: Stmt) -> str:
     return pipe(s) if callable(pipe) else pipe
 
 
+def units_of(s: Stmt) -> int:
+    """What `s`, a statement without regions that lays code down, adds to
+    the code count in the emitter's units: its entry's `units` for an engine
+    op (`OpSpec.units`), one for any other (`transfers.executed`)."""
+    spec = REGISTRY.get(s.op)
+    if spec is None:
+        return 1
+    return spec.units(s) if callable(spec.units) else spec.units
+
+
 # --------------------------------------------------------------------------- #
 # The entries
 # --------------------------------------------------------------------------- #
@@ -2750,6 +3555,9 @@ def pipe_of(s: Stmt) -> str:
 _OBJECT = Slot('object', (SyncObjectType, Value))
 _SYNC = Effect.BARRIER
 _INT = (int,)
+_MATRIX_TRANSFER_SLOTS = (Slot('engine', (str,)), Slot('shape', (tuple,)),
+                          Slot('count', _INT), Slot('width', _INT, False),
+                          Slot('layout', (object,), False))
 
 REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     # Every participant arrives and waits: the combined form, which the
@@ -2860,6 +3668,47 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            units=1, pipe='other',
            lower={'cuda': _lower_tmem_st, '': _lower_tmem_st,
                   '*': _no_tmem}, check=_check_tmem),
+    # A warp's matrices between shared memory and its registers, one
+    # collective transfer (`TRANSFER_ENGINES`: ldmatrix, stmatrix): a read or
+    # a write of the buffer whose rows the lanes name, declared as one, and
+    # pinned where it stands -- every lane of the warp takes part.  The
+    # slots: the engine, the shape of a matrix as PTX names it, how many
+    # (`count`), the bytes a lane holds (`width`), and the fragment layout
+    # over the tile the matrices lie in, where the producer states one
+    # (`matrix_transfer_bits`).  ldmatrix adds no code (`units`) and no issue
+    # (`_matrix_transfer_pipe`), as the call it was before it was an op.
+    OpSpec(Op.MATRIX_LOAD, operands=_MATRIX_TRANSFER_SLOTS,
+           results=('registers',), effect=Effect.READ, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=0, pipe=_matrix_transfer_pipe,
+           lower={'cuda': _lower_matrix_transfer,
+                  '': _lower_matrix_transfer, '*': _no_matrix_transfer},
+           check=_check_matrix_transfer),
+    OpSpec(Op.MATRIX_STORE, operands=_MATRIX_TRANSFER_SLOTS,
+           results=(), effect=Effect.WRITE, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=1, pipe=_matrix_transfer_pipe,
+           lower={'cuda': _lower_matrix_transfer,
+                  '': _lower_matrix_transfer, '*': _no_matrix_transfer},
+           check=_check_matrix_transfer),
+    # Registers from one distribution over the lanes to another
+    # (`RELAYOUT_STRATEGIES`): a value of a value, registers written through
+    # references, or registers renamed.  Pinned, as the cross-lane calls it
+    # replaced were -- defined only where the lanes it reads are converged
+    # -- and of no memory; a value pure where the caller says so, for CSE
+    # and inlining; one written through references declares the writes
+    # (`effect_of`).  The slots: the strategy, its parameters, the operands
+    # it writes, a relabel's order, and the layouts where they are stated
+    # as bits (source, target, the relabel of the indices).
+    OpSpec(Op.RELAYOUT, operands=(Slot('strategy', (str,)),
+                                  Slot('params', (tuple,), False),
+                                  Slot('written', _INT, False),
+                                  Slot('order', (tuple,), False),
+                                  Slot('layouts', (tuple,), False)),
+           results=('registers',), effect=Effect.NONE, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=_relayout_units, pipe=_relayout_pipe,
+           lower={'*': _lower_relayout}, check=_check_relayout),
     # D = A * B + C on a matrix engine (`MATRIX_ENGINES`).  The fragments
     # are values -- the operands, A's registers, B's, then C's -- and D the
     # result, or C itself where the instruction writes it in place
@@ -2967,6 +3816,8 @@ def effect_of(op: str, attrs: Tuple = ()) -> Effect:
     if op == Op.MATRIX_MAC and _matrix_effect(attrs) is not None:
         return _matrix_effect(attrs)
     if op == Op.MATRIX_MAC and dict(attrs).get('in_place'):
+        return Effect.WRITE
+    if op == Op.RELAYOUT and dict(attrs).get('written'):
         return Effect.WRITE
     if _retires_copies(op, attrs):
         return Effect.READ | Effect.WRITE | Effect.ASYNC
@@ -3269,6 +4120,67 @@ def tmem_st(tmem: Value, column: int, values: Sequence[Any]) -> Stmt:
                  accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))
 
 
+def _matrix_transfer_attrs(engine: str, count: int, layout: Any) -> Tuple:
+    attrs = (('engine', engine), ('shape', MATRIX_TRANSFER_SHAPE),
+             ('count', int(count)), ('width', 4 * int(count)))
+    return attrs + ((('layout', layout),) if layout is not None else ())
+
+
+def matrix_load(base: Any, index: Any, registers: Sequence[Value], *,
+                access: Access, layout: Any = None) -> Stmt:
+    """`len(registers)` matrices into `registers` by ldmatrix, from the rows
+    the lanes name at `base + index`: one read of the buffer, `access`
+    (`IRBuilder.matrix_load`); `layout` the fragment layout over the tile
+    the matrices lie in, where the caller states one."""
+    return _stmt(Op.MATRIX_LOAD,
+                 _matrix_transfer_attrs('ldmatrix', len(registers), layout),
+                 args=(base, index), target=tuple(registers),
+                 accesses=(access,))
+
+
+def matrix_store(base: Any, index: Any, registers: Sequence[Any], *,
+                 access: Access, layout: Any = None) -> Stmt:
+    """`registers` into `len(registers)` matrices by stmatrix, the rows the
+    lanes name at `base + index`: one write of the buffer, `access`
+    (`IRBuilder.matrix_store`)."""
+    return _stmt(Op.MATRIX_STORE,
+                 _matrix_transfer_attrs('stmatrix', len(registers), layout),
+                 args=(base, index) + tuple(registers), accesses=(access,))
+
+
+def relayout(strategy: str, params: Mapping, args: Sequence[Any],
+             targets: Sequence[Value] = (), *, pure: bool = True,
+             written: int = 0, order: Optional[Tuple[int, ...]] = None,
+             layouts: Optional[Tuple] = None,
+             no_inline: bool = False) -> Stmt:
+    """A relayout by `strategy` (`RELAYOUT_STRATEGIES`) of `args`: into
+    `targets` -- one value, or the registers renamed in `order` -- or, with
+    `written`, into its first `written` operands through references,
+    declared as a read and a write each.  `params` the strategy's, in a
+    fixed order; `pure` whether CSE may merge two alike, as the call it
+    replaced said; `no_inline` keeps a value in a variable of its own."""
+    attrs: Tuple = (('strategy', strategy),)
+    fields = RELAYOUT_STRATEGIES[strategy].fields
+    params = {k: v for k, v in dict(params).items() if k in fields}
+    if params:
+        attrs += (('params', tuple(sorted(params.items()))),)
+    if written:
+        attrs += (('written', int(written)),)
+    if order is not None:
+        attrs += (('order', tuple(order)),)
+    if layouts is not None:
+        attrs += (('layouts', tuple(layouts)),)
+    if no_inline:
+        attrs += (('no_inline', True),)
+    accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER, w)
+                     for w in args[:written] if isinstance(w, Value))
+    return Stmt(op=Op.RELAYOUT, target=tuple(targets), args=tuple(args),
+                pure=pure and not written, movable=movable_of(
+                    Op.RELAYOUT, attrs),
+                effect=effect_of(Op.RELAYOUT, attrs), accesses=accesses,
+                attrs=attrs)
+
+
 def matrix_wait(engine: str, count: int, registers: Sequence[Value] = (),
                 reads: Sequence[Any] = ()) -> Stmt:
     """Wait until at most `count` of the groups `engine` committed are in
@@ -3317,6 +4229,8 @@ __all__ = [
     'Lowered', 'kept_facts',
     'OpSpec', 'TRANSFER_ENGINES', 'TransferEngine', 'UNRESOLVED',
     'cache_policy', 'completes_of', 'completes_on_barrier',
+    'CACHE_POLICIES', 'CachePolicy', 'L2_HINT_TYPES', 'cache_refusal',
+    'l2_evict_of', 'requested_policy',
     'copy_cache', 'copy_engine',
     'counter_of', 'element_of', 'engine_of', 'lane_linear', 'lane_prefix',
     'lds_dma_refusal', 'mbarrier', 'movable_of', 'object_value',
@@ -3331,7 +4245,7 @@ __all__ = [
     'TENSOR_FENCE', 'TensorDescType', 'tdm_refusal',
     'MATRIX_ENGINES', 'MatrixEngine', 'asm_text', 'fragments',
     'matrix_engine', 'mma_sync_name', 'pipe_of',
-    'MFMA_MODIFIERS', 'mfma_category', 'DPAS_SPMD',
+    'MFMA_MODIFIERS', 'mfma_category', 'DPAS_SPMD', 'WMMA_MODIFIERS',
     'Source', 'MatrixDescType', 'SWIZZLE_BYTES', 'DESC_FORMATS',
     'matrix_descriptor_bits', 'swizzle_alignment', 'swizzled',
     'descriptor_offset', 'sources_of', 'WGMMA_FEATURE', 'WGMMA_N',
@@ -3345,4 +4259,13 @@ __all__ = [
     'TMA_REDUCE_TYPES', 'TensorMap', 'staging_engine', 'swizzle_bytes',
     'swizzle_form',
     'tensor_map_refusal', 'tma_refusal',
+    'MATRIX_ROWS', 'MATRIX_ROW_BYTES', 'MATRIX_TRANSFER_COUNTS',
+    'MATRIX_TRANSFER_OPS', 'MATRIX_TRANSFER_SHAPE', 'MATRIX_TRANSFER_SM',
+    'matrix_load', 'matrix_registers', 'matrix_store',
+    'matrix_transfer_bits', 'matrix_transfer_refusal', 'units_of',
+    'fill_of', 'fill_refusal', 'TRANSFER_OPS', 'transfer_engine_refusal',
+    'AMD_FAMILIES', 'RELAYOUT_FORMS', 'RELAYOUT_STRATEGIES', 'RelayoutStrategy',
+    'relabel_order', 'relabeling', 'relayout', 'relayout_callee',
+    'relayout_refusal',
+    'relayout_strategy',
 ]

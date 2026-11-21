@@ -773,9 +773,10 @@ def _matrix(trip, step) -> None:
                     # numbers, zeros or rows whose D is not written.
                     at = rows_of(lm, group, cols[0],
                                  _index(b, 'add', lcol, k_lo + kt, 'k'))
-                    a = list(b.split_op('tensorforge::ldmatrixX4',
-                                        (fp,) * 4, source, at,
-                                        hints=('a',) * 4, reads=(source,)))
+                    a = list(b.matrix_load(source, at, count=4, type_=fp,
+                                           origins=[a_cells[slot] for slot
+                                                    in sorted(a_cells)],
+                                           hint='a'))
                 else:
                     a = []
                 for slot in (() if ldmatrix else range(len(a_cells))):

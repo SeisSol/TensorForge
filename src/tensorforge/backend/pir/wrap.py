@@ -32,6 +32,13 @@ counted per pipeline, as `move` counts them (`transfers.PIPELINES`): with a
 pipeline for every memory path the first transfer into shared memory and
 the first into registers both wrap at distance 1.
 
+*A buffer may ask for its own* (`IRBuilder.alloc`'s `ahead`, `_asked`):
+the distance its transfer is counted against, in place of ``distance`` --
+0 keeps it in its trip, and one past its place in its pipeline takes it
+whatever the pass's -- and its stages, one or two, in place of ``stages``.
+So a section that knows which of its buffers have room for a second stage
+says so on them, and the pass's settings hold for every other.
+
 *What a transfer is* is read off the accesses (`transfers`): statements of
 the per-element body that read global memory and write one register array or
 one shared window, and nothing else -- with the comments and the `mark
@@ -471,6 +478,13 @@ def _name(v: Value, alloc: Optional[Stmt]) -> str:
     return str(extern or v.hint or v)
 
 
+def _asked(alloc: Optional[Stmt]) -> Optional[Tuple[int, int]]:
+    """What a buffer asks of the transfer into it (`IRBuilder.alloc`'s
+    `ahead`): `(stages, distance)`, in place of the pass's own, or None
+    where it asks nothing."""
+    return None if alloc is None else alloc.attr('ahead')
+
+
 def _line(p) -> str:
     """The report's line for a transfer that moves."""
     name = _name(p.transfer.dest, p.alloc)
@@ -567,13 +581,15 @@ class _Loop(ElementLoop):
         if not found:
             raise Refusal('no transfer in the body')
         # The first `distance` of each pipeline: the ones whose move runs
-        # across the back edge in the loop unrolled once.
+        # across the back edge in the loop unrolled once -- each at its
+        # buffer's own distance where the buffer asks for one (`_asked`).
         picked, count = [], {}
         for t in found:
             key = pipeline(t)
-            if count.get(key, 0) < distance:
+            asked = _asked(self.allocs.get(t.dest.id))
+            if count.get(key, 0) < (distance if asked is None else asked[1]):
                 picked.append(t)
-                count[key] = count.get(key, 0) + 1
+            count[key] = count.get(key, 0) + 1
         plans: List[_Plan] = []
         where = f' in a {self.kind}' if self.kind else ''
         for t in picked:
@@ -607,9 +623,10 @@ class _Loop(ElementLoop):
         elif alloc.attr('init') not in (None, '', '{}'):
             raise Refusal('the buffer is declared with an initializer, which '
                           'a declaration ahead of the loop would apply once')
-        if any(x.predicate is not None for x in walk_stmts(tuple(t.pieces))
-               if x.op is Op.COPY_ASYNC):
-            raise Refusal('a copy of the transfer is predicated already')
+        # A copy under a predicate of its own -- a ragged hop's lanes -- is
+        # taken with it: the predicate is an operand, computed again for the
+        # element the copy is for, and held together with the element's own
+        # guard where there is one (`_Rewrite._guarded`).
 
         mine = {id(x) for x in walk_stmts(tuple(t.stmts))}
         tokens = t.tokens()
@@ -681,12 +698,14 @@ class _Loop(ElementLoop):
                 and any(writes(a) and any(same(a.base, r) for r in reads)
                         for a in x.accesses))
         single = None
-        if t.shared and self.stages > 1:
+        asked = _asked(alloc)
+        stages = self.stages if asked is None else asked[0]
+        if t.shared and stages > 1:
             single = ('the trip writes what the transfer reads for the next '
                       'one, so it cannot go to the head' if writers
                       else self._single_stage(t, alloc, inside, tokens))
         return _Plan(t, alloc, inside, wait, deps, owns,
-                     rotate=t.shared and self.stages > 1 and single is None,
+                     rotate=t.shared and stages > 1 and single is None,
                      single=single, writers=writers)
 
     def _single_stage(self, t: Transfer, alloc: Stmt, inside: bool,
@@ -775,7 +794,9 @@ class _Rewrite:
         groups in flight can tell, and the loop carrying its token would lose
         the steady state its waits are counted against.  The predicate is a
         branch per copy all the same, so a pointer is still not followed
-        where it may not be.
+        where it may not be.  A copy under a predicate of its own takes both,
+        their conjunction computed right ahead of it, where its own is
+        defined.
 
         A transfer into registers takes it into the predicate of each of its
         loads (`_predicated`): a masked element loads zeros it never reads,
@@ -795,15 +816,20 @@ class _Rewrite:
                     b.emit(s)
             return list(b.finish())
 
-        def predicate(s: Stmt) -> Stmt:
+        def predicate(s: Stmt) -> List[Stmt]:
             if s.op is Op.COPY_ASYNC:
-                return replace(s, predicate=cond)
+                if s.predicate is None:
+                    return [replace(s, predicate=cond)]
+                b = self.l.scratch()
+                both = b.op('and', BOOL, cond, s.predicate, hint='g')
+                return list(b.finish()) + [replace(s, predicate=both)]
             if s.regions:
-                return replace(s, regions=tuple(
-                    replace(r, body=tuple(predicate(x) for x in r.body))
-                    for r in s.regions))
-            return s
-        return [predicate(s) for s in stmts]
+                return [replace(s, regions=tuple(
+                    replace(r, body=tuple(x for y in r.body
+                                          for x in predicate(y)))
+                    for r in s.regions))]
+            return [s]
+        return [x for s in stmts for x in predicate(s)]
 
     def _predicated(self, stmts: List[Stmt],
                     cond: Value) -> Optional[List[Stmt]]:
@@ -863,8 +889,10 @@ class _Rewrite:
         extern = alloc.attr('extern')
 
         def window(target, args, name):
+            # The windows are the stages a request asked for: none of them
+            # asks again.
             attrs = [(k, v) for k, v in alloc.attrs
-                     if k not in ('identity', 'stages', 'extern')]
+                     if k not in ('identity', 'stages', 'extern', 'ahead')]
             attrs += [('identity', identity), ('stages', 2)]
             if name is not None:
                 attrs.append(('extern', name))

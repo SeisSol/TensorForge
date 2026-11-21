@@ -549,7 +549,8 @@ class Lexic(ABC):
   # All three are *per thread*: every lane copies `nbytes` bytes, one of
   # `Target.copy_async_sizes`.
 
-  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None):
+  def copy_async(self, dst, src, nbytes, zfill: int = 0, engine=None,
+                 valid=None):
     """`zfill` trailing bytes are written as zero instead of copied.
 
     The hardware reads `nbytes - zfill` from `src` and fills the rest, so a run
@@ -557,6 +558,11 @@ class Lexic(ABC):
     never read past its end.  A backend without such an operand returns None
     for a non-zero `zfill`, and the caller narrows rather than silently copying
     whatever follows the source.
+
+    `valid`, the spelling of a condition, makes it a copy that fills
+    (`Stmt.copy_valid`): where the condition fails it reads nothing and
+    writes all `nbytes` as zero.  None again where the backend has no such
+    operand.
 
     `engine` is the transfer engine the copy goes through (`pir.engines.
     copy_engine`), where a backend spells more than one: AMD's LDS-DMA and

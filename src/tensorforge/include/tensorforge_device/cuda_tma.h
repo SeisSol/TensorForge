@@ -85,6 +85,59 @@ __device__ __forceinline__ void tmaLoad(BulkCursor &cursor, void *dst,
   cursor.pending = true;
 }
 
+/// The same under the cache policy `P` for the box's lines in L2
+/// (`engines.CACHE_POLICIES`): the copy's `.L2::cache_hint`, its operand
+/// `l2Policy<P>` (PTX ISA, "cp.async.bulk.tensor"; "createpolicy").
+template <L2Evict P>
+__device__ __forceinline__ void tmaLoad(BulkCursor &cursor, void *dst,
+                                        const CUtensorMap *map, uint32_t bytes,
+                                        int c0, int c1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (cursor.leader) {
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(
+                     bulk_shared_address(cursor.barrier)),
+                 "r"(bytes)
+                 : "memory");
+    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.tile."
+                 "mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%2, "
+                 "%3}], [%4], %5;" ::"r"(bulk_shared_address(dst)),
+                 "l"(reinterpret_cast<uint64_t>(map)), "r"(c0), "r"(c1),
+                 "r"(bulk_shared_address(cursor.barrier)), "l"(l2Policy<P>())
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  cursor.pending = true;
+}
+
+/// The same for a box of three dimensions.
+template <L2Evict P>
+__device__ __forceinline__ void tmaLoad(BulkCursor &cursor, void *dst,
+                                        const CUtensorMap *map, uint32_t bytes,
+                                        int c0, int c1, int c2) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (cursor.leader) {
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(
+                     bulk_shared_address(cursor.barrier)),
+                 "r"(bytes)
+                 : "memory");
+    asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.tile."
+                 "mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {%2, "
+                 "%3, %4}], [%5], %6;" ::"r"(bulk_shared_address(dst)),
+                 "l"(reinterpret_cast<uint64_t>(map)), "r"(c0), "r"(c1),
+                 "r"(c2), "r"(bulk_shared_address(cursor.barrier)),
+                 "l"(l2Policy<P>())
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  cursor.pending = true;
+}
+
 /// The box of shared memory at `src` added into the tensor of `map` from
 /// the coordinates on, innermost first, what lies past the tensor's ends left
 /// out (PTX ISA, "cp.reduce.async.bulk.tensor": `.add`, `.tile`, completing

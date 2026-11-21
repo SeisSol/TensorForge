@@ -94,10 +94,20 @@ _VEC_ASSIGN = re.compile(r'^\*\s*\([^)]*\)\s*&\s*\w+\s*\[.*\]\s*=')
 
 #: `__pipeline_memcpy_async(&dst[i], &src[j], N)`.  The transfer half of
 #: CUDA's pipeline primitives; the commit and the wait are the other half and
-#: move nothing.
+#: move nothing.  With a fourth argument, `Z`, the zero-filling form: `N - Z`
+#: bytes read, the last `Z` written as zeros.
 _ASYNC_COPY = re.compile(
     r'^__pipeline_memcpy_async\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
-    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*'
+    r'(?:,\s*(?P<zfill>.+?)\s*)?\)$')
+
+#: `tensorforge::copyAsyncFill<N>(&dst[i], &src[j], S)` (`cuda.h`): a copy
+#: that fills, `S` bytes read -- an expression, zero where its condition
+#: fails -- and the rest of the `N` written as zeros.
+_ASYNC_FILL = re.compile(
+    r'^tensorforge::copyAsyncFill\s*<\s*(?P<bytes>\d+)\s*>\s*\(\s*&\s*'
+    r'(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,\s*&\s*(?P<src>\w+)\s*'
+    r'\[(?P<si>[^\]]*)\]\s*,\s*(?P<read>.+)\)$')
 
 #: AMD's LDS-DMA as `HipLexic.copy_async` writes it, `global_load_lds` from
 #: `&src[i]` in global memory to `&dst[j]` in the LDS, `N` bytes a lane.
@@ -203,13 +213,14 @@ _SPLIT_TF32 = re.compile(
     r'^tensorforge::splitFloatTF32\s*\(\s*(?P<upper>\w+)\s*,\s*(?P<lower>\w+)'
     r'\s*,\s*(?P<value>.+)\)$')
 
-#: `tensorforge::ldmatrixX4(r0, r1, r2, r3, base, index)` (`cuda.h`): four
-#: 8x8 matrices of a warp's rows in shared memory, written through
-#: references.
+#: `tensorforge::ldmatrixX{n}(r0, ..., base, index)` (`cuda.h`): `n` (1, 2
+#: or 4) 8x8 matrices of a warp's rows in shared memory, written through
+#: references; `tensorforge::stmatrixX{n}(base, index, r0, ...)`, the
+#: registers into the rows (`engines.matrix_load`, `matrix_store`).
 _LDMATRIX = re.compile(
-    r'^tensorforge::ldmatrixX4\s*\(\s*(?P<r0>\w+)\s*,\s*(?P<r1>\w+)\s*,'
-    r'\s*(?P<r2>\w+)\s*,\s*(?P<r3>\w+)\s*,\s*(?P<base>\w+)\s*,'
-    r'\s*(?P<index>.+)\)$')
+    r'^tensorforge::ldmatrixX(?P<count>[124])\s*\((?P<args>.+)\)$')
+_STMATRIX = re.compile(
+    r'^tensorforge::stmatrixX(?P<count>[124])\s*\((?P<args>.+)\)$')
 
 #: The name of `mma.sync` as NVIDIA's path issues it (`MMAInstr`): the
 #: shape, and the types of D, A, B and C.
@@ -559,11 +570,32 @@ class TensorMapArg(NamedTuple):
 
 #: A box copied through a tensor map (`tensorforge::tmaLoad`, `cuda_tma.h`):
 #: the cursor whose leader issues it, the destination's element, the map,
-#: the bytes announced, the coordinates innermost first.
+#: the bytes announced, the coordinates innermost first.  A cache policy
+#: (`tmaLoad<L2Evict::...>`) tells L2 what to keep, and moves the same box.
 _TMA_LOAD = re.compile(
-    r'^tensorforge::tmaLoad\s*\(\s*(?P<cursor>\w+)\s*,'
+    r'^tensorforge::tmaLoad\s*(?:<\s*[\w:]+\s*>\s*)?\(\s*(?P<cursor>\w+)\s*,'
     r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
     r'\s*&\s*(?P<map>\w+)\s*,\s*(?P<bytes>\d+)\s*,(?P<coords>.+)\)$')
+
+
+#: A store under an L2 policy (`tensorforge::stL2<P>(&x, v)`, `cuda.h`):
+#: the element after the `&`, then the value.
+_STORE_L2 = re.compile(
+    r'^tensorforge::stL2\s*<\s*[\w:]+\s*>\s*\(\s*&(?P<rest>.*)\)$')
+
+
+def _first_operand(text: str) -> Tuple[str, str]:
+    """`text` split at its first comma outside brackets: a call's first
+    operand and the rest."""
+    depth = 0
+    for at, ch in enumerate(text):
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            return text[:at].strip(), text[at + 1:].strip()
+    raise Abort(f'a store under a cache policy without its value: {text!r}')
 
 
 #: A box of shared memory added into the tensor of a map
@@ -1384,6 +1416,9 @@ def _py(expr: str) -> str:
                lambda m: (f'BUFLOAD({m.group(2) or 1}, '
                           f'{_BUFFER_ELEMENT.get(m.group(1), 0)}, '), e)
     e = re.sub(r'\b__ldcg\s*\(\s*&', 'DEREF(', e)
+    # A load under an L2 policy (`tensorforge::ldL2<P>`): a policy, never a
+    # value.
+    e = re.sub(r'\btensorforge::ldL2\s*<\s*[\w:]+\s*>\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__ldg\s*\(\s*&', 'DEREF(', e)
     e = re.sub(r'\b__builtin_nontemporal_load\s*\(\s*&', 'DEREF(', e)
     # `readlane(v, L)` reads lane `L`'s copy of `v`, and `broadcast<Block,
@@ -1393,10 +1428,11 @@ def _py(expr: str) -> str:
     # an expression the emitter inlined (`_lane_reads`).
     e = _lane_reads(e)
     # `gather<Block>(v, L)`, the same with `L` a value of each lane's own
-    # (`MultilinearInstruction._ell_plan`).  `L` may hold one level of
-    # parentheses -- a table read the emitter inlined.
+    # (`MultilinearInstruction._ell_plan`, a shuffle's `engines.
+    # RELAYOUT_STRATEGIES`).  `L` may hold two levels of parentheses -- a
+    # table read the emitter inlined, a lane computed in place.
     e = re.sub(r'\btensorforge::gather\s*<\s*(\d+)\s*>\s*\(\s*(\w+)\s*,'
-               r'\s*([^()]*(?:\([^()]*\)[^()]*)*)\)',
+               r'\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)',
                r'GATHER("\2", \1, \3)', e)
     # `tensorforge::fma(a, b, c)`, the vector FMA CUDA's lexic names so that
     # sm_100 can pair it.  The same `a * b + c` the infix spelling computes.
@@ -2238,37 +2274,74 @@ class Interp:
                         del self.wg_writers[reg]
                         self._store_register(reg, self.wg_pending.pop(reg))
 
+    def _matrix_operands(self, m, stmt: str, what: str):
+        """`(count, parts, lanes)` of a matrix transfer: how many matrices,
+        its operands split at the top level, and the lanes of this lane's
+        warp by their place in it -- all 32, as the instruction is
+        `.aligned`: a warp that is not whole at it aborts."""
+        run = self.lockstep
+        if run is None:
+            raise Abort(f'{what} outside a lockstep run: {stmt!r}')
+        count = int(m.group('count'))
+        parts = [p.strip() for p in _top_level(m.group('args'), ',')]
+        if len(parts) != count + 2:
+            raise Abort(f'{what} of {count} matrices with {len(parts)} '
+                        f'operands: {stmt!r}')
+        warp = self.lane // 32
+        lanes = {it.lane % 32: it for it in run.current
+                 if it.lane // 32 == warp}
+        if len(lanes) != 32:
+            raise Abort(f'{what} with {len(lanes)} lanes of the warp taking '
+                        f'part')
+        return count, parts, lanes
+
     def _ldmatrix(self, lm, stmt: str) -> None:
-        """One `ldmatrixX4`, for the warp this lane is in: once per statement
-        and warp, from the rows its lanes name.
+        """One `ldmatrixX{n}`, for the warp this lane is in: once per
+        statement and warp, from the rows its lanes name.
 
         Modeled from PTX's statement of the instruction ("Warp-level matrix
         load instruction: ldmatrix") rather than from what it is used for:
         lane `l` names the 16-byte row `l % 8` of matrix `l / 8`, four
-        floats from `base + index`, and register `i` of lane `t` is the
-        32-bit word `t % 4` of row `t / 4` of matrix `i`.  The instruction
-        is `.aligned`: a warp that is not whole at it aborts."""
+        floats from `base + index` -- the first `8 n` lanes, whose rows the
+        `n` matrices are -- and register `i` of lane `t` is the 32-bit word
+        `t % 4` of row `t / 4` of matrix `i`."""
+        count, parts, lanes = self._matrix_operands(lm, stmt, 'ldmatrix')
         run = self.lockstep
-        if run is None:
-            raise Abort(f'ldmatrix outside a lockstep run: {stmt!r}')
-        warp = self.lane // 32
-        key = ('ldmatrix', warp, stmt)
+        key = ('ldmatrix', self.lane // 32, stmt)
         rows = run.wave_cache.get(key)
         if rows is None:
-            lanes = {it.lane % 32: it for it in run.current
-                     if it.lane // 32 == warp}
-            if len(lanes) != 32:
-                raise Abort(f'ldmatrix with {len(lanes)} lanes of the warp '
-                            f'taking part')
             rows = {}
             for l, it in lanes.items():
-                base = it.ev(lm.group('base'))
-                at = int(it.ev(lm.group('index')))
+                if l >= 8 * count:
+                    continue
+                base = it.ev(parts[count])
+                at = int(it.ev(parts[count + 1]))
                 rows[l] = [base[at + w] for w in range(4)]
             run.wave_cache[key] = rows
         t = self.lane % 32
-        for i in range(4):
-            self.env[lm.group(f'r{i}')] = rows[8 * i + t // 4][t % 4]
+        for i in range(count):
+            self.env[parts[i]] = rows[8 * i + t // 4][t % 4]
+
+    def _stmatrix(self, sm, stmt: str) -> None:
+        """One `stmatrixX{n}`: the row this lane names, of the matrices the
+        first `8 n` lanes name the rows of -- lane `l` row `l % 8` of matrix
+        `l / 8`, at `base + index` -- from the registers of the lanes that
+        hold it: word `w` of row `r` of matrix `i` is register `i` of lane
+        `4 r + w`.
+
+        `_ldmatrix` the other way round, from PTX's statement ("Warp-level
+        matrix store instruction: stmatrix").  Each lane writes the row it
+        names, so that the race check sees every write as the lane's whose
+        address it went to."""
+        count, parts, lanes = self._matrix_operands(sm, stmt, 'stmatrix')
+        l = self.lane % 32
+        if l >= 8 * count:
+            return
+        i, r = divmod(l, 8)
+        base = self.ev(parts[0])
+        at = int(self.ev(parts[1]))
+        for w in range(4):
+            base[at + w] = lanes[4 * r + w].ev(parts[2 + i])
 
     def ev(self, expr: str):
         self.budget -= 1
@@ -2319,7 +2392,11 @@ class Interp:
                 self.run(node[1])
 
     def _async_copy(self, cp, stmt: str) -> None:
-        """Move `bytes` worth of elements from one buffer to another."""
+        """Move `bytes` worth of elements from one buffer to another: those
+        the copy reads, and zeros for the rest -- the last `zfill` bytes of
+        the pipeline's four-argument form, everything past the `read` bytes
+        of a copy that fills (`tensorforge::copyAsyncFill`), which at zero
+        reads nothing of its source, wherever it points."""
         dst = self.env.get(cp.group('dst'))
         src = self.env.get(cp.group('src'))
         if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
@@ -2329,6 +2406,16 @@ class Interp:
         if width is None or nbytes % width:
             raise Abort(f'async copy of {nbytes} B into {cp.group("dst")!r}, '
                         f'whose element size is {width!r}: {stmt!r}')
+        groups = cp.groupdict()
+        if groups.get('read') is not None:
+            read = int(self.ev(groups['read']))
+        elif groups.get('zfill') is not None:
+            read = nbytes - int(self.ev(groups['zfill']))
+        else:
+            read = nbytes
+        if not 0 <= read <= nbytes or read % width:
+            raise Abort(f'async copy reading {read} of {nbytes} B, in '
+                        f'elements of {width}: {stmt!r}')
         di = int(self.ev(cp.group('di')))
         si = int(self.ev(cp.group('si')))
         # In flight until the wait that retires it, for `Races`; the values
@@ -2338,7 +2425,7 @@ class Interp:
             tracker.issuing = True
         try:
             for k in range(nbytes // width):
-                dst[di + k] = src[si + k]
+                dst[di + k] = src[si + k] if k < read // width else 0.0
         finally:
             if tracker is not None:
                 tracker.issuing = False
@@ -2669,6 +2756,12 @@ class Interp:
                 tracker.bulk = None
 
     def assign(self, stmt: str) -> None:
+        sl = _STORE_L2.match(stmt)
+        if sl:
+            # A store under an L2 policy is the assignment it hints.
+            lhs, rhs = _first_operand(sl.group('rest'))
+            self.assign(f'{lhs} = {rhs}')
+            return
         mma = _mma_statement(stmt)
         if mma is not None:
             self._mma(mma, stmt)
@@ -2736,6 +2829,10 @@ class Interp:
         lm = _LDMATRIX.match(stmt)
         if lm:
             self._ldmatrix(lm, stmt)
+            return
+        sm = _STMATRIX.match(stmt)
+        if sm:
+            self._stmatrix(sm, stmt)
             return
         sp = _SPLIT_TF32.match(stmt)
         if sp:
@@ -2876,7 +2973,7 @@ class Interp:
             return
         if 'global_load_async_to_lds' in stmt:
             raise Abort(f'copy into the LDS not modeled: {stmt!r}')
-        cp = _ASYNC_COPY.match(stmt)
+        cp = _ASYNC_COPY.match(stmt) or _ASYNC_FILL.match(stmt)
         if cp:
             # The transfer half of the pipeline primitives.  It moves data, so
             # it is carried out here rather than left to the catch-all below
@@ -2891,10 +2988,10 @@ class Interp:
             # rounding of `cp.async` that no reader here can observe.
             self._async_copy(cp, stmt)
             return
-        if 'memcpy_async' in stmt:
-            # Another spelling -- the four-argument zero-fill form, say.
-            # Refused rather than swallowed: a transfer that quietly does
-            # nothing produces plausible numbers, as above.
+        if 'memcpy_async' in stmt or 'copyAsyncFill' in stmt:
+            # Another spelling.  Refused rather than swallowed: a transfer
+            # that quietly does nothing produces plausible numbers, as
+            # above.
             raise Abort(f'async copy not modeled: {stmt!r}')
         if (('pipeline' in stmt or '::' in stmt)
                 and not _VEC_DECL.match(stmt) and 'tensorforge::' not in stmt

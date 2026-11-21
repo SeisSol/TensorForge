@@ -100,15 +100,22 @@ def test_the_copy_writes_the_slots_it_names():
 
 
 def test_an_unmodeled_copy_refuses_instead_of_vanishing():
-    """The four-argument zero-fill form, or anything else new.
+    """A spelling of a copy the oracle does not know -- one without a size,
+    a copy that fills without the bytes it reads.  (The four-argument
+    zero-fill form is modeled: `tests/test_copy_fill.py`.)
 
     A transfer that quietly did nothing would leave the seed fill in place,
     plausible and wrong, so an unrecognized spelling is an abort rather than a
     return.
     """
-    interp = kernel_eval.Interp(kernel_eval.Slot(0), {})
-    with pytest.raises(kernel_eval.Abort):
-        interp.assign('__pipeline_memcpy_async(&dst[0], &src[0], 16, 4)')
+    mem = kernel_eval.Slot(0)
+    interp = kernel_eval.Interp(mem, {'dst': kernel_eval.Ptr(mem, 'dst'),
+                                      'src': kernel_eval.Ptr(mem, 'src')})
+    interp.widths['dst'] = 4
+    for text in ('__pipeline_memcpy_async(&dst[0], &src[0])',
+                 'tensorforge::copyAsyncFill<16>(&dst[0], &src[0])'):
+        with pytest.raises(kernel_eval.Abort, match='not modeled'):
+            interp.assign(text)
 
 
 def test_the_commit_and_the_wait_still_move_nothing():
