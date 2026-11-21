@@ -564,6 +564,10 @@ class Participants(Enum):
     WARPGROUP = 'warpgroup'
     MULT = 'mult'            # exactly the threads of one multiplication
     MULTGROUP = 'multgroup'  # the multiplications that share a wave
+    # The threads of one role of the block (`IRBuilder.roles`): a producer's
+    # or its consumers', which meet on a named barrier of their own while
+    # the other role runs on.  Every thread of the role arrives.
+    ROLE = 'role'
     BLOCK = 'block'
     GRID = 'grid'
 
@@ -590,8 +594,12 @@ class Participants(Enum):
             return (Uniformity.MULT
                     if num_threads % (WARPGROUP_WAVES * wave) == 0
                     else Uniformity.BLOCK)
+        # A role's barrier needs its role entered as the block is entered
+        # for the block's: every thread of the role (`passes.verify` reads
+        # the level within the role, `barriers` places it there).
         return {Participants.MULT: Uniformity.MULT,
                 Participants.MULTGROUP: Uniformity.MULTGROUP,
+                Participants.ROLE: Uniformity.BLOCK,
                 Participants.BLOCK: Uniformity.BLOCK,
                 Participants.GRID: Uniformity.GRID}[self]
 
@@ -1056,6 +1064,7 @@ class Op:
     WAIT_COUNTER = 'wait.counter'   # wait on a hardware completion counter
     SET_PRIORITY = 'set.priority'   # the wave's issue priority from here on
     GRID_WAIT = 'grid.wait'         # wait for the grid launched ahead (PDL)
+    REGISTER_BUDGET = 'register.budget'  # a warpgroup's registers from here on
     # Close what an asynchronous engine issued since its last commit into one
     # group, which the engine's own completion counts: `wgmma.commit_group`,
     # and tcgen05's commit onto an mbarrier.
@@ -1326,7 +1335,11 @@ class Stmt:
     @property
     def copy_src_index(self) -> Tuple[Operand, ...]:
         assert self.op == Op.COPY_ASYNC
-        end = len(self.args) - (self.attr('fill') is not None)
+        # A copy that fills ends in the condition it reads under
+        # (`copy_valid`), a copy into a ring's slot in the slot
+        # (`copy_ring_slot`); no copy does both (`IRBuilder.copy_bulk`).
+        end = (len(self.args) - (self.attr('fill') is not None)
+               - self.attr('nring', 0))
         return self.args[2 + self.attr('ndst', 0):end]
 
     @property
@@ -1337,6 +1350,13 @@ class Stmt:
         for a copy that does not fill, which reads wherever it is issued."""
         assert self.op == Op.COPY_ASYNC
         return self.args[-1] if self.attr('fill') is not None else None
+
+    @property
+    def copy_ring_slot(self) -> Optional[Operand]:
+        """The slot of a ring a copy completes on (`IRBuilder.copy_bulk`,
+        `copy_tma`), its last operand; None for any other copy."""
+        assert self.op == Op.COPY_ASYNC
+        return self.args[-1] if self.attr('nring', 0) else None
 
     @property
     def load_base(self) -> Operand:

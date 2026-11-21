@@ -1046,6 +1046,13 @@ class Emitter:
 
         return visit(body, Uniformity.GRID)
 
+    def _ring_slot(self, s: Stmt) -> str:
+        """The full barrier of the ring's slot a copy completes on
+        (`IRBuilder.copy_bulk`, `copy_tma`): the slot is the copy's last
+        operand, and the full barriers come first in the ring."""
+        return (f'&{self.name(s.attr("object"))}'
+                f'[{self.operand(s.copy_ring_slot)}]')
+
     def _copy_bytes(self, s: Stmt) -> int:
         """Bytes a lane's copy moves: the statement's `width`, which the
         builder recorded from the elements and their type -- or, for a copy
@@ -1955,15 +1962,24 @@ class Emitter:
             # coordinates innermost first, as PTX counts them.
             coords = ', '.join(self.operand(c)
                                for c in reversed(s.copy_src_index))
+            dst = (f'&{self.base_name(s.copy_dst)}'
+                   f'[{self.address(s.copy_dst, s.copy_dst_index)}]')
+            if s.attr('nring'):
+                # Into a ring's slot, completing on its full barrier: the
+                # thread the predicate picks, written around this, issues
+                # it, and the producer's arrival announced the bytes.  No
+                # cache policy (`IRBuilder.copy_tma` refuses one).
+                w(f'tensorforge::tmaLoadOn({self._ring_slot(s)}, {dst}, '
+                  f'&{s.attr("map").name}, true, {coords});')
+                return
             # A cache policy is the copy's `.L2::cache_hint`, its policy
             # the template's (`engines.CACHE_POLICIES`).
             evict = engines.l2_evict_of(s.attr('cache'))
             policy = (f'<tensorforge::L2Evict::{evict}>' if evict is not None
                       else '')
             w(f'tensorforge::tmaLoad{policy}({self.name(s.attr("object"))}, '
-              f'&{self.base_name(s.copy_dst)}'
-              f'[{self.address(s.copy_dst, s.copy_dst_index)}], '
-              f'&{s.attr("map").name}, {self._copy_bytes(s)}, {coords});')
+              f'{dst}, &{s.attr("map").name}, {self._copy_bytes(s)}, '
+              f'{coords});')
             return
 
         if op == Op.COPY_ASYNC and s.attr('engine') == 'tma_reduce':
@@ -1984,6 +2000,12 @@ class Emitter:
             src_a = self.address(s.copy_src, s.copy_src_index)
             elems = s.attr('elems', 1)
             zfill = s.attr('zfill', 0)
+            if s.counter == 'bulk' and s.attr('nring'):
+                # Into a ring's slot, as a box through a map goes there.
+                w(f'tensorforge::bulkCopyOn({self._ring_slot(s)}, '
+                  f'&{dst_b}[{dst_a}], &{src_b}[{src_a}], '
+                  f'{self._copy_bytes(s)}, true);')
+                return
             if s.counter == 'bulk':
                 w(f'tensorforge::bulk_copy({self.name(s.attr("object"))}, '
                   f'&{dst_b}[{dst_a}], &{src_b}[{src_a}], '

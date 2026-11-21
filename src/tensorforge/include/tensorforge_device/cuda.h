@@ -720,6 +720,103 @@ __device__ __forceinline__ void bulk_wait(BulkCursor &cursor) {
 #endif
 }
 
+// A ring of mbarriers (`IRBuilder.mbarrier_ring`): slots a producer fills and
+// consumers drain, each slot a pair -- the full barrier the producer's bytes
+// complete on, the empty one the consumers arrive at once done with the slot.
+// No cursor: the phase a thread waits for is the parity of the round of the
+// ring it is in, which every role counts from its trips (PTX ISA, "mbarrier":
+// "Phase completion", "mbarrier.try_wait.parity").
+
+/// The mbarrier at `barrier`, for `count` arrivals a phase (PTX ISA,
+/// "mbarrier.init"); by the one thread that sets the ring up, which fences the
+/// initialization for the async proxy the copies complete it through, and a
+/// block barrier behind shows it to every thread.
+__device__ __forceinline__ void mbarrierInit(void *barrier, uint32_t count) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(
+                   bulk_shared_address(barrier)),
+               "r"(count)
+               : "memory");
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// Wait until the phase of parity `parity` of the mbarrier at `barrier` has
+/// completed: what was written and announced on it is visible behind this
+/// (`mbarrier.try_wait.parity`, acquire at the CTA's scope by default).  A
+/// waiter one round ahead of the barrier waits for the parity of a phase the
+/// barrier has not reached; one a whole round behind returns at once.
+__device__ __forceinline__ void mbarrierWait(void *barrier, uint32_t parity) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  uint32_t done = 0;
+  do {
+    asm volatile("{\n"
+                 ".reg .pred p;\n"
+                 "mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                 "selp.u32 %0, 1, 0, p;\n"
+                 "}"
+                 : "=r"(done)
+                 : "r"(bulk_shared_address(barrier)), "r"(parity)
+                 : "memory");
+  } while (!done);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// One arrival at the mbarrier at `barrier`, by the thread `issue` picks
+/// (`mbarrier.arrive`, release at the CTA's scope by default): what it read of
+/// the slot before, it is done with.
+__device__ __forceinline__ void mbarrierArrive(void *barrier, bool issue) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (issue) {
+    asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" ::"r"(
+                     bulk_shared_address(barrier))
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// One arrival at the mbarrier at `barrier` that announces `bytes` for the
+/// copies through it to complete (`mbarrier.arrive.expect_tx`), by the thread
+/// `issue` picks: the phase completes once they have landed.
+__device__ __forceinline__ void mbarrierExpect(void *barrier, uint32_t bytes,
+                                               bool issue) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (issue) {
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(
+                     bulk_shared_address(barrier)),
+                 "r"(bytes)
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// `bytes` from `src` to `dst`, both on sixteen bytes and `bytes` a multiple of
+/// sixteen, completing on the mbarrier at `barrier` without arriving at it
+/// (`cp.async.bulk`, `.mbarrier::complete_tx::bytes`): what the slot's
+/// expected bytes count down.  By the thread `issue` picks.
+__device__ __forceinline__ void bulkCopyOn(void *barrier, void *dst,
+                                           const void *src, uint32_t bytes,
+                                           bool issue) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (issue) {
+    asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::"
+                 "bytes [%0], [%1], %2, [%3];" ::"r"(bulk_shared_address(dst)),
+                 "l"(src), "r"(bytes), "r"(bulk_shared_address(barrier))
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// A shared-memory matrix descriptor (`Op.MATRIX_DESC`): what wgmma reads an
 /// operand in shared memory through.  `layout` holds every field but the
 /// start address -- the leading and the stride byte offset, the swizzle, the

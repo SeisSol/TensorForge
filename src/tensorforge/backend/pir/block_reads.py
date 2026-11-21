@@ -377,7 +377,8 @@ def _run_ends(x: Stmt, space: MemSpace) -> bool:
     # instruction as the call or the text it was.
     if x.op in Op.RAW or x.op in (Op.CALL, Op.COPY_ASYNC, Op.ACCUM,
                                   Op.FENCE, Op.WAIT_COUNTER,
-                                  Op.SET_PRIORITY, Op.MATRIX_MAC):
+                                  Op.SET_PRIORITY, Op.REGISTER_BUDGET,
+                                  Op.MATRIX_MAC):
         return True
     if space is MemSpace.SHARED and x.op in (Op.BARRIER, Op.WAIT,
                                               Op.COMMIT_ASYNC, Op.SYNC_INIT,

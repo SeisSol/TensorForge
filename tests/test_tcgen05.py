@@ -585,6 +585,57 @@ def test_a_warp_reaches_its_quarter_alone():
         _run_oracle(CASES['ss16'], _oracle_source(bad))
 
 
+def test_a_second_allocation_of_the_block_is_refused():
+    """The allocation gives up the block's permit to allocate
+    (`tmemAlloc`): another behind it, as a trip of a loop around it would
+    make, is undefined on the hardware."""
+    lines = _emit(_tcgen05_body(CASES['ss16'])[1])
+    alloc = next(line for line in lines if 'tmemAlloc' in line)
+    again = re.sub(r'uint32_t (\w+) =', r'uint32_t \1Again =', alloc)
+    with pytest.raises(kernel_eval.Abort,
+                       match='allocates tensor memory again'):
+        _run_oracle(CASES['ss16'], _oracle_source(lines + [again]))
+
+
+def test_a_slot_of_each_warps_own_is_refused():
+    """The block's first warp writes the address into the slot, and every
+    thread reads its own: a slot each warp has a window of its own for --
+    the multiplications' arena in a layout of a warp each -- holds no
+    address for the others."""
+    lines = _emit(_tcgen05_body(CASES['ss16'])[1])
+    i = next(i for i, line in enumerate(lines) if 'tmemAlloc' in line)
+    slot = re.search(r'&(\w+)\[0\]', lines[i]).group(1)
+    own = [f'int32_t * warpSlot = &{slot}[threadIdx.x / 32];',
+           lines[i].replace(f'&{slot}[0]', '&warpSlot[0]')]
+    with pytest.raises(kernel_eval.Abort, match="not the block's"):
+        _run_oracle(CASES['ss16'],
+                    _oracle_source(lines[:i] + own + lines[i + 1:]))
+
+
+def test_a_wait_on_an_mbarrier_nobody_armed_is_refused():
+    """The leader arms the mbarrier its cursor names, and the commit
+    arrives there: a warp whose cursor names a barrier of its own waits for
+    a phase nothing completes -- on the hardware, forever."""
+    lines = _emit(_tcgen05_body(CASES['ss16'])[1])
+    i = next(i for i, line in enumerate(lines) if 'bulk_arm' in line)
+    barrier = re.search(r'bulk_arm\((\w+),', lines[i]).group(1)
+    own = [f'float * warpBarrier = &{barrier}[(threadIdx.x / 32) * 2];',
+           lines[i].replace(f'bulk_arm({barrier},', 'bulk_arm(warpBarrier,')]
+    with pytest.raises(kernel_eval.Abort, match='nobody armed'):
+        _run_oracle(CASES['ss16'],
+                    _oracle_source(lines[:i] + own + lines[i + 1:]))
+
+
+def test_a_wait_a_phase_behind_is_refused():
+    """Two commits onto the barrier and one wait: the next wait is for the
+    parity of the phase under way, which it waits out."""
+    lines = _emit(_tcgen05_body(CASES['ss16'])[1])
+    i = next(i for i, line in enumerate(lines) if 'tcgen05Commit' in line)
+    twice = lines[:i + 1] + [lines[i]] + lines[i + 1:]
+    with pytest.raises(kernel_eval.Abort, match='never complete'):
+        _run_oracle(CASES['ss16'], _oracle_source(twice))
+
+
 # -- the target and the build -------------------------------------------------- #
 
 def test_sm100a_is_sm100_with_tcgen05():

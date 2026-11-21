@@ -138,6 +138,48 @@ __device__ __forceinline__ void tmaLoad(BulkCursor &cursor, void *dst,
   cursor.pending = true;
 }
 
+/// A box through `map` into `dst`, completing on the mbarrier at `barrier`
+/// without arriving at it: a ring slot's copy (`cuda.h`, `mbarrierExpect`
+/// announces the slot's bytes once for all of them), by the thread `issue`
+/// picks.  As `tmaLoad` otherwise: the coordinates innermost first, `dst` on
+/// 128 bytes and on the swizzle's period for a map that swizzles.
+__device__ __forceinline__ void tmaLoadOn(void *barrier, void *dst,
+                                          const CUtensorMap *map, bool issue,
+                                          int c0, int c1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (issue) {
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cluster.global.tile."
+        "mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(
+            bulk_shared_address(dst)),
+        "l"(reinterpret_cast<uint64_t>(map)), "r"(c0), "r"(c1),
+        "r"(bulk_shared_address(barrier))
+        : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The same for a box of three dimensions.
+__device__ __forceinline__ void tmaLoadOn(void *barrier, void *dst,
+                                          const CUtensorMap *map, bool issue,
+                                          int c0, int c1, int c2) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  if (issue) {
+    asm volatile(
+        "cp.async.bulk.tensor.3d.shared::cluster.global.tile."
+        "mbarrier::complete_tx::bytes [%0], [%1, {%2, %3, %4}], [%5];" ::"r"(
+            bulk_shared_address(dst)),
+        "l"(reinterpret_cast<uint64_t>(map)), "r"(c0), "r"(c1), "r"(c2),
+        "r"(bulk_shared_address(barrier))
+        : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// The box of shared memory at `src` added into the tensor of `map` from
 /// the coordinates on, innermost first, what lies past the tensor's ends left
 /// out (PTX ISA, "cp.reduce.async.bulk.tensor": `.add`, `.tile`, completing

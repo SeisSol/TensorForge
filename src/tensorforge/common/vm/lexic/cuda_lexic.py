@@ -105,9 +105,16 @@ class CudaLexic(Lexic):
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None,
-                        lanes=None, grf=None, features=None):
+                        lanes=None, grf=None, features=None,
+                        maxnreg=None):
     args = [str(item) for item in kernel_bounds]
     bounds = f"\n__launch_bounds__({', '.join(args)})\n"
+    if maxnreg is not None:
+      # The registers a thread holds at the kernel's entry, fixed: what a
+      # warpgroup's `setmaxnreg` moves to and from the block's pool
+      # (`engines.register_budget`), and which `__launch_bounds__` would
+      # leave to ptxas -- the two exclude each other.
+      bounds = f"\n__maxnreg__({int(maxnreg)})\n"
     # clang's per-function target features (`Lexic.kernel_definition`).
     target = (f' __attribute__((target("{features}")))' if features
               else '')

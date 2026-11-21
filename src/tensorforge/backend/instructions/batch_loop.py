@@ -79,6 +79,12 @@ class Trip(Enum):
     LANE_GROUP = 'lane_group'
 
 
+#: The keys under which an element-group loop publishes its group's first
+#: element and the mask of any element of the group (`batch_indices`).
+GROUP_KEY = 'group'
+MASK_KEY = 'element_active'
+
+
 class BatchLoop(AbstractInstruction):
     def __init__(self,
                  context: Context,
@@ -95,7 +101,8 @@ class BatchLoop(AbstractInstruction):
                  stack: int = 1,
                  wave_rows: int = 0,
                  count_index: Optional[int] = None,
-                 trip: Trip = Trip.ELEMENT):
+                 trip: Trip = Trip.ELEMENT,
+                 producer_rows: int = 0):
         super().__init__(context)
         self._section_index = section_index
         #: Whose element count and flags this loop runs over: its own
@@ -158,6 +165,14 @@ class BatchLoop(AbstractInstruction):
         self._wave_rows = int(wave_rows)
         #: What a trip hands the block (`Trip`).
         self._trip = trip
+        #: The block's rows past an element group's, a producer's
+        #: (`element_group.ElementGroup.producers`): they take the group's
+        #: trips without an element of their own, so the group starts at the
+        #: block's first row and the block is the group's elements and them.
+        self._producer_rows = int(producer_rows)
+        if producer_rows and trip is not Trip.ELEMENT_GROUP:
+            raise InternalError(f'producer rows in a loop of {trip.value}: '
+                                f'only an element group has a producer')
         if trip in (Trip.ELEMENT_GROUP, Trip.LANE_GROUP):
             why = ('a work queue hands out elements, not groups'
                    if mode is LoopMode.LAUNCHCTRL else
@@ -189,10 +204,12 @@ class BatchLoop(AbstractInstruction):
         self._region.append(instr)
 
     def set_mults_per_block(self, mults: int) -> None:
-        if self._trip is Trip.ELEMENT_GROUP and mults != self._group_size:
+        if (self._trip is Trip.ELEMENT_GROUP
+                and mults != self._group_size + self._producer_rows):
             raise InternalError(
-                f'an element group of {self._group_size} in a block of '
-                f'{mults} multiplications: the group is the block')
+                f'an element group of {self._group_size} and '
+                f'{self._producer_rows} producer rows in a block of {mults} '
+                f'multiplications: the group is the block')
         self._mults_per_block = int(mults)
 
     @property
@@ -319,7 +336,9 @@ class BatchLoop(AbstractInstruction):
         what an unguarded body would have to mean.
         """
         if self._mults_per_block == 1 or self._trip is Trip.LANE_GROUP or (
-                self._grouped() and self._mults_per_block == self._group_size):
+                self._grouped() and self._mults_per_block
+                == self._group_size + self._producer_rows):
+            # A producer's rows take the group's trips (`producer_rows`).
             return Uniformity.BLOCK
         if self._grouped():
             return Uniformity.MULTGROUP
@@ -1259,7 +1278,8 @@ class BatchLoop(AbstractInstruction):
         """
         if (self._mults_per_block is not None
                 and self._trip is not Trip.LANE_GROUP
-                and self._mults_per_block % self._group_size):
+                and (self._mults_per_block - self._producer_rows)
+                % self._group_size):
             raise InternalError(
                 f'a block of {self._mults_per_block} multiplications does not '
                 f'hold whole groups of {self._group_size}')
@@ -1275,6 +1295,9 @@ class BatchLoop(AbstractInstruction):
                 and hasattr(writer, 'for_')):
             self._gen_grouped_ir(writer)
             return
+        if self._producer_rows:
+            raise InternalError('a producer\'s rows traversed as text: the '
+                                'group\'s start is the IR traversal\'s')
         self._refuse_stack('a group of rows traversed as text')
         self._declare_lane(writer)
         self._declare_windows_early(writer, list(self._region))
@@ -1347,6 +1370,10 @@ class BatchLoop(AbstractInstruction):
         start = (f'({lexic.thread_idx_y} - {lexic.thread_idx_y} % '
                  f'{self._group_size}) + {lexic.block_dim_y} * '
                  f'({lexic.block_idx_x})')
+        if self._producer_rows:
+            # The group is the block's first rows, whatever row this is: a
+            # producer's row takes the group's trips (`producer_rows`).
+            start = f'{self._group_size} * ({lexic.block_idx_x})'
         if wave:
             # The group's first element is the same on every lane of its
             # wave.  Read as the wave's, the loop counts on the scalar unit,
@@ -1401,6 +1428,14 @@ class BatchLoop(AbstractInstruction):
             try:
                 with BatchLoop.batch_indices(writer) as bound:
                     bound[self._batch(0)] = batch
+                    # The group's first element, and the mask of any
+                    # element of it: what a producer's lanes take theirs by
+                    # (`compute.multi_element`).
+                    bound[GROUP_KEY] = group
+                    bound[MASK_KEY] = (
+                        lambda w, element, cond=cond, kind=kind,
+                        space=space, n=[0]: self._element_active(
+                            w, element, cond, kind, space, n))
                     self._lookahead_bindings(writer, bound)
                     loop._next_index = self._first_lookahead
                     loop._element_index = batch
@@ -1426,6 +1461,17 @@ class BatchLoop(AbstractInstruction):
             finally:
                 self._induction = None
                 self._entry_frame = None
+
+    def _element_active(self, writer, element, cond, kind, space, count):
+        """Whether `element` -- any of the group's -- is one of the batch, as
+        the traversal says it of a row's own (`_gen_grouped_ir`): within
+        the count and, where the section has them, its flag set."""
+        from tensorforge.backend.pir.core import BOOL
+        count[0] += 1
+        name = f'{self._active()}e{count[0]}'
+        return writer.decl_expr(f'const bool {name}', cond, BOOL, None,
+                                kind=kind, space=space, args=(element,),
+                                hint=name, extern=name)
 
     @contextmanager
     def _rows_per_mult(self, on: bool):

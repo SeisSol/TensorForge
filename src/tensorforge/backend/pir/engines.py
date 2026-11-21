@@ -111,8 +111,8 @@ from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
 from tensorforge.common.basic_types import RUNTIME, Addressing, Datatype
 
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op,
-                   Participants, Stmt, Uniformity, Value, XorSwizzle,
-                   walk_stmts)
+                   Operand, Participants, Stmt, Uniformity, Value,
+                   XorSwizzle, walk_stmts)
 
 
 # --------------------------------------------------------------------------- #
@@ -143,6 +143,7 @@ class SyncScope(Enum):
 
     WARP = 'warp'          # a warp / wave / sub-group, or a mask of its lanes
     MULT = 'mult'          # one multiplication's threads: a group of waves
+    ROLE = 'role'          # one role's threads: a named barrier of its own
     BLOCK = 'block'        # the thread block / work-group
     CLUSTER = 'cluster'    # a cluster of blocks (later)
     GRID = 'grid'          # the cooperative grid
@@ -202,7 +203,7 @@ class FenceKind(Enum):
 #: the objects a body creates may be at any scope.
 _KIND_SCOPES = {
     SyncKind.IMPLICIT: (SyncScope.WARP, SyncScope.BLOCK, SyncScope.GRID),
-    SyncKind.NAMED: (SyncScope.MULT,),
+    SyncKind.NAMED: (SyncScope.MULT, SyncScope.ROLE),
     SyncKind.MBARRIER: tuple(SyncScope),
     SyncKind.LDS_ARRIVE: tuple(SyncScope),
 }
@@ -214,6 +215,7 @@ _KIND_SCOPES = {
 _SCOPE_PARTICIPANTS = {
     SyncScope.WARP: (Participants.WAVE, Participants.MULT),
     SyncScope.MULT: (Participants.MULT,),
+    SyncScope.ROLE: (Participants.ROLE,),
     SyncScope.BLOCK: (Participants.BLOCK, Participants.MULTGROUP),
     SyncScope.CLUSTER: (Participants.BLOCK,),
     SyncScope.GRID: (Participants.GRID,),
@@ -247,6 +249,14 @@ class SyncObjectType:
     participants: Participants
     threads: Optional[int] = None
     wave: int = 1
+    #: A ring of mbarrier pairs (`mbarrier_ring`), this many slots: what its
+    #: statements name by a slot and a parity rather than through a cursor.
+    #: 0 for every other object.
+    slots: int = 0
+    #: A role's barrier (`Participants.ROLE`): the id of the named barrier,
+    #: as text each thread evaluates to its own role's -- so that the roles
+    #: meet on ids apart.  None for every other object.
+    ident: Optional[str] = None
 
     def __post_init__(self):
         if self.scope not in _KIND_SCOPES[self.kind]:
@@ -262,7 +272,11 @@ class SyncObjectType:
     @property
     def arrival(self) -> Uniformity:
         """The uniformity a region needs for a barrier on this object to be
-        legal: who has to arrive (`Participants.arrival`)."""
+        legal: who has to arrive (`Participants.arrival`).  A ring's
+        statements need none: a thread waits for its own round of a slot,
+        and arrives as its count says, wherever it is (`mbarrier_ring`)."""
+        if self.slots:
+            return Uniformity.LANE
         return self.participants.arrival(
             self.threads if self.threads is not None else self.wave,
             self.wave)
@@ -275,12 +289,14 @@ class SyncObjectType:
 
     def __repr__(self):
         count = '' if self.threads is None else f', {self.threads}'
+        ring = f', ring of {self.slots}' if self.slots else ''
         return (f'sync<{self.scope.value}:{self.kind.value}, '
-                f'{self.participants.value}{count}/{self.wave}>')
+                f'{self.participants.value}{count}/{self.wave}{ring}>')
 
 
 def sync_object(participants: Participants, wave: int,
-                threads: Optional[int] = None) -> SyncObjectType:
+                threads: Optional[int] = None,
+                ident: Optional[str] = None) -> SyncObjectType:
     """The object a barrier of ``participants`` arrives at and waits on.
 
     The object follows from what the barrier covers and the geometry, and
@@ -304,6 +320,12 @@ def sync_object(participants: Participants, wave: int,
     if participants is Participants.GRID:
         return SyncObjectType(SyncScope.GRID, SyncKind.IMPLICIT, participants,
                               threads, wave)
+    if participants is Participants.ROLE:
+        if threads is None or ident is None:
+            raise IRError('a role\'s barrier names the role\'s threads and '
+                          'its id (`IRBuilder.roles`)')
+        return SyncObjectType(SyncScope.ROLE, SyncKind.NAMED, participants,
+                              threads, wave, ident=ident)
     return SyncObjectType(SyncScope.BLOCK, SyncKind.IMPLICIT, participants,
                           threads, wave)
 
@@ -1894,6 +1916,14 @@ def _combined(obj: SyncObjectType, env: Spelling) -> Optional[str]:
     """
     if obj.kind in (SyncKind.MBARRIER, SyncKind.LDS_ARRIVE):
         raise _phase1('a rendezvous', obj)
+    if obj.participants is Participants.ROLE:
+        # The role's own named barrier, `threads` of them arriving (PTX
+        # ISA, "barrier"): the id each thread computes is its role's.
+        if env.family not in ('cuda', ''):
+            raise IRError(f'a role\'s barrier has no spelling on '
+                          f'{env.family}')
+        return (f'asm volatile("barrier.sync %0, %1;" :: "r"({obj.ident}), '
+                f'"r"({obj.threads}) : "memory");')
     lex = env.lexic
     if lex is None:
         return '__syncthreads();'
@@ -1944,10 +1974,31 @@ def _lower_wait_phase(s: Stmt, env: Spelling) -> Lowered:
     holds the phase the wait is for.
     """
     obj = object_of(s)
+    if obj.kind is SyncKind.MBARRIER and obj.slots:
+        return _wait_ring(s, env)
     if obj.kind is SyncKind.MBARRIER:
         return _wait_mbarrier(s, env)
     text = _combined(obj, env)
     return Lowered(() if text is None else (text,))
+
+
+def _ring_barrier(s: Stmt, env: Spelling) -> str:
+    """The barrier of a ring's statement: its side's of the slot it names,
+    the full barriers first and the empty ones behind them (`mbarrier_ring`).
+    """
+    obj = object_of(s)
+    slot = env.name(s.args[0])
+    offset = obj.slots if s.attr('side') == 'empty' else 0
+    at = f'{offset} + ({slot})' if offset else slot
+    return f'&{env.name(object_value(s))}[{at}]'
+
+
+def _wait_ring(s: Stmt, env: Spelling) -> Lowered:
+    """The wait of a ring's role for its round of the slot: the parity of
+    the phase it waits to complete (`tensorforge::mbarrierWait`)."""
+    _spelled_mbarrier(s, env, object_value(s))
+    return Lowered((f'tensorforge::mbarrierWait({_ring_barrier(s, env)}, '
+                    f'{env.name(s.args[1])});',))
 
 
 def _wait_mbarrier(s: Stmt, env: Spelling) -> Lowered:
@@ -1968,8 +2019,22 @@ def _spelled_mbarrier(s: Stmt, env: Spelling, value) -> None:
 
 def _lower_arrive_cuda(s: Stmt, env: Spelling) -> Lowered:
     """`bar.arrive id, n` on the multiplication's id: the arrival without
-    the wait, the id and count `CudaLexic.sync_mult` meets with."""
+    the wait, the id and count `CudaLexic.sync_mult` meets with.
+
+    On a ring (`mbarrier_ring`), one arrival at its side of the slot by the
+    thread its operand picks: on the full side with the bytes the slot's
+    copies announce (`tensorforge::mbarrierExpect`), on the empty side a
+    consumer done with the slot (`tensorforge::mbarrierArrive`)."""
     obj = object_of(s)
+    if obj.kind is SyncKind.MBARRIER and obj.slots:
+        _spelled_mbarrier(s, env, object_value(s))
+        issue = env.name(s.args[1])
+        tx = s.attr('tx')
+        if tx:
+            return Lowered((f'tensorforge::mbarrierExpect('
+                            f'{_ring_barrier(s, env)}, {tx}u, {issue});',))
+        return Lowered((f'tensorforge::mbarrierArrive('
+                        f'{_ring_barrier(s, env)}, {issue});',))
     if obj.kind in (SyncKind.MBARRIER, SyncKind.LDS_ARRIVE):
         raise _phase1(Op.ARRIVE, obj)
     if not obj.per_mult or obj.threads is None or env.lexic is None:
@@ -2028,8 +2093,26 @@ def _init_mbarrier(s: Stmt, env: Spelling) -> Lowered:
     """An mbarrier in the eight bytes of shared memory its setup names,
     armed by the thread `leader` names for one arrival a phase: the cursor
     the bulk copies through it and their waits name (`cuda.h`,
-    `tensorforge::bulk_arm`), which holds the phase bit as well."""
+    `tensorforge::bulk_arm`), which holds the phase bit as well.
+
+    A ring (`mbarrier_ring`): its storage as the 64-bit barriers they are,
+    under the ring's name, and the thread `leader` names setting up each
+    slot's pair -- the full barrier for `full` arrivals a phase, the empty
+    one for `empty` (`tensorforge::mbarrierInit`)."""
     _spelled_mbarrier(s, env, s.target[0] if s.target else None)
+    obj = object_of(s)
+    if obj.slots:
+        ring = env.name(s.target[0])
+        return Lowered((
+            f'uint64_t * {ring} = reinterpret_cast<uint64_t *>('
+            f'&{env.name(s.args[0])}[0]);',
+            f'if ({s.attr("leader")}) {{',
+            f'  for (int r = 0; r < {obj.slots}; ++r) {{',
+            f'    tensorforge::mbarrierInit(&{ring}[r], {s.attr("full")});',
+            f'    tensorforge::mbarrierInit(&{ring}[{obj.slots} + r], '
+            f'{s.attr("empty")});',
+            '  }',
+            '}'))
     return Lowered((f'tensorforge::BulkCursor {env.name(s.target[0])} = '
                     f'tensorforge::bulk_arm({env.name(s.args[0])}, '
                     f'{s.attr("leader")});',))
@@ -2444,6 +2527,49 @@ def _relayout_units(s: Stmt) -> int:
     """A relayout's code, its strategy's: one call, or no instruction for a
     relabel."""
     return relayout_strategy(s).units
+
+
+# --------------------------------------------------------------------------- #
+# Register budgets
+# --------------------------------------------------------------------------- #
+
+#: What `setmaxnreg` takes: a multiple of eight from 24 to 256 registers a
+#: thread (PTX ISA, "setmaxnreg").
+REGISTER_BUDGETS = tuple(range(24, 257, 8))
+
+
+def register_budget_refusal(s: Stmt) -> Optional[str]:
+    """Why a warpgroup's register budget (`register_budget`) cannot be
+    written, or None: a count `setmaxnreg` takes, and a direction."""
+    if s.attr('count') not in REGISTER_BUDGETS:
+        return (f'{s.attr("count")!r} registers a thread, where setmaxnreg '
+                f'takes a multiple of eight from 24 to 256')
+    if s.attr('change') not in ('inc', 'dec'):
+        return f'a budget that goes {s.attr("change")!r}, not inc or dec'
+    return None
+
+
+def _check_register_budget(s: Stmt) -> List[str]:
+    why = register_budget_refusal(s)
+    return [] if why is None else [f'{s.op}: {why}']
+
+
+def _lower_register_budget(s: Stmt, env: Spelling) -> Lowered:
+    """The registers of the warpgroup from here on (PTX ISA, "setmaxnreg"):
+    released to the block's pool (`dec`) or taken from it (`inc`, which
+    waits until the pool has them).  Every warp of the warpgroup executes
+    it, the same count; on sm_90a, sm_100a and sm_120a, in a kernel whose
+    registers a thread are fixed at its entry (`__maxnreg__`)."""
+    why = register_budget_refusal(s)
+    if why is not None:
+        raise IRError(f'{s.op}: {why}')
+    target = env.target
+    if env.family != 'cuda' or target is None or not getattr(
+            target, 'register_budgets', lambda: False)():
+        raise IRError(f'{s.op}: no setmaxnreg on '
+                      f'{getattr(getattr(env, "hw", None), "model", None) or env.family or "no target"}')
+    return Lowered((f'asm volatile("setmaxnreg.{s.attr("change")}.sync.'
+                    f'aligned.u32 {s.attr("count")};" ::: "memory");',))
 
 
 # --------------------------------------------------------------------------- #
@@ -3642,6 +3768,14 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            movable=False, completes=Completion.SYNC, retires=None,
            settles=False, units=1, pipe='sync',
            lower={'*': _lower_grid_wait}),
+    # A warpgroup's registers from here on: pinned -- it is a point of the
+    # schedule -- and every warp of the warpgroup executes it.
+    OpSpec(Op.REGISTER_BUDGET, operands=(Slot('count', _INT),
+                                         Slot('change', (str,))),
+           results=(), effect=Effect.NONE, movable=False,
+           completes=Completion.SYNC, retires=None, settles=False,
+           units=1, pipe='other', lower={'*': _lower_register_budget},
+           arrival=Uniformity.MULT, check=_check_register_budget),
     # Close what an asynchronous engine issued since its last commit into
     # one group, which a wait on the engine's counter retires
     # (`GROUP_ENGINES`, `matrix_wait`).  Pinned: which products a group
@@ -3806,12 +3940,15 @@ def verify_engine(s: Stmt) -> List[str]:
 
 def _waits_on_mbarrier(op: str, attrs: Tuple) -> bool:
     """A wait on an mbarrier: the wait for the copies that complete on it,
-    which is what a `wait` was before it was spelled as the object's."""
+    which is what a `wait` was before it was spelled as the object's.  Not
+    a ring's: its wait is a role's for its round of a slot, which retires
+    no copy of its own -- the producer handed its tokens to the arrival
+    that announced their bytes (`ring_arrive`)."""
     if op != Op.WAIT_PHASE:
         return False
     obj = dict(attrs).get('object')
     return (isinstance(obj, Value) and isinstance(obj.type, SyncObjectType)
-            and obj.type.kind is SyncKind.MBARRIER)
+            and obj.type.kind is SyncKind.MBARRIER and not obj.type.slots)
 
 
 def _retires_copies(op: str, attrs: Tuple) -> bool:
@@ -3869,9 +4006,22 @@ def _matrix_effect(attrs: Tuple) -> Optional[Effect]:
 def completes_on_barrier(s: Stmt) -> bool:
     """A bulk copy, or the wait for one: what every thread waits for on the
     barrier the copy completes on, which makes the bytes visible to each --
-    so no lane hands them to another (`barriers`)."""
+    so no lane hands them to another (`barriers`).  And every statement of a
+    ring (`mbarrier_ring`): its slots are handed over by its barriers, the
+    full ones to the consumers and the empty ones back to the producer, and
+    no block barrier stands between the roles."""
     return (s.attr('engine') == 'bulk'
-            or _waits_on_mbarrier(s.op, s.attrs))
+            or _waits_on_mbarrier(s.op, s.attrs) or on_ring(s))
+
+
+def on_ring(s: Stmt) -> bool:
+    """Whether `s` is a statement of a ring (`mbarrier_ring`): its setup,
+    a wait or an arrival on it, or a copy into one of its slots."""
+    obj = s.attr('object')
+    if isinstance(obj, Value) and isinstance(obj.type, SyncObjectType):
+        return bool(obj.type.slots)
+    return any(isinstance(v.type, SyncObjectType) and v.type.slots
+               for v in s.target[:1])
 
 
 def movable_of(op: str, attrs: Tuple = ()) -> bool:
@@ -3916,6 +4066,10 @@ def settles(s: Stmt) -> Optional[Uniformity]:
         return None
     spec = REGISTRY.get(s.op)
     if spec is not None and not spec.settles:
+        return None
+    if on_ring(s):
+        # A role's wait for its round of a slot: it orders what the other
+        # role arrived with, and nobody's accesses besides.
         return None
     return arrival_of(s)
 
@@ -3989,6 +4143,65 @@ def mbarrier(participants: Participants, wave: int,
                                                     SyncScope.BLOCK)
     return SyncObjectType(scope, SyncKind.MBARRIER, participants, threads,
                           wave)
+
+
+def mbarrier_ring(slots: int) -> SyncObjectType:
+    """A ring of `slots` slots, each a pair of mbarriers in shared memory --
+    the full one a producer's bytes complete on, the empty one its
+    consumers arrive at once done with the slot -- the block's
+    (`IRBuilder.mbarrier_ring`).  Its statements name a slot and, to wait,
+    the parity of the phase: no cursor, since every role counts the rounds
+    of the ring from its trips."""
+    if int(slots) < 1:
+        raise IRError(f'a ring of {slots} slots')
+    return SyncObjectType(SyncScope.BLOCK, SyncKind.MBARRIER,
+                          Participants.BLOCK, slots=int(slots))
+
+
+def ring_init(ring: Value, storage: Value, *, full: int, empty: int,
+              leader: str, extern: str) -> Stmt:
+    """Set up the ring `ring` in `storage`, a pair of eight bytes a slot,
+    by the thread `leader` picks: each full barrier for `full` arrivals a
+    phase, each empty one for `empty`.  The statement defines `ring`, which
+    `extern` names in the source."""
+    return _stmt(Op.SYNC_INIT, (('full', int(full)), ('empty', int(empty)),
+                                ('leader', leader), ('extern', extern)),
+                 args=(storage,), target=(ring,),
+                 accesses=(Access(Effect.WRITE, MemSpace.SHARED, storage),))
+
+
+#: The sides of a ring's slot: the barrier a producer's bytes complete on,
+#: and the one its consumers arrive at once done.
+RING_SIDES = ('full', 'empty')
+
+
+def ring_wait(ring: Value, side: str, slot: Operand, parity: Operand,
+              accesses: Tuple[Access, ...] = ()) -> Stmt:
+    """Wait for the phase of parity `parity` of the `side` barrier of the
+    ring's slot `slot`: a consumer for the producer's bytes, the producer
+    for the consumers to be done with the slot.  `accesses` are what it
+    makes visible -- the slot's buffers, written by the copies the full
+    barrier counted -- or orders the producer's next copies behind."""
+    if side not in RING_SIDES:
+        raise IRError(f'a ring has no {side!r} side')
+    return _stmt(Op.WAIT_PHASE, (('object', ring), ('side', side)),
+                 args=(slot, parity), accesses=tuple(accesses))
+
+
+def ring_arrive(ring: Value, side: str, slot: Operand, issue: Operand, *,
+                tx: int = 0, tokens: Sequence[Value] = ()) -> Stmt:
+    """One arrival at the `side` barrier of the ring's slot `slot`, by the
+    thread `issue` picks: on the full side the producer's, announcing the
+    `tx` bytes its copies into the slot complete -- whose `tokens` it takes,
+    handed to the consumers' wait -- on the empty side a consumer's."""
+    if side not in RING_SIDES:
+        raise IRError(f'a ring has no {side!r} side')
+    if tx and side != 'full':
+        raise IRError('the bytes of a slot are announced on its full side')
+    attrs = (('object', ring), ('side', side))
+    if tx:
+        attrs += (('tx', int(tx)),)
+    return _stmt(Op.ARRIVE, attrs, args=(slot, issue) + tuple(tokens))
 
 
 def sync_init_value(obj: Value, storage: Value, *, leader: str,
@@ -4230,6 +4443,13 @@ def matrix_wait(engine: str, count: int, registers: Sequence[Value] = (),
                  args=registers, accesses=accesses)
 
 
+def register_budget(count: int, change: str) -> Stmt:
+    """The registers a thread of the warpgroup holds from here on, `count`,
+    raised (`inc`) or lowered (`dec`) to it (`setmaxnreg`)."""
+    return _stmt(Op.REGISTER_BUDGET, (('count', int(count)),
+                                      ('change', change)))
+
+
 def set_priority(level: int, waves: Optional[str] = None) -> Stmt:
     """The wave's issue priority from here on, 0 (lowest) to 3, for the
     waves `waves` names (`PRIORITY_WAVES`): all where None."""
@@ -4258,12 +4478,15 @@ __all__ = [
     'l2_evict_of', 'requested_policy',
     'copy_cache', 'copy_engine',
     'counter_of', 'element_of', 'engine_of', 'lane_linear', 'lane_prefix',
-    'lds_dma_refusal', 'mbarrier', 'movable_of', 'object_value',
+    'lds_dma_refusal', 'mbarrier', 'mbarrier_ring', 'movable_of',
+    'object_value', 'on_ring', 'ring_arrive', 'ring_init', 'ring_wait',
+    'RING_SIDES',
     'one_to_one', 'sync_init_value', 'waited_on', 'width_of',
     'PRIORITY_WAVES', 'REGISTRY', 'Slot', 'Spelling', 'SyncKind',
     'SyncObjectType', 'SyncScope', 'arrival_of', 'arrive', 'barrier',
     'effect_of', 'family', 'fence_stmt', 'grid_wait', 'lower', 'object_demand',
     'object_of', 'objects', 'set_priority', 'settles', 'spec_of',
+    'register_budget', 'register_budget_refusal', 'REGISTER_BUDGETS',
     'sync_init', 'sync_object', 'verify_engine', 'wait_counter',
     'wait_phase', 'ResourceType',
     'TDM_ELEMENT_BYTES', 'TDM_PITCH_LIMIT', 'TDM_TEAMS', 'TDM_TILE_LIMIT',

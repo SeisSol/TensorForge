@@ -207,6 +207,30 @@ _BULK_COPY = re.compile(
     r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
 _BULK_WAIT = re.compile(r'^tensorforge::bulk_wait\s*\(\s*(?P<cursor>\w+)\s*\)$')
 
+#: A ring of mbarriers (`cuda.h`, `IRBuilder.mbarrier_ring`): a barrier set up
+#: for a count of arrivals a phase, a wait for the parity of a phase, an
+#: arrival -- announcing bytes, or not -- and the copies that complete bytes
+#: on one without arriving.  The barrier is `&ring[i]`.
+_MB = r'&\s*(?P<bar>\w+)\s*\[(?P<bi>[^\]]*)\]'
+_MB_INIT = re.compile(
+    rf'^tensorforge::mbarrierInit\s*\(\s*{_MB}\s*,(?P<count>.+)\)$')
+_MB_WAIT = re.compile(
+    rf'^tensorforge::mbarrierWait\s*\(\s*{_MB}\s*,(?P<parity>.+)\)$')
+_MB_ARRIVE = re.compile(
+    rf'^tensorforge::mbarrierArrive\s*\(\s*{_MB}\s*,(?P<issue>.+)\)$')
+_MB_EXPECT = re.compile(
+    rf'^tensorforge::mbarrierExpect\s*\(\s*{_MB}\s*,\s*(?P<bytes>\d+)u?\s*,'
+    r'(?P<issue>.+)\)$')
+_BULK_ON = re.compile(
+    rf'^tensorforge::bulkCopyOn\s*\(\s*{_MB}\s*,'
+    r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*,'
+    r'(?P<issue>.+)\)$')
+_TMA_ON = re.compile(
+    rf'^tensorforge::tmaLoadOn\s*\(\s*{_MB}\s*,'
+    r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
+    r'\s*&\s*(?P<map>\w+)\s*,\s*(?P<issue>[^,]+),(?P<coords>.+)\)$')
+
 #: `tensorforge::splitFloatTF32(upper, lower, value)` (`cuda.h`): the two
 #: TF32 halves a 3xTF32 product multiplies, written through references.
 _SPLIT_TF32 = re.compile(
@@ -464,6 +488,11 @@ _WGMMA_SWIZZLE = {0: 0, 1: 128, 2: 64, 3: 32}
 #: "tcgen05 Shared Memory Descriptor": 0 none, 2 128-byte, 4 64-byte, 6
 #: 32-byte); 1, the 128-byte one with 32-byte atoms, is not modeled.
 _TC_SWIZZLE = {0: 0, 2: 128, 4: 64, 6: 32}
+
+#: A warpgroup's registers from here on (`engines.register_budget`).
+_REGISTER_BUDGET = re.compile(
+    r'^asm\s+volatile\s*\(\s*"setmaxnreg\.(?:inc|dec)\.sync\.aligned\.u32 '
+    r'\d+;"\s*:::\s*"memory"\s*\)$')
 
 #: Tensor memory (`MemSpace.TMEM`): `uint32_t t = tensorforge::tmemAlloc<C>
 #: (&slot[0]);`, the free, the waits and the fences of the engine (`cuda.h`).
@@ -859,7 +888,9 @@ class Races:
         self._writes: Dict[int, Tuple[int, int]] = {}
         self._reads: Dict[int, Dict[int, int]] = {}
         #: (lane, other) -> the time of the last barrier both took part in
-        self._met: Dict[Tuple[int, int], int] = {}
+        #: lane -> other -> the time up to which what `other` did is
+        #: ordered ahead of what `lane` does from now on.
+        self._met: Dict[int, Dict[int, int]] = {}
         self._flight: Dict[int, int] = {}
         self._open: Dict[int, set] = {}
         self._groups: Dict[int, List[set]] = {}
@@ -870,7 +901,8 @@ class Races:
         #: slot -> (cursor, when) of the bulk copy in flight into it, and
         #: (cursor, lane) -> when that lane last waited on the cursor.
         self._bulk_flight: Dict[int, Tuple[str, int]] = {}
-        self._landed: Dict[Tuple[str, int], int] = {}
+        #: lane -> cursor -> when that lane last waited on the cursor.
+        self._landed: Dict[int, Dict[str, int]] = {}
         #: slot -> the lane whose reduction of a box still reads it, and
         #: lane -> the slots each of its bulk groups reads, oldest first
         #: (`reduce_issue`, `reduce_wait`).
@@ -985,10 +1017,35 @@ class Races:
         -- and behind what a lane that only arrived (`arrived`, lane -> when)
         did up to its arrival, which waits for none of them."""
         for a in lanes:
+            row = self._met.setdefault(a, {})
             for b in lanes:
-                self._met[(a, b)] = self.time
+                row[b] = self.time
             for b, when in (arrived or {}).items():
-                self._met[(a, b)] = max(self._met.get((a, b), -1), when)
+                row[b] = max(row.get(b, -1), when)
+
+    def release(self, lane: int) -> Tuple[int, Dict[int, int],
+                                           Dict[str, int]]:
+        """What `lane` releases arriving at an mbarrier now: the time, what
+        it is ordered behind, and the bulk copies that landed for it -- for
+        the lane that waits for the phase its arrival completes (`met`)."""
+        return (self.time, dict(self._met.get(lane, {})),
+                dict(self._landed.get(lane, {})))
+
+    def met(self, lane: int, other: int, released) -> None:
+        """`lane` waited for a phase of an mbarrier that `other`'s arrival
+        completed, which released `released` (`release`): it is ordered
+        behind what `other` did up to its arrival, and behind what `other`
+        was ordered behind then -- and the bulk copies that had landed for
+        `other` have landed for it (a ring's producer, behind its
+        consumers' release of a slot)."""
+        when, behind, landed = released
+        row = self._met.setdefault(lane, {})
+        row[other] = max(row.get(other, -1), when)
+        for x, t in behind.items():
+            row[x] = max(row.get(x, -1), t)
+        mine = self._landed.setdefault(lane, {})
+        for cursor, t in landed.items():
+            mine[cursor] = max(mine.get(cursor, -1), t)
 
     def arrive(self, key: int, lane: int) -> None:
         """`lane` arrived at the named barrier `key` without waiting: the
@@ -1041,7 +1098,7 @@ class Races:
     def bulk_wait(self, lane: int, cursor: str) -> None:
         """`lane` waited on `cursor`: what the bulk copies through it wrote
         so far is visible to it."""
-        self._landed[(cursor, lane)] = self.time
+        self._landed.setdefault(lane, {})[cursor] = self.time
 
     def _bulk_read(self, slot: int) -> bool:
         """A read of a slot a bulk copy wrote: in flight for a lane that has
@@ -1051,13 +1108,19 @@ class Races:
         if found is None:
             return False
         cursor, when = found
-        if self._landed.get((cursor, self.lane), -1) <= when:
+        if not self._landed_for(cursor, self.lane, when):
             self._report('FLIGHT', slot, -1)
         self._reads.setdefault(slot, {})[self.lane] = self.time
         return True
 
     def _ordered(self, lane: int, other: int, when: int) -> bool:
-        return lane == other or self._met.get((lane, other), -1) > when
+        return lane == other or self._met.get(lane, {}).get(other, -1) > when
+
+    def _landed_for(self, cursor: str, lane: int, when: int) -> bool:
+        """Whether what a bulk copy through `cursor` wrote at `when` has
+        landed for `lane`: it waited on the cursor since, or met a lane
+        that had (`met`)."""
+        return self._landed.get(lane, {}).get(cursor, -1) > when
 
     def _report(self, kind: str, slot: int, other: int,
                 lane: Optional[int] = None) -> None:
@@ -1086,8 +1149,8 @@ class Races:
             # Over a box the accelerator may still be reading.
             self._report('FLIGHT', slot, self._reduce_flight[slot])
         landing = self._bulk_flight.pop(slot, None)
-        if landing is not None and self._landed.get(
-                (landing[0], self.lane), -1) <= landing[1]:
+        if landing is not None and not self._landed_for(
+                landing[0], self.lane, landing[1]):
             self._report('FLIGHT', slot, -1)
         if slot in self._flight and (not self.issuing
                                      or self._flight[slot] != self.lane):
@@ -1638,6 +1701,11 @@ class Interp:
         self.wg_groups: List[List[Tuple]] = []
         self.wg_pending: Dict[Any, float] = {}
         self.wg_writers: Dict[Any, int] = {}
+        #: By cursor: whether this lane noted an arrival through it since its
+        #: last wait (`BulkCursor::pending`), and the phases of its mbarrier
+        #: it waited for (`_mbarrier_wait`).
+        self.mb_pending: Dict[str, bool] = {}
+        self.mb_waits: Dict[str, int] = {}
         #: Element size per pointer name, from the type in its declaration.
         #: An async copy is measured in bytes and the memory here is untyped,
         #: so this is the only place the two can be reconciled.
@@ -2086,6 +2154,248 @@ class Interp:
             self._store_register(reg, _InFlight(text))
             written.append(reg)
         self.wg_open.append((tuple(written), a_regs, reads, stmt))
+
+    def _mb_key(self, m, stmt: str) -> Tuple[str, int]:
+        """The slot of shared memory the barrier `&ring[i]` of a ring
+        statement is, the key its state is kept by."""
+        bar = self.ev(m.group('bar'))
+        if not isinstance(bar, Ptr):
+            raise Abort(f'an mbarrier in no buffer: {stmt!r}')
+        return bar.base, bar.off + int(self.ev(m.group('bi')))
+
+    def _mb_state(self, key, stmt: str) -> Dict:
+        state = getattr(self.mem, 'mb_ring', {}).get(key)
+        if state is None:
+            raise Abort(f'an mbarrier at {key[0]}[{key[1]}] nobody set up: '
+                        f'{stmt!r}')
+        return state
+
+    def _mb_complete(self, state: Dict) -> None:
+        """The phase completes once every arrival it counts is in and the
+        bytes announced on it have landed (PTX ISA, "mbarrier", "Phase
+        completion"); the next begins with the count again."""
+        if state['pending'] == 0 and state['tx'] == 0:
+            state['history'][state['phases']] = state['arrivers']
+            state['phases'] += 1
+            state['pending'] = state['count']
+            state['arrivers'] = []
+
+    def _mb_arrive(self, key, state: Dict, stmt: str) -> None:
+        if state['pending'] <= 0:
+            raise Abort(f'an arrival at {key[0]}[{key[1]}] past the '
+                        f'{state["count"]} its phase counts: {stmt!r}')
+        state['pending'] -= 1
+        tracker = self.mem.tracker
+        state['arrivers'].append(
+            (self.lane, tracker.release(self.lane) if tracker is not None
+             else None))
+        self._mb_complete(state)
+
+    def _ring_statement(self, stmt: str) -> None:
+        """A ring's statement (`cuda.h`, `mbarrierInit` and its kin).  The
+        lanes run in lockstep, a role's branch after the other's: a wait for
+        a phase that has not completed here would wait for a statement
+        behind it in this order, which no ring the generator builds needs --
+        the producer's round of a slot is ahead of its consumers', and their
+        release of it a round ahead of the producer's next -- and is refused
+        as the hang it is.  Through a ring the roles hand over: a lane that
+        waited met what the arrivals of the phase it waited for did, and
+        the bytes the phase counted have landed for it (`Races`)."""
+        tracker = self.mem.tracker
+        m = _MB_INIT.match(stmt)
+        if m:
+            key = self._mb_key(m, stmt)
+            count = int(self.ev(m.group('count')))
+            if count < 1:
+                raise Abort(f'an mbarrier for {count} arrivals: {stmt!r}')
+            rings = getattr(self.mem, 'mb_ring', None)
+            if rings is None:
+                rings = self.mem.mb_ring = {}
+            rings[key] = {'count': count, 'pending': count, 'tx': 0,
+                          'phases': 0, 'arrivers': [], 'history': {}}
+            # The setup writes the barrier, which every wait reads: a wait
+            # no barrier orders behind the setup is a race.
+            Ptr(self.mem, key[0], key[1])[0] = 1.0
+            return
+        m = _MB_WAIT.match(stmt)
+        if m:
+            key = self._mb_key(m, stmt)
+            state = self._mb_state(key, stmt)
+            parity = int(self.ev(m.group('parity'))) & 1
+            Ptr(self.mem, key[0], key[1])[0]
+            if state['phases'] % 2 == parity:
+                raise Abort(f'thread {self.lane} waits for a phase of parity '
+                            f'{parity} of the mbarrier at {key[0]}[{key[1]}], '
+                            f'which has completed {state["phases"]}: it would '
+                            f'never return: {stmt!r}')
+            done = state['phases'] - 1
+            if tracker is not None:
+                for lane, released in state['history'].get(done, ()):
+                    tracker.met(self.lane, lane, released)
+                tracker.bulk_wait(self.lane, f'mbar:{key[0]}:{key[1]}')
+            return
+        m = _MB_ARRIVE.match(stmt)
+        if m:
+            key = self._mb_key(m, stmt)
+            state = self._mb_state(key, stmt)
+            if bool(self.ev(m.group('issue'))):
+                self._mb_arrive(key, state, stmt)
+            return
+        m = _MB_EXPECT.match(stmt)
+        if m:
+            key = self._mb_key(m, stmt)
+            state = self._mb_state(key, stmt)
+            if bool(self.ev(m.group('issue'))):
+                state['tx'] += int(m.group('bytes'))
+                self._mb_arrive(key, state, stmt)
+            return
+        m = _BULK_ON.match(stmt) or _TMA_ON.match(stmt)
+        if m is None:
+            raise Abort(f'a ring statement not modeled: {stmt!r}')
+        key = self._mb_key(m, stmt)
+        state = self._mb_state(key, stmt)
+        if not bool(self.ev(m.group('issue'))):
+            return
+        if tracker is not None:
+            tracker.bulk = f'mbar:{key[0]}:{key[1]}'
+        try:
+            if 'map' in m.groupdict():
+                moved = self._tma_box(m, stmt)
+            else:
+                moved = self._bulk_bytes(m, stmt)
+        finally:
+            if tracker is not None:
+                tracker.bulk = None
+        state['tx'] -= moved
+        self._mb_complete(state)
+
+    def _bulk_bytes(self, m, stmt: str) -> int:
+        """A bulk copy's bytes, from `src` to `dst` (`_bulk_copy`'s rules):
+        what it moved, which the barrier's announced bytes count down."""
+        dst = self.env.get(m.group('dst'))
+        src = self.env.get(m.group('src'))
+        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+            raise Abort(f'bulk copy between unknown buffers: {stmt!r}')
+        width = self.widths.get(m.group('dst'))
+        nbytes = int(m.group('bytes'))
+        if width is None or nbytes % width or nbytes % 16:
+            raise Abort(f'bulk copy of {nbytes} B into {m.group("dst")!r}, '
+                        f'whose element size is {width!r}: {stmt!r}')
+        di = int(self.ev(m.group('di')))
+        si = int(self.ev(m.group('si')))
+        for k in range(nbytes // width):
+            dst[di + k] = src[si + k]
+        return nbytes
+
+    def _tma_box(self, m, stmt: str) -> int:
+        """A box through a tensor map (`_tma_load`'s rules): what it moved."""
+        tmap = self.env.get(m.group('map'))
+        if not isinstance(tmap, TensorMapArg):
+            raise Abort(f'a copy through {m.group("map")!r}, which is no '
+                        f'tensor map the kernel is handed: {stmt!r}')
+        dst = self.env.get(m.group('dst'))
+        if not isinstance(dst, Ptr):
+            raise Abort(f'tensor map copy into an unknown buffer: {stmt!r}')
+        width = self.widths.get(m.group('dst'))
+        if width != tmap.size:
+            raise Abort(f'a box of {tmap.size}-byte elements into '
+                        f'{m.group("dst")!r}, whose element size is '
+                        f'{width!r}: {stmt!r}')
+        coords = [int(self.ev(c)) for c in _top_level(m.group('coords'),
+                                                      ',')][::-1]
+        start = (dst.off + int(self.ev(m.group('di')))) * width
+        placed = list(self._box(tmap, coords, start, width, stmt))
+        src = Ptr(self.mem, tmap.buffer, tmap.offset)
+        arena = Ptr(self.mem, dst.base)
+        fill = float('nan') if tmap.nan else 0.0
+        for at, slot in placed:
+            arena[slot] = fill if at is None else src[at]
+        volume = 1
+        for n in tmap.box:
+            volume *= n
+        return volume * tmap.size
+
+    def _tmem_alloc(self, ta, stmt: str) -> None:
+        """`tensorforge::tmemAlloc`: the columns from lane 0 and column 0 on
+        -- an address is the lane in its upper half and the column in its
+        lower.  The block's first warp allocates them, writes the address
+        into the slot and gives up the block's permit to allocate again
+        (PTX ISA, "tcgen05.relinquish_alloc_permit"), so that an allocation
+        behind it is undefined on the hardware, and refused here.  Every
+        thread reads the slot behind the helper's barrier: its own slot,
+        which has to be the one the first warp wrote -- the block's, not a
+        multiplication's.  The write is the block's first thread's; the
+        reads are not memory here."""
+        slot = self.ev(ta.group('slot'))
+        if not isinstance(slot, Ptr):
+            raise Abort(f'tensor memory allocated through no slot: {stmt!r}')
+        block = getattr(self.env.get('blockIdx'), 'x', 0)
+        tm = getattr(self.mem, 'tmem_blocks', None)
+        if tm is None:
+            tm = self.mem.tmem_blocks = {}
+        key = (slot.base, slot.off)
+        if self.lane == 0:
+            if block in tm:
+                raise Abort(f'block {block} allocates tensor memory again, '
+                            f'having given up its permit to allocate: '
+                            f'undefined on the hardware: {stmt!r}')
+            tm[block] = key
+            slot[0] = 0
+            self.mem.tmem_columns = int(ta.group('cols'))
+        elif tm.get(block) != key:
+            raise Abort(f'thread {self.lane} reads the address of the tensor '
+                        f'memory from {slot.base}[{slot.off}], where the '
+                        f'block\'s first warp wrote it to '
+                        f'{tm.get(block)!r}: the slot is not the block\'s: '
+                        f'{stmt!r}')
+        self.env[ta.group('name')] = 0
+
+    def _mbarrier_phases(self) -> Dict:
+        """The phases each mbarrier a cursor is on has completed, by its slot
+        (`_Cursor.barrier`): 0 where its leader armed it (`bulk_arm`), one
+        more for each arrival -- a copy its leader issues through it, a
+        commit of tcgen05's -- as it counts one arrival a phase."""
+        phases = getattr(self.mem, 'mbarrier_phases', None)
+        if phases is None:
+            phases = self.mem.mbarrier_phases = {}
+        return phases
+
+    def _mbarrier_arrive(self, cursor: '_Cursor', stmt: str) -> None:
+        key = (cursor.barrier.base, cursor.barrier.off)
+        phases = self._mbarrier_phases()
+        if key not in phases:
+            raise Abort(f'an arrival on an mbarrier nobody armed, '
+                        f'{key[0]}[{key[1]}]: {stmt!r}')
+        phases[key] += 1
+
+    def _mbarrier_wait(self, cursor: '_Cursor', stmt: str) -> None:
+        """`bulk_wait`: where an arrival was noted through the cursor since
+        the lane's last wait, the lane waits for the parity of its next
+        phase on the mbarrier its own cursor names.  Its leader's arrivals
+        have to have completed exactly that one: none, and the wait never
+        returns -- the mbarrier is another than the one the arrivals went to,
+        or nobody armed it; two, and the parity is the current phase's,
+        which the wait waits out."""
+        if not self.mb_pending.get(cursor.name):
+            return
+        self.mb_pending[cursor.name] = False
+        key = (cursor.barrier.base, cursor.barrier.off)
+        phases = self._mbarrier_phases()
+        if key not in phases:
+            raise Abort(f'thread {self.lane} waits on the mbarrier '
+                        f'{key[0]}[{key[1]}], which nobody armed -- not the '
+                        f'one its cursor\'s leader armed: it would never '
+                        f'complete: {stmt!r}')
+        done = self.mb_waits.get(cursor.name, 0)
+        ahead = phases[key] - done
+        if ahead != 1:
+            raise Abort(f'thread {self.lane} waits for phase {done} of the '
+                        f'mbarrier {key[0]}[{key[1]}], which has completed '
+                        f'{phases[key]}: '
+                        + ('it would never complete' if ahead % 2 == 0
+                           else 'its waits are out of step with the '
+                           'arrivals') + f': {stmt!r}')
+        self.mb_waits[cursor.name] = done + 1
 
     def _tc_state(self) -> Dict:
         """What tcgen05 has in flight in the block: the products issued and
@@ -2698,8 +3008,10 @@ class Interp:
         if not isinstance(cursor, _Cursor):
             raise Abort(f'tensor map copy through an unarmed cursor: '
                         f'{stmt!r}')
+        self.mb_pending[cursor.name] = True
         if not cursor.leader:
             return
+        self._mbarrier_arrive(cursor, stmt)
         tmap = self.env.get(tl.group('map'))
         if not isinstance(tmap, TensorMapArg):
             raise Abort(f'a copy through {tl.group("map")!r}, which is no '
@@ -2742,8 +3054,10 @@ class Interp:
         cursor = self.env.get(bc.group('cursor'))
         if not isinstance(cursor, _Cursor):
             raise Abort(f'bulk copy through an unarmed cursor: {stmt!r}')
+        self.mb_pending[cursor.name] = True
         if not cursor.leader:
             return
+        self._mbarrier_arrive(cursor, stmt)
         dst = self.env.get(bc.group('dst'))
         src = self.env.get(bc.group('src'))
         if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
@@ -2783,15 +3097,13 @@ class Interp:
         if re.match(r'^asm\b', stmt) and 'tcgen05.' in stmt:
             self._tcgen05_asm(stmt)
             return
+        if _REGISTER_BUDGET.match(stmt):
+            # A warpgroup's registers (`setmaxnreg`): where values are held
+            # is no value's.
+            return
         ta = _TMEM_ALLOC.match(stmt)
         if ta:
-            # The columns from lane 0 and column 0 on: an address is the
-            # lane in its upper half and the column in its lower.
-            slot = self.ev(ta.group('slot'))
-            if isinstance(slot, Ptr):
-                slot[0] = 0
-            self.env[ta.group('name')] = 0
-            self.mem.tmem_columns = int(ta.group('cols'))
+            self._tmem_alloc(ta, stmt)
             return
         td = _TMEM_DEALLOC.match(stmt)
         if td:
@@ -2800,14 +3112,24 @@ class Interp:
                     or state['overlay']:
                 raise Abort(f'tensor memory freed with products in flight: '
                             f'{stmt!r}')
+            if self.lane == 0:
+                # Freed: an access behind this reaches no column.
+                self.mem.tmem_columns = None
             return
         if _TC_QUIET.match(stmt):
             return
         tc = _TC_COMMIT.match(stmt)
         if tc:
             # The products the issuing thread issued, onto the cursor's
-            # mbarrier: they land at the wait for its phase (`bulk_wait`).
+            # mbarrier, which they arrive at once complete: they land at the
+            # wait for its phase (`bulk_wait`).  Every thread notes it.
+            cursor = self.env.get(tc.group('cursor'))
+            if not isinstance(cursor, _Cursor):
+                raise Abort(f'tcgen05 commit onto an unarmed cursor: '
+                            f'{stmt!r}')
+            self.mb_pending[cursor.name] = True
             if bool(self.ev(tc.group('issue'))):
+                self._mbarrier_arrive(cursor, stmt)
                 state = self._tc_state()
                 state['bound'].setdefault(tc.group('cursor'), []).extend(
                     state['open'])
@@ -2866,6 +3188,10 @@ class Interp:
         if ls and isinstance(self.env.get(ls.group('name')), _LaunchCursor):
             self.env[ls.group('name')].start(self.ev(ls.group('queue')))
             return
+        if stmt.startswith(('tensorforge::mbarrier', 'tensorforge::bulkCopyOn',
+                            'tensorforge::tmaLoadOn')):
+            self._ring_statement(stmt)
+            return
         bm = _BULK_ARM.match(stmt)
         if bm:
             barrier = self.env.get(bm.group('bar'))
@@ -2875,7 +3201,10 @@ class Interp:
                              barrier)
             if cursor.leader:
                 barrier[0] = 1.0
+                self._mbarrier_phases()[(barrier.base, barrier.off)] = 0
             self.env[cursor.name] = cursor
+            self.mb_pending[cursor.name] = False
+            self.mb_waits[cursor.name] = 0
             return
         tm = _TMA_LOAD.match(stmt)
         if tm:
@@ -2900,6 +3229,7 @@ class Interp:
             cursor = self.env.get(bw.group('cursor'))
             if not isinstance(cursor, _Cursor):
                 raise Abort(f'bulk wait on an unarmed cursor: {stmt!r}')
+            self._mbarrier_wait(cursor, stmt)
             self._tc_land(bw.group('cursor'))
             cursor.barrier[0]
             tracker = self.mem.tracker
@@ -3543,32 +3873,42 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
         _fill(mem, preset)
     if races is not None:
         mem.tracker = Races()
-    for cta in range(grid):
-        groups = []
-        for mult in range(mults if block else 1):
-            group = []
-            for tid in range(lanes):
-                env = _base_env(src, mem, tid, lanes=lanes, mults=mults,
-                                mult=mult, block=cta, grid=grid)
-                for name in re.findall(r'\b(numElements\d+)\b', src):
-                    env[name] = elements
-                # A mask the preset gives is one the kernel is handed; without
-                # one, the pointer is null and every element counts.
-                for name in preset or ():
-                    if (re.fullmatch(r'flags\d+', name)
-                            or name == 'elementIndices'):
-                        env[name] = Ptr(mem, name)
-                env.update(scalars or {})
-                interp = Interp(mem, env)
-                interp.lane = tid + mult * lanes
-                interp.launches = tuple(launches)
-                group.append(interp)
-            groups.append(group)
-        interps = [it for group in groups for it in group]
-        Lockstep(interps, groups).run(parse(body))
-    if races is not None:
-        races.extend(mem.tracker.found)
-        mem.tracker = None
+    try:
+        for cta in range(grid):
+            groups = []
+            for mult in range(mults if block else 1):
+                group = []
+                for tid in range(lanes):
+                    env = _base_env(src, mem, tid, lanes=lanes, mults=mults,
+                                    mult=mult, block=cta, grid=grid)
+                    for name in re.findall(r'\b(numElements\d+)\b', src):
+                        env[name] = elements
+                    # A mask the preset gives is one the kernel is handed;
+                    # without one, the pointer is null and every element
+                    # counts.
+                    for name in preset or ():
+                        if (re.fullmatch(r'flags\d+', name)
+                                or name == 'elementIndices'):
+                            env[name] = Ptr(mem, name)
+                    env.update(scalars or {})
+                    interp = Interp(mem, env)
+                    interp.lane = tid + mult * lanes
+                    interp.launches = tuple(launches)
+                    group.append(interp)
+                groups.append(group)
+            interps = [it for group in groups for it in group]
+            Lockstep(interps, groups).run(parse(body))
+            if getattr(mem, 'tmem_columns', None) is not None:
+                # PTX ISA, "tcgen05.alloc": what a block allocated, it frees
+                # before it exits.
+                raise Abort(f'block {cta} exits holding the tensor memory it '
+                            f'allocated')
+    finally:
+        # The races found up to an abort as well: what the run met before
+        # the statement it refused.
+        if races is not None:
+            races.extend(mem.tracker.found)
+            mem.tracker = None
     if globals_only:
         return {k: v for k, v in mem.data.items() if k[0].startswith('m')}
     return {(k[0].split('#')[0], k[1]): v for k, v in mem.data.items()}

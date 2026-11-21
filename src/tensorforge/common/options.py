@@ -185,6 +185,31 @@ def parse_multi_element_values(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_engine` takes.
+MATRIX_ENGINE = ('auto', 'mma_sync')
+
+
+#: What `Options.wgmma_pending` takes: the groups of products a step of K
+#: may leave in flight, each holding its A in registers of its own.
+WGMMA_PENDING = (0, 1, 2)
+
+
+def parse_wgmma_pending(text: str) -> int:
+  """0, 1 or 2 (`Options.wgmma_pending`)."""
+  value = int(text.strip())
+  if value not in WGMMA_PENDING:
+    raise ValueError(f'wgmma_pending is one of {WGMMA_PENDING}, not {value}')
+  return value
+
+
+def parse_matrix_engine(text: str) -> str:
+  """`auto` or `mma_sync` (`Options.matrix_engine`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_ENGINE:
+    raise ValueError(f'expected one of {MATRIX_ENGINE}, got {text!r}')
+  return value
+
+
 #: What `Options.carry_element_index` takes.
 CARRY_ENTRY = ('auto', 'always', 'never')
 
@@ -2492,6 +2517,29 @@ declare('multi_element_fma',
             '`multi_element` `auto` the form is that rule\'s, the lanes '
             'form, and `warp` declines it.')
 
+declare('element_producer',
+        default=False,
+        env='TF_ELEMENT_PRODUCER',
+        doc='A producer warp fills the multi-element layout\'s inputs '
+            '(`multi_element`, `generators.element_group`): through a ring '
+            'of slots, its trips ahead of the element warps\', a bulk copy a '
+            'column where the copy takes the box and a cell a copy '
+            'otherwise, the slots handed over on mbarriers -- in place of '
+            'each warp staging its own element.  CUDA from sm_90 on, F32; '
+            'where the plan cannot take it (`element_group.'
+            'producer_refusal`), the warps stage as before.')
+
+declare('element_registers',
+        default=0,
+        env='TF_ELEMENT_REGISTERS',
+        doc='The registers a thread of the multi-element layout\'s producer '
+            'keeps (`element_producer`), its warpgroup giving the rest to '
+            'the element warps (`setmaxnreg`, `element_group.'
+            'register_budgets`): a multiple of eight from 24, the kernel\'s '
+            'entry fixed (`__maxnreg__`) and the producer a warpgroup.  0 '
+            'moves nothing.  On sm_90a and sm_100a; a search parameter, as '
+            'registers moved were a loss on the kernels measured so far.')
+
 declare('multi_element_values',
         default='auto',
         env='TF_MULTI_ELEMENT_VALUES',
@@ -2512,6 +2560,38 @@ declare('multi_element_values',
             'immediate and a uniform read is a message a number, but a '
             'broadcast from a lane is a register region of the `mad` (the PVC '
             'prototype\'s operands).')
+
+declare('matrix_engine',
+        default='mma_sync',
+        env='TF_MATRIX_ENGINE',
+        parse=parse_matrix_engine,
+        doc='The matrix engine the multi-element layout\'s tiling of an F32 '
+            'operator step runs on (`multi_element`, `generators.'
+            'element_group`).  `mma_sync`, the default: mma_sync everywhere, '
+            'as before the asynchronous engines.  `auto`: the target\'s '
+            'asynchronous one where it has one and the step and the group fit '
+            'it -- wgmma on sm_90a, a warpgroup\'s, D in registers; tcgen05 '
+            'on sm_100a, one thread\'s, D in tensor memory -- and mma_sync '
+            'elsewhere.  The default stays mma_sync until a measurement puts '
+            'them ahead: on a GH200 the o6 volume took 10.52 ns an element on '
+            'wgmma against 10.75 on mma_sync, on a GB200 11.06 on tcgen05 '
+            'against 9.68 -- and 62.79 against 38.53 at o8.  F64 is DMMA\'s '
+            'either way: neither engine has it.')
+
+declare('wgmma_pending',
+        default=0,
+        env='TF_WGMMA_PENDING',
+        parse=parse_wgmma_pending,
+        doc='The groups of wgmma products the multi-element tiling leaves in '
+            'flight behind a step of K (`multi_element._wgmma`, '
+            '`wgmma.wait_group`): 0 waits for each step before the next one '
+            'loads its A; 1 or 2 load the next steps\' A into registers of '
+            'their own while the last ones\' products run, and wait for the '
+            'step that many behind -- where B streams through the ring, the '
+            'chunk that many behind, whose slot the next copy may not write '
+            'before.  A search parameter: on a GH200 the wait of each step is '
+            'about 5 % of the o6 volume\'s time, and each group in flight '
+            'holds its A, eight registers a thread.')
 
 declare('mma_prefetch',
         default=None,

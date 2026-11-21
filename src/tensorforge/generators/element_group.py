@@ -360,7 +360,12 @@ class Stage:
     instruction's axes -- `B(k, n) = K(n0 + n, k0 + k)`, `k0` the window's
     first column, `n0` the step's first row -- zero wherever the product
     has no entry, the contraction padded to `depth` (a multiple of the
-    instruction's `k`) and the step's rows to `width` (of its n, 8).  It is
+    instruction's `k`) and the step's rows to `width` (of its n, 8).  The
+    zeros past the window's contraction are load-bearing: the tilings'
+    padded steps of K multiply them by the group's rows past the product's
+    depth, and an input's padding there holds its column's first row, not
+    zero (`compute.multi_element.MultiElementSection._stage`) -- so every
+    engine's B has them, staged or streamed through a ring.  It is
     stored in the order the instruction's fragments are read: tile after
     tile of `k` x 8, and in a tile lane after lane, each lane's registers
     of B side by side (`regs`) -- one load a lane and fragment.  `split`
@@ -374,7 +379,15 @@ class Stage:
     tile of zeros is neither stored nor multiplied.  `n0` is the grid's
     origin: the step's first row, or that rounded down to a tile
     (`_staged`'s `aligned`), where a consumer's tiles have to line up with
-    another step's."""
+    another step's.
+
+    An asynchronous engine reads B through a descriptor instead (`order`
+    `canonical`, `ASYNC_LOWERINGS`): the canonical K-major layout of core
+    matrices, eight rows of N by four TF32 of K, 128 contiguous bytes each,
+    the ones along K 128 bytes apart and those along N `depth` x 32
+    (`canonical_offset`); split, the upper halves' layout whole, then the
+    lower halves'.  Whole: its descriptors walk every tile, and its N grid
+    is the step's first row on, D's columns the step's rows."""
 
     tensor: object
     window: Optional[Tuple[Range, Range]] = None
@@ -384,6 +397,12 @@ class Stage:
     k: int = 0
     split: bool = False
     tiles: Tuple[Tuple[int, int], ...] = ()
+    #: `fragments` (`mma_sync`, `dmma`) or `canonical` (`ASYNC_LOWERINGS`).
+    order: str = 'fragments'
+    #: Streamed through the step's ring rather than staged whole ahead of
+    #: the loop (`RING_SLOTS`, `ring_volume`): nothing of it is in shared
+    #: memory between the trips.
+    streamed: bool = False
 
     @property
     def regs(self) -> int:
@@ -394,6 +413,10 @@ class Stage:
     def volume(self) -> int:
         if self.window is None:
             return int(self.tensor.storage_volume())
+        if self.streamed:
+            return 0
+        if self.order == 'canonical':
+            return self.depth * self.width * (2 if self.split else 1)
         return len(self.tiles) * self.k * 8 * (2 if self.split else 1)
 
     def tile(self, kt: int, nt: int) -> int:
@@ -403,6 +426,24 @@ class Stage:
             return self.tiles.index((kt, nt))
         except ValueError:
             return -1
+
+    def canonical_offset(self, n: int, k: int) -> int:
+        """Where `B(k, n)` is in the canonical K-major layout (`order`
+        `canonical`): its core matrix's eight rows of N, its four of K,
+        then its place in it, row by row -- one half's layout."""
+        return (n // 8) * self.depth * 8 + (k // 4) * 32 + (n % 8) * 4 + k % 4
+
+    @property
+    def leading(self) -> int:
+        """Bytes between core matrices next to each other along K, the
+        descriptor's leading byte offset: one core matrix, 128."""
+        return 128
+
+    @property
+    def stride(self) -> int:
+        """Bytes between core matrices next to each other along N, the
+        descriptor's stride byte offset: eight rows of the whole depth."""
+        return self.depth * 32
 
 
 @dataclass(frozen=True)
@@ -435,6 +476,14 @@ class GroupSection:
     doubled: int = 0
     #: The scaled copies' factors, scalars passed by value (`Kind.SCALE`).
     scalars: Tuple[object, ...] = ()
+    #: The slots of the ring a producer warp fills the inputs through, its
+    #: trips ahead of the element warps' (`producer_refusal`); 0 where each
+    #: element's warp stages its own element.
+    ring: int = 0
+    #: The registers a thread of the producer keeps where its warpgroup
+    #: gives the rest to the element warps (`register_budgets`), 0 where
+    #: every warp keeps what the kernel's entry gives it.
+    registers: int = 0
 
     @property
     def chained(self) -> bool:
@@ -560,9 +609,22 @@ class ElementGroup:
         return self.elements if self.lanes is not None else WARP_LANES
 
     @property
+    def producers(self) -> int:
+        """The block's producer warps: one where the section's inputs come
+        through a ring (`GroupSection.ring`), behind the element warps -- a
+        warpgroup where it gives its registers to them, as `setmaxnreg`
+        moves a warpgroup's (`GroupSection.registers`)."""
+        if not self.section.ring:
+            return 0
+        return WARPGROUP_WARPS if self.section.registers else PRODUCER_WARPS
+
+    @property
     def warps(self) -> int:
-        """The block's warps: one an element, or the lanes form's shares."""
-        return self.elements if self.lanes is None else self.lanes.warps
+        """The block's warps: one an element and the producer's, or the lanes
+        form's shares."""
+        if self.lanes is not None:
+            return self.lanes.warps
+        return self.elements + self.producers
 
 
 def _operations(descrs: Sequence) -> list:
@@ -891,15 +953,46 @@ def _section(steps: Tuple[Step, ...], dtype) -> GroupSection:
     return _staged(section, 0)
 
 
-MATRIX_LOWERINGS = ('mma_sync', 'dmma')
+#: The asynchronous matrix engines' lowerings, F32 as 3xTF32 (TF32 halves
+#: of A and B, `TF32_TERMS`): wgmma, a warpgroup's on sm_90a, A from
+#: registers by ldmatrix and D in them; tcgen05, one thread's on sm_100a, A
+#: and D in tensor memory.  B is read through descriptors, in the canonical
+#: K-major order (`Stage.order`).
+ASYNC_LOWERINGS = ('wgmma', 'tcgen05')
+
+MATRIX_LOWERINGS = ('mma_sync', 'dmma') + ASYNC_LOWERINGS
+
+#: A warpgroup's warps: a wgmma step's group is whole warpgroups of them,
+#: a warp an element (`engine_elements`).
+WARPGROUP_WARPS = 4
+
+#: tcgen05's rows, its M at one CTA: the group's rows of a step, elements
+#: by the destination's columns, at most these (`engine_elements`).
+TCGEN05_ROWS = 128
+
+#: An instruction's N at most, for either engine: a step's rows past it
+#: stay on mma_sync (`_async_engine`).
+ASYNC_N = 256
+
+#: The ring an asynchronous step streams B through where its stages do not
+#: fit a block whole (`Stage.streamed`): slots of `RING_CHUNK` rows of K
+#: each -- a chunk the block converts into the canonical order while the
+#: engine multiplies the last -- `RING_SLOTS` of them.
+RING_SLOTS = 2
+RING_CHUNK = 32
 
 
 def matrix_shape(lowering: str, sm: int) -> Tuple[int, int, int]:
     """`(m, n, k)` of the instruction a matrix step issues: `m16n8k8` over
     TF32 halves for F32, and for F64 `m16n8k4` from sm_90 on, `m8n8k4`
-    before."""
+    before; wgmma `m64nNk8` and tcgen05 `m128nNk8`, N the step's rows
+    rounded to the `n` given here, 8 and 16."""
     if lowering == 'mma_sync':
         return 16, 8, 8
+    if lowering == 'wgmma':
+        return 64, 8, 8
+    if lowering == 'tcgen05':
+        return TCGEN05_ROWS, 16, 8
     return (16, 8, 4) if sm >= 90 else (8, 8, 4)
 
 
@@ -908,7 +1001,8 @@ def _round(value: int, step: int) -> int:
 
 
 def _staged(section: GroupSection, sm: int, split: bool = False,
-            sparse: bool = True, aligned: bool = False) -> GroupSection:
+            sparse: bool = True, aligned: bool = False,
+            streamed: bool = False) -> GroupSection:
     """The section with its operators' stages, for the steps' lowerings:
     an operator as stored where an FMA form reads it, a B a window where a
     matrix step does -- in TF32 halves where `split` asks, its tiles of
@@ -942,13 +1036,21 @@ def _staged(section: GroupSection, sm: int, split: bool = False,
                     add(Stage(t))
                 continue
             _, n, k = matrix_shape(step.lowering, sm)
-            n0 = step.rows[0] - (step.rows[0] % n if aligned else 0)
+            asynchronous = step.lowering in ASYNC_LOWERINGS
+            # An asynchronous engine's B is whole, from the step's first
+            # row: its descriptors walk every tile (`Stage`).
+            n0 = step.rows[0] - (step.rows[0] % n
+                                 if aligned and not asynchronous else 0)
             depth = _round(p.depth[1] - p.depth[0], k)
             width = _round(step.rows[1] - n0, n)
             add(Stage(t, (p.rows, p.depth), n0, depth, width, k,
-                      split and step.lowering == 'mma_sync',
-                      tuple(sorted(kept_tiles(p, n0, k, depth, width,
-                                              sparse)))))
+                      split and step.lowering in ('mma_sync',)
+                      + ASYNC_LOWERINGS,
+                      tuple(sorted(kept_tiles(
+                          p, n0, k, depth, width,
+                          sparse and not asynchronous))),
+                      'canonical' if asynchronous else 'fragments',
+                      streamed and asynchronous))
     return dataclasses.replace(section, stages=tuple(stages))
 
 
@@ -1144,7 +1246,9 @@ def _pitched(section: GroupSection) -> GroupSection:
                 need.get(id(buffer.tensor), buffer.height),
                 _round(buffer.height, unit))
             continue
-        if step.lowering != 'mma_sync':
+        # wgmma's A is mma_sync's, by ldmatrix; tcgen05's is read a row a
+        # thread, and wants the padding zero all the same.
+        if step.lowering not in ('mma_sync',) + ASYNC_LOWERINGS:
             continue
         _, _, k = matrix_shape(step.lowering, 0)
         for p in step.products:
@@ -1217,33 +1321,84 @@ def nonzero_terms(step: Step) -> Optional[Terms]:
               for p, rows in zip(step.products, per)))
 
 
-def _lowering(step: Step, dtype, context, sm: int, matrix: bool) -> str:
+def _async_engine(step: Step, context, engine: Optional[str]) -> Optional[str]:
+    """The asynchronous matrix engine an F32 operator step takes on the
+    context's target, or None: where the choice is the target's
+    (`Options.matrix_engine` `auto`, unless `engine` holds it), wgmma on
+    sm_90a and tcgen05 on sm_100a (`Target.wgmma`, `Target.tcgen05`).  An
+    instruction's N is at most `ASYNC_N`, so the step's rows are; and
+    tcgen05's rows hold a group's columns of the step, so that the
+    smallest group, `MIN_ELEMENTS` of them, has to fit `TCGEN05_ROWS`.
+    The group's own size is the fill rule's (`engine_elements`)."""
+    choice = engine or context.get_user_options().matrix_engine
+    if choice != 'auto':
+        return None
+    target = context.target
+    if step.rows[1] - step.rows[0] > ASYNC_N:
+        return None
+    if target.wgmma():
+        return 'wgmma'
+    width = step.cols[1] - step.cols[0]
+    if target.tcgen05() and MIN_ELEMENTS * width <= TCGEN05_ROWS:
+        return 'tcgen05'
+    return None
+
+
+def _lowering(step: Step, dtype, context, sm: int, matrix: bool,
+              engine: Optional[str] = None) -> str:
     """A step's lowering on the context's target: an operator step on the
     matrix engines where they are on (`matrix`, `matrix_enabled`) and the
     target has them (sm_80 on) and its products share the step's columns --
     an element's rows, which the tiling takes whole -- its kind's FMA form
-    elsewhere."""
+    elsewhere.  F32 goes to the target's asynchronous engine where it has
+    one and the step fits it (`_async_engine`), to mma_sync elsewhere and
+    where `engine` holds it there."""
     if step.kind is not Kind.OPERATOR:
         return LOWERING[step.kind]
     if (not matrix or not matrix_enabled(context) or sm < 80
             or any(p.cols != step.cols for p in step.products)):
         return LOWERING[step.kind]
-    return 'mma_sync' if dtype is Datatype.F32 else 'dmma'
+    if dtype is not Datatype.F32:
+        return 'dmma'
+    return _async_engine(step, context, engine) or 'mma_sync'
+
+
+def engine_elements(section: GroupSection, elements: int) -> Optional[int]:
+    """The largest group of at most `elements` the section's asynchronous
+    steps take, or None where none of at least `MIN_ELEMENTS` does: wgmma
+    a whole number of warpgroups -- a warp an element, `WARPGROUP_WARPS` of
+    them a warpgroup -- since its tiles are a warpgroup's, every warpgroup
+    taking them in the same trips; tcgen05 the group's rows of each step,
+    its elements by the destination's columns, on its `TCGEN05_ROWS` lanes,
+    which four warps hold.  A section without them takes any group."""
+    for step in section.steps:
+        if step.lowering == 'wgmma':
+            elements -= elements % WARPGROUP_WARPS
+        elif step.lowering == 'tcgen05':
+            elements = min(elements,
+                           TCGEN05_ROWS // (step.cols[1] - step.cols[0]))
+    return elements if elements >= MIN_ELEMENTS else None
 
 
 def lower(section: GroupSection, context, matrix: bool = True,
           split: bool = False, lanes: bool = False,
-          double: bool = True) -> GroupSection:
+          engine: Optional[str] = None, streamed: bool = False,
+          double: bool = True, ring: int = 0,
+          registers: int = 0) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
-    B in TF32 halves where `split` asks, the inputs a trip ahead in a
-    second stage where the options take them there (`second_stages`) and
-    `double` does not decline it.  An `fma` step reads only its operators'
-    nonzeros (`nonzero_terms`) where they carry their numbers and
-    `Options.skip_known_zeros` is on, as the per-element products do.  The
-    matrix tiling is NVIDIA's: elsewhere every step takes an FMA form, as
-    below sm_80."""
+    B in TF32 halves where `split` asks, B streamed through a ring where
+    `streamed` does, the inputs a trip ahead in a second stage where the
+    options take them there (`second_stages`) and `double` does not
+    decline it.  An `fma` step reads only its operators' nonzeros
+    (`nonzero_terms`) where they carry their numbers and
+    `Options.skip_known_zeros` is on, as the per-element products do.
+    `engine` holds F32 to mma_sync where it says so (`_lowering`).  `ring`
+    slots of a ring a producer warp fills the inputs through, in place of
+    the second stage, where the section takes one (`producer_refusal`).
+    The matrix tiling is NVIDIA's: elsewhere every step takes an FMA form,
+    as below sm_80."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     sm = (nvidia.sm_of(context)
           if getattr(context.target.hw, 'vendor', None) == 'nvidia' else 0)
@@ -1251,7 +1406,8 @@ def lower(section: GroupSection, context, matrix: bool = True,
     steps = []
     for s in section.steps:
         lowering = ('lane' if lanes
-                    else _lowering(s, section.dtype, context, sm, matrix))
+                    else _lowering(s, section.dtype, context, sm, matrix,
+                                   engine))
         steps.append(dataclasses.replace(
             s, lowering=lowering,
             terms=nonzero_terms(s) if sparse and lowering == 'fma'
@@ -1261,10 +1417,18 @@ def lower(section: GroupSection, context, matrix: bool = True,
         steps = [dataclasses.replace(s, lowering='mix')
                  if _mixes(s, section) else s for s in steps]
     staged = _staged(dataclasses.replace(section, steps=tuple(steps)), sm,
-                     split, sparse)
-    return _pitched(dataclasses.replace(
-        staged, doubled=second_stages(staged, context)
-        if double and not lanes else 0))
+                     split, sparse, streamed=streamed)
+    pitched = _pitched(staged)
+    if ring and not lanes:
+        ringed = _bulk_pitched(pitched)
+        if producer_refusal(ringed, context) is None:
+            return dataclasses.replace(
+                ringed, ring=int(ring), doubled=0,
+                registers=int(registers)
+                if context.target.register_budgets() else 0)
+    return dataclasses.replace(
+        pitched, doubled=second_stages(staged, context)
+        if double and not lanes else 0)
 
 
 def async_staging(context) -> bool:
@@ -1275,6 +1439,118 @@ def async_staging(context) -> bool:
     where there is no such path, a trip stages by loads and stores."""
     return (getattr(context.target.hw, 'vendor', None) == 'nvidia'
             and context.target.async_copy_path())
+
+
+#: The warps a block's producer takes: one, whose first lane issues and
+#: whose lanes take an element each (`compute.multi_element`).
+PRODUCER_WARPS = 1
+
+#: The slots of a producer's ring the fill rule tries, the deepest first.
+PRODUCER_SLOTS = (3, 2)
+
+#: Registers of the SM a block holds where one block is resident, which a
+#: kernel's warpgroups share (`register_budgets`).
+SM_REGISTERS = 65536
+
+
+def register_budgets(group: 'ElementGroup') -> Optional[Tuple[int, int,
+                                                               int]]:
+    """`(entry, producer, elements)`: the registers a thread holds at the
+    kernel's entry -- the block's warps sharing the SM's alike -- and from
+    the moves on, a producer's and an element warp's, where the section
+    moves them (`GroupSection.registers`): the producer's warpgroup gives
+    what it does not keep to the element warps' (`setmaxnreg`, a multiple
+    of eight from 24 to 256).  None where nothing moves, or where the
+    element warps would gain nothing."""
+    keep = group.section.registers
+    if not keep or not group.section.ring:
+        return None
+    threads = 32 * group.warps
+    entry = min(255, SM_REGISTERS // threads // 8 * 8)
+    gained = (SM_REGISTERS - 32 * group.producers * keep) // (
+        32 * group.elements) // 8 * 8
+    elements = min(256, gained)
+    if keep >= entry or elements <= entry or entry < 24:
+        return None
+    return entry, keep, elements
+
+
+def producer_refusal(section: GroupSection, context) -> Optional[str]:
+    """Why a producer warp cannot fill the section's inputs through a ring,
+    or None where it can (`Options.element_producer`).
+
+    The producer copies an element's box of an input a column at a time,
+    one bulk copy a column (`IRBuilder.copy_bulk` into a `RingSlot`), where
+    the copy takes it (`bulk_input`), and a cell an asynchronous copy of
+    its first warp otherwise -- of an input stored sparse, SeisSol's `star`
+    under its GPU memory layout, the cells it stores, each from its place
+    (`compute.multi_element._stored_cells`): the target has the bulk copy
+    (sm_90 on), and at least one input takes it -- the producer is there
+    for the large ones.  F32 only, as the matrix tiling's group is."""
+    options = context.get_user_options()
+    if not getattr(options, 'element_producer', False):
+        return 'the option is off'
+    if not context.target.bulk_copy_path():
+        return 'no bulk copy on the target'
+    if section.dtype is not Datatype.F32:
+        return f'{section.dtype} inputs'
+    if not section.inputs:
+        return 'no inputs'
+    if not any(bulk_input(b) for b in section.inputs):
+        return 'no input a bulk copy takes'
+    return None
+
+
+def _bulk_pitched(section: GroupSection) -> GroupSection:
+    """The section with each input a bulk copy may take (`bulk_input`)
+    pitched for it: its columns on four floats in the group's buffer, the
+    rows a copy moves (`bulk_rows`) to each -- a pitch the matrix tiling
+    already gave it stays where it holds them."""
+    inputs = []
+    for buffer in section.inputs:
+        rows = bulk_rows(buffer)
+        if _bulk_source(buffer) and (buffer.pitch % 4 or buffer.pitch < rows):
+            buffer = dataclasses.replace(buffer, stride=_round_up4(max(
+                buffer.pitch, rows)))
+        inputs.append(buffer)
+    return dataclasses.replace(section, inputs=tuple(inputs))
+
+
+def _round_up4(n: int) -> int:
+    return -(-n // 4) * 4
+
+
+def _bulk_source(buffer: Buffer) -> bool:
+    """Whether the input's storage lets a bulk copy take a column of its
+    box (`bulk_input`), whatever the group's buffer is pitched to."""
+    tensor = buffer.tensor
+    if not tensor.is_dense():
+        return False
+    lower = int(tensor.bbox.lower()[0])
+    ld = int(tensor.bbox.sizes()[0])
+    first = buffer.rows[0] - lower
+    return ((getattr(tensor, 'alignment', 0) or 0) >= 16
+            and first % 4 == 0 and ld % 4 == 0
+            and first + bulk_rows(buffer) <= ld)
+
+
+def bulk_input(buffer: Buffer) -> bool:
+    """Whether a producer copies an input's box by bulk copies, a column
+    each (`producer_refusal`), rather than a cell a copy: the operand
+    promises 16 bytes (`alignment`, as `Symbol.linear_align_bytes` reads
+    it), a column's first row and the columns' stride in its storage -- the
+    bounding box's rows -- are on four floats, the box's rows rounded to
+    four stay inside the column, and the pitched buffer's columns are on
+    four floats and hold them."""
+    rows = bulk_rows(buffer)
+    return (_bulk_source(buffer) and buffer.pitch % 4 == 0
+            and buffer.pitch >= rows)
+
+
+def bulk_rows(buffer: Buffer) -> int:
+    """The rows a bulk copy of one of the box's columns moves: its rows
+    rounded to four floats, 16 bytes (`bulk_input`)."""
+    return -(-buffer.height // 4) * 4
 
 
 def second_stages(section: GroupSection, context) -> int:
@@ -1319,6 +1595,33 @@ def tiled(section: GroupSection) -> bool:
     return any(s.lowering in MATRIX_LOWERINGS for s in section.steps)
 
 
+def asynchronous(section: GroupSection) -> bool:
+    """Whether a step of the section is lowered on an asynchronous matrix
+    engine (`ASYNC_LOWERINGS`)."""
+    return any(s.lowering in ASYNC_LOWERINGS for s in section.steps)
+
+
+def streamed(section: GroupSection) -> bool:
+    """Whether the section streams B through its steps' rings."""
+    return any(st.streamed for st in section.stages)
+
+
+def ring_volume(section: GroupSection) -> int:
+    """Elements of the rings the section's streamed steps take: for each,
+    `RING_SLOTS` slots of a chunk of its B, both halves where split."""
+    total = 0
+    for step in section.steps:
+        stages = [st for st in section.stages if st.streamed
+                  and any(st.tensor is p.first.tensor
+                          and st.window == (p.rows, p.depth)
+                          for p in step.products)]
+        if stages:
+            width = max(st.width for st in stages)
+            halves = 2 if stages[0].split else 1
+            total += RING_SLOTS * RING_CHUNK * width * halves
+    return total
+
+
 def split(section: GroupSection) -> bool:
     """Whether the section's B stages hold TF32 halves."""
     return any(st.split for st in section.stages)
@@ -1326,17 +1629,30 @@ def split(section: GroupSection) -> bool:
 
 def shared_bytes(section: GroupSection, elements: int) -> int:
     """Shared memory a group of `elements` takes: the operators as staged
-    -- their stages, and the terms of the steps that walk them -- each
-    element's copy of every input and intermediate, its second copy of
-    every input staged a trip ahead (`GroupSection.doubled`), and its entry
-    in every pointer table."""
+    -- their stages, the rings B streams through, and the terms of the
+    steps that walk them -- each element's copy of every input and
+    intermediate, its second copy of every input staged a trip ahead
+    (`GroupSection.doubled`), and its entry in every pointer table."""
     size = section.dtype.size()
     operators = (sum(st.volume for st in section.stages)
                  + sum(s.terms.volume for s in section.steps
-                       if s.terms is not None))
+                       if s.terms is not None)
+                 + ring_volume(section))
     per_element = sum(b.per_element for b in section.inputs
                       + section.intermediates
                       + section.inputs[:section.doubled])
+    if section.ring:
+        # Every slot holds the group's inputs; and a pair of mbarriers a
+        # slot.
+        per_element += (section.ring - 1) * sum(b.per_element
+                                                for b in section.inputs)
+        operators += 2 * section.ring * 8 // size
+    # tcgen05's D staged in shared memory for every element warp to write
+    # (`compute.multi_element._tcgen05`): the widest step's rows of the
+    # element, an odd number of floats apart.
+    per_element += max(((s.cols[1] - s.cols[0]) * ((s.rows[1] - s.rows[0]) | 1)
+                        for s in section.steps if s.lowering == 'tcgen05'),
+                       default=0)
     return (size * (operators + elements * per_element)
             + POINTER_BYTES * elements * len(section.pointer_tables))
 
@@ -1967,29 +2283,64 @@ def fill(section: GroupSection, context,
                       'phases one after another, `GroupSection.phases`)')
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
     # The matrix tiling, with B in TF32 halves where that costs no group
-    # size -- the halves take twice B's room -- then the FMA forms.
+    # size -- the halves take twice B's room -- then the FMA forms.  An
+    # asynchronous engine's tiling is followed by mma_sync's, for a group
+    # it does not take.
     tilings = [lower(section, context, split=True)]
     if not tiled(tilings[0]):
         tilings = []
     elif split(tilings[0]):
+        if asynchronous(tilings[0]):
+            # B's halves streamed through a ring ahead of B whole.
+            tilings.append(lower(section, context, split=True,
+                                 streamed=True))
         tilings.append(lower(section, context))
-    forms = [lower(section, context, matrix=False)]
+    candidates = [(tilings, None)] if tilings else []
+    if tilings and asynchronous(tilings[0]):
+        held = [lower(section, context, split=True, engine='mma_sync')]
+        if split(held[0]):
+            held.append(lower(section, context, engine='mma_sync'))
+        candidates.append((held, 'mma_sync'))
+    candidates.append(([lower(section, context, matrix=False)], None))
     # Each again with the inputs in one stage, where the options ask for a
     # second: a group the second stage would halve is worth more than it.
-    for lowerings in (tilings, forms):
+    for lowerings, engine in candidates:
         lowerings += [lower(section, context, matrix=tiled(t),
-                            split=split(t), double=False)
+                            split=split(t), engine=engine,
+                            streamed=streamed(t), double=False)
                       for t in lowerings if t.doubled]
-    candidates = [tilings] if tilings else []
-    candidates.append(forms)
+        # Ahead of all of them, the first through a producer's ring, the
+        # deepest that fits first: the producer's trips run ahead of the
+        # element warps' (`producer_refusal`).
+        first = lowerings[0]
+        keep = int(getattr(context.get_user_options(), 'element_registers',
+                           0) or 0)
+        rings = [lower(section, context, matrix=tiled(first),
+                       split=split(first), engine=engine,
+                       streamed=streamed(first), ring=slots, registers=keep)
+                 for slots in PRODUCER_SLOTS]
+        lowerings[:0] = [r for r in rings if r.ring]
+    candidates = [lowerings for lowerings, _ in candidates]
     for lowerings in candidates:
         elements = table_elements(lowerings[0])
         while True:
             for lowered in lowerings:
-                need = shared_bytes(lowered, elements)
+                # The asynchronous engines' own sizes (`engine_elements`).
+                taken = engine_elements(lowered, elements)
+                if taken is None:
+                    continue
+                if lowered.registers:
+                    # Whole warpgroups of element warps, as `setmaxnreg`
+                    # moves a warpgroup's registers.
+                    taken -= taken % WARPGROUP_WARPS
+                    if not taken:
+                        continue
+                need = shared_bytes(lowered, taken)
+                warps = taken + (0 if not lowered.ring else WARPGROUP_WARPS
+                                 if lowered.registers else PRODUCER_WARPS)
                 if (need <= budget
-                        and 32 * elements <= hw.max_threads_per_block):
-                    return ElementGroup(elements, lowered, need), ''
+                        and 32 * warps <= hw.max_threads_per_block):
+                    return ElementGroup(taken, lowered, need), ''
             if elements <= MIN_ELEMENTS:
                 break
             elements = max(MIN_ELEMENTS, elements // 2)
@@ -2061,19 +2412,23 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
     return group
 
 
-__all__ = ['AUTO_LANES', 'Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS',
-           'ElementGroup', 'FMA_FORMS', 'GroupSection', 'Kind', 'LANE_ANCHORS',
-           'LANE_CLASSES', 'LANE_COLUMNS', 'LANE_FEATURES',
-           'LANE_LITERALS', 'LANE_RANGES', 'LANE_REGISTERS', 'LANE_VALUES',
-           'LANE_WARPS', 'LOWERING', 'Lanes', 'MATRIX', 'MATRIX_LOWERINGS',
-           'MIN_ELEMENTS', 'POINTER_BYTES', 'Product', 'Role',
-           'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step', 'TARGETS',
+__all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
+           'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup', 'FMA_FORMS',
+           'GroupSection', 'Kind', 'LANE_ANCHORS', 'LANE_CLASSES',
+           'LANE_COLUMNS', 'LANE_FEATURES', 'LANE_LITERALS', 'LANE_RANGES',
+           'LANE_REGISTERS', 'LANE_VALUES', 'LANE_WARPS', 'LOWERING', 'Lanes',
+           'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
+           'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role', 'SHARED_RESERVE',
+           'SMALL_EXTENT', 'Stage', 'Step', 'TARGETS', 'TCGEN05_ROWS',
            'TILE_COSTS', 'TILE_LATENCY', 'TILE_REGISTERS', 'TILE_SLOTS',
-           'TILE_SPLIT', 'TILE_UNIT', 'Terms', 'TileUnits', 'async_staging',
-           'auto_takes', 'classify', 'fill', 'fma_form', 'kept_tiles',
+           'TILE_SPLIT', 'TILE_UNIT', 'Terms', 'TileUnits', 'WARPGROUP_WARPS',
+           'async_staging', 'asynchronous', 'auto_takes', 'classify',
+           'engine_elements', 'fill', 'fma_form', 'kept_tiles',
            'lane_anchors', 'lane_columns', 'lane_elements', 'lane_features',
            'lane_grf', 'lane_literal_cap', 'lane_literals', 'lane_registers',
            'lane_values', 'lanes_plan', 'lower', 'matrix_enabled',
            'matrix_shape', 'nonzero_terms', 'operator_nonzeros', 'plan',
-           'second_stages', 'shared_bytes', 'split', 'table_elements',
-           'tile_units', 'tiled']
+           'PRODUCER_SLOTS', 'PRODUCER_WARPS', 'bulk_input', 'bulk_rows',
+           'producer_refusal', 'register_budgets', 'ring_volume',
+           'second_stages', 'shared_bytes', 'SM_REGISTERS', 'split',
+           'streamed', 'table_elements', 'tile_units', 'tiled']

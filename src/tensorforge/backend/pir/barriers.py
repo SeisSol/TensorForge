@@ -391,8 +391,9 @@ class _Pass:
         return out
 
     def barrier(self, handoff: bool, block: bool, state: _State):
-        return (self.make_barrier(handoff, block),
-                state.fence(Uniformity.BLOCK if block else self.arrival))
+        stmt = self.make_barrier(handoff, block)
+        return stmt, state.fence(settles(stmt) or (
+            Uniformity.BLOCK if block else self.arrival))
 
     # -- the hazards a construct meets on the way in ---------------------- #
 
@@ -497,6 +498,11 @@ class _Pass:
                 state = self.transfer(s, state)
                 out.append(s)
                 continue
+            if s.op == Op.IF and s.attr('roles'):
+                s, state, missed = self._place_roles(s, state, level)
+                unfenced |= missed
+                out.append(s)
+                continue
             needed, handoff, block = self.entry_conflict(s, state)
             inner = min(level, _entry_uniformity(s))
             if inner < self.arrival:
@@ -529,6 +535,69 @@ class _Pass:
             state = behind
             unfenced |= missed_outside
         return tuple(out), state, unfenced
+
+    def _place_roles(self, s: Stmt, state: _State, level: Uniformity
+                     ) -> Tuple[Stmt, _State, FrozenSet[int]]:
+        """The roles of a block (`IRBuilder.roles`): each region placed as
+        a block of its own, at the level the split is reached at -- a
+        barrier a role needs is the role's (`Participants.ROLE`), since a
+        block's would wait for the other role, which never comes.  The
+        roles hand over through a ring's barriers alone, which this pass
+        leaves to the ring (`completes_on_barrier`); what one role left
+        outstanding, the other's barriers do not settle, and a region whose
+        shared accesses meet the other role's is reported unfenced."""
+        from .engines import barrier as barrier_of, object_of, sync_object
+        from .core import Participants
+        wave = object_of(self.make_barrier(False, True)).wave
+        outer = self.make_barrier
+        regions, ends = [], []
+        unfenced: FrozenSet[int] = frozenset()
+        for r, role in zip(s.regions, s.attr('roles')):
+            # Every hazard met on the role's barrier: a multiplication's
+            # may span the roles, and only the role's is sure to reach its
+            # threads alone.
+            def make(handoff, block, role=role):
+                return barrier_of(sync_object(Participants.ROLE, wave,
+                                              role.threads, role.ident),
+                                  handoff=handoff)
+            self.make_barrier = make
+            try:
+                body, end, missed = self.place(r.body, state.copy(), level)
+            finally:
+                self.make_barrier = outer
+            regions.append(replace(r, body=body))
+            ends.append(end)
+            unfenced |= missed
+        unfenced |= self._across_roles(regions)
+        merged = ends[0].merge(ends[1])
+        return replace(s, regions=tuple(regions)), merged, unfenced
+
+    def _across_roles(self, regions) -> FrozenSet[int]:
+        """The accesses of one role that meet the other's: the roles run
+        side by side, and no barrier of either orders the other -- only a
+        ring's, which this pass leaves out (`completes_on_barrier`,
+        `handed_buffers`).  Every write of one role against every access of
+        the other, wherever in its region it stands."""
+        def touched(body):
+            reads, writes = [], []
+            for inner in walk_stmts(body):
+                if inner.regions or completes_on_barrier(inner):
+                    continue
+                r, w = self.accesses(inner)
+                reads += [(id(inner), key, ext) for key, ext, _ in r]
+                writes += [(id(inner), key, ext) for key, ext, _ in w]
+            return reads, writes
+
+        first, second = (touched(r.body) for r in regions)
+        found = set()
+        for (reads_a, writes_a), (reads_b, writes_b) in ((first, second),
+                                                         (second, first)):
+            for at, key, ext in writes_a:
+                for other, key_b, ext_b in reads_b + writes_b:
+                    if ((key == key_b or _OPAQUE in (key, key_b))
+                            and _overlap(ext, ext_b)):
+                        found |= {at, other}
+        return frozenset(found)
 
     def place_region(self, s: Stmt, state: _State, level: Uniformity
                      ) -> Tuple[Stmt, _State, FrozenSet[int]]:
@@ -596,6 +665,17 @@ def own_buffers(body: Sequence[Stmt]) -> FrozenSet[int]:
         and s.attr('lifetime') == 'body')
 
 
+def handed_buffers(body: Sequence[Stmt]) -> FrozenSet[int]:
+    """The windows of a ring's slots, by value id (`IRBuilder.alloc`'s
+    `handed`): a producer writes them and its consumers read them, and the
+    ring's barriers hand them over -- in both directions, a slot's full
+    side and its empty one (`mbarrier_ring`).  No barrier of the block's
+    stands in for those, and none is placed."""
+    return frozenset(
+        s.target[0].id for s in walk_stmts(body)
+        if s.op == Op.ALLOC and s.target and s.attr('handed'))
+
+
 def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
                    make_barrier: Callable[[bool, bool], Stmt],
                    arrival: Uniformity,
@@ -616,7 +696,7 @@ def place_barriers(body: Tuple[Stmt, ...], *, arena: Arena,
             identity[s.target[0].id] = ('o', id(s.attr('identity')))
     work = _Pass(arena.extents(body), identity,
                  {('o', id(h)) for h in handoff}, make_barrier, arrival,
-                 own_buffers(body))
+                 own_buffers(body) | handed_buffers(body))
     out, _, unfenced = work.place(tuple(body), _State.empty(), Uniformity.GRID)
     if report is not None and unfenced:
         report.append(f'{len(unfenced)} access(es) to shared memory meet an '

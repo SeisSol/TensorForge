@@ -422,6 +422,10 @@ class Section:
     # gets emitted.
     self.ir: List[AbstractInstruction] = []
     self.global_ir: List[AbstractInstruction] = []
+    #: What the builders author behind the batch loop: the multi-element
+    #: layout's release of what its prologue allocated for the block
+    #: (`MultiElementRelease`).  Empty everywhere else.
+    self.post_ir: List[AbstractInstruction] = []
     self.stream: List[AbstractInstruction] = []
     self.shr_mem_obj: Union[ShrMemObject, None] = None
     self.scopes: Scopes = Scopes()
@@ -1557,9 +1561,12 @@ class Generator:
                          trip=(Trip.ELEMENT if self._element_group is None
                                else Trip.LANE_GROUP
                                if self._element_group.lanes
-                               else Trip.ELEMENT_GROUP))
+                               else Trip.ELEMENT_GROUP),
+                         producer_rows=(0 if self._element_group is None
+                                        else self._element_group.producers))
 
-        self._section.stream = list(self._section.global_ir) + [loop]
+        self._section.stream = (list(self._section.global_ir) + [loop]
+                                + list(self._section.post_ir))
 
         # Final sync for persistent threads: it guards the next iteration's
         # writes against the previous iteration's reads, which the barrier
@@ -1853,9 +1860,11 @@ class Generator:
     lexic = self._context.target.lexic
     offset = self._rotation(index)
     stride = f'({lexic.grid_dim_x} * {lexic.block_dim_y})'
-    if self._element_group is not None and self._element_group.lanes:
+    if self._element_group is not None and (self._element_group.lanes
+                                            or self._element_group.producers):
       # The lanes form's group is on the lanes, and a block takes one a trip
-      # (`Trip.LANE_GROUP`).
+      # (`Trip.LANE_GROUP`); a block with a producer's rows takes its group's
+      # elements and no more (`BatchLoop.producer_rows`).
       stride = f'({lexic.grid_dim_x} * {self._element_group.elements})'
     if not offset:
       start = self._get_2d_block_id()
@@ -3467,9 +3476,11 @@ class Generator:
     boundary (`_launch_groups`)."""
     launch = self._launch
     mults_per_block = launch.mults_per_block
-    if self._element_group is not None and self._element_group.lanes:
+    if self._element_group is not None and (self._element_group.lanes
+                                            or self._element_group.producers):
       # The lanes form's block takes a group of elements a trip on its lanes,
-      # however many warps share it (`Trip.LANE_GROUP`).
+      # however many warps share it (`Trip.LANE_GROUP`); a block with a
+      # producer's rows its group's elements, the producer's taking none.
       mults_per_block = self._element_group.elements
     coop = launch.cooperative
     block_x, block_y, block_z = launch.block
@@ -4217,7 +4228,8 @@ class Generator:
     builder an operation."""
     import dataclasses
     from tensorforge.backend.instructions.compute.multi_element import (
-        MultiElementOperators, MultiElementSection)
+        MultiElementOperators, MultiElementRelease, MultiElementSection,
+        tmem_columns)
     # The section's own classification: the plan's was made of the
     # descriptions as the generator was handed them, and the section's
     # symbols are the ones its operations name.
@@ -4225,11 +4237,17 @@ class Generator:
     section, why = element_group.classify(flat)
     if section is not None:
       planned = self._element_group.section
+      # The engine the plan's tiling is on: mma_sync's where the fill rule
+      # held a tiling of the target's asynchronous engine to it.
+      engine = (None if element_group.asynchronous(planned)
+                else 'mma_sync')
       section = element_group.lower(
           section, self._context, matrix=element_group.tiled(planned),
           split=element_group.split(planned),
-          lanes=self._element_group.lanes is not None,
-          double=planned.doubled > 0)
+          lanes=self._element_group.lanes is not None, engine=engine,
+          streamed=element_group.streamed(planned),
+          double=planned.doubled > 0, ring=planned.ring,
+          registers=planned.registers)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
@@ -4245,6 +4263,10 @@ class Generator:
       operators = MultiElementOperators(
           self._context, group, [symbols[id(t)] for t in section.operators])
       self._section.global_ir.append(operators)
+      if tmem_columns(section):
+        # The tensor memory the prologue allocated, freed behind the loop.
+        self._section.post_ir.append(MultiElementRelease(self._context,
+                                                         operators))
     self._section.ir.append(
         MultiElementSection(self._context, group, symbols, operators))
 
@@ -5156,13 +5178,19 @@ class Generator:
       # FP32 its column's FMAs would be paired into (`lane_features`).
       grf = element_group.lane_grf(self._context) or grf
       features = element_group.lane_features(self._context)
+    # Where the multi-element layout's producer gives registers to the
+    # element warps, the kernel's entry is fixed (`element_group.
+    # register_budgets`, `__maxnreg__`).
+    budgets = (None if self._element_group is None
+               else element_group.register_budgets(self._element_group))
+    extra = {} if budgets is None else {'maxnreg': budgets[0]}
     return lexic.kernel_definition(writer, launch_bounds,
                                    self._base_kernel_name
                                    + self._launch_suffix(launch),
                                    str_params, self._context.fp_as_str(),
                                          shr_total_size, global_symbols,
                                          lanes=self._num_threads,
-                                         grf=grf, features=features)
+                                         grf=grf, features=features, **extra)
 
   def _generate_launcher_proto(self, with_defaults=True):
     global_symbols = self._scopes.get_global_scope().values()
