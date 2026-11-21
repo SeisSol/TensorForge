@@ -115,23 +115,31 @@ def test_no_bulk_input_no_producer():
                                                                context)
 
 
-@pytest.mark.parametrize('arch', ['sm_90', 'sm_90a', 'sm_100a'])
-def test_a_star_stored_sparse_keeps_the_warps_staging(arch):
+@pytest.mark.parametrize('arch,elements', [
+    ('sm_90', 16), ('sm_90a', 16), ('sm_100a', 14)])
+def test_a_star_stored_sparse_goes_through_the_ring(arch, elements):
     """SeisSol's GPU memory layout stores `star` sparse, 24 of its 81 cells
-    (`test_multi_element`'s `sparse-star`): its cells are read through
-    their places, and the producer copies boxes stored dense -- refused,
-    with the reason, and the plan stages as without the option."""
-    context = me._context(arch, 's', multi_element='force',
-                          element_producer=True, **AUTO)
-    section, why = eg.classify(me._descrs('sparse-star', 6, 's'))
-    assert section is not None, why
-    lowered = eg.lower(section, context, split=True, ring=2)
-    assert lowered.ring == 0
-    assert 'star(0) is stored sparse' in eg.producer_refusal(lowered,
-                                                             context)
-    group, why = eg.fill(section, context)
-    assert group is not None, why
-    assert group.section.ring == 0 and group.producers == 0
+    (`test_multi_element`'s `sparse-star`): the producer copies the cells
+    it stores, each from its place among them, a lane a share of an
+    element's -- 24 copies a star, a branch for each of the two lanes of an
+    element -- and the slot's zeros are the cells it does not store."""
+    group = _plan(arch, 'sparse-star')
+    assert group.section.ring and group.producers == 1
+    assert group.elements == elements
+    stars = [b for b in group.section.inputs
+             if b.tensor.alias.startswith('star')]
+    assert len(stars) == 3 and not any(eg.bulk_input(b) for b in stars)
+    assert eg.producer_refusal(group.section, me._context(
+        arch, 's', multi_element='force', element_producer=True)) is None
+    src = _kernel(arch, 'sparse-star').get_kernel()
+    start = re.search(r'if \(\w+_producer\) \{', src).start()
+    producer = src[start:src.index('tensorforge::mbarrierExpect(', start)]
+    copies = re.findall(r'__pipeline_memcpy_async\(&\w+_rstar(\d)\[[^\]]+\], '
+                        r'&estar(\d)_\d+\[(\d+)\], 4\);', producer)
+    assert len(copies) == 3 * 24
+    assert all(window == star for window, star, _ in copies)
+    assert sorted(int(place) for star, _, place in copies
+                  if star == '0') == list(range(24))
 
 
 def test_the_ring_is_counted_in_the_blocks_room():
@@ -235,14 +243,19 @@ def test_the_kernel_moves_the_registers_once():
 
 # -- the host oracle -------------------------------------------------------------- #
 
-def _two_trips(shape, arch, monkeypatch, count=7, poison=False, **options):
+def _two_trips(shape, arch, monkeypatch, count=7, poison=False, order=4,
+               **options):
     """A group of four over seven elements -- two trips, the second with
     warps masked -- through a ring of three: every element against NumPy,
     no access a barrier or the ring does not order (`kernel_eval.Races`),
     no wait for a phase that never completes.  `count` elements instead;
     with `poison`, shared memory nothing wrote reads NaN rather than the
-    oracle's finite noise, as the hardware's may."""
+    oracle's finite noise, as the hardware's may.  An operand stored
+    sparse holds its stored cells alone, in their order, and is zero at
+    the others (`compute.multi_element._positions`)."""
     import numpy as np
+    from tensorforge.backend.instructions.compute.multi_element import \
+        _positions
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
     group = 4
@@ -259,7 +272,7 @@ def _two_trips(shape, arch, monkeypatch, count=7, poison=False, **options):
         monkeypatch.setattr(kernel_eval.Slot, 'read', poisoned)
     monkeypatch.setattr(eg, 'ELEMENTS', {key: group for key in eg.ELEMENTS})
     monkeypatch.setattr(eg, 'DEFAULT_ELEMENTS', group)
-    gen = _kernel(arch, shape, 4, **options)
+    gen = _kernel(arch, shape, order, **options)
     built = gen.built._element_group
     assert built.elements == group and built.section.ring
     tensors = {}
@@ -275,11 +288,17 @@ def _two_trips(shape, arch, monkeypatch, count=7, poison=False, **options):
 
     def memory(t, read):
         (r0, r1), (c0, c1) = box(t)
+        places = None if t.is_dense() else _positions(t)
         out = np.zeros((count, r1 - r0, c1 - c0))
         for e in range(count):
             for c in range(c1 - c0):
                 for r in range(r1 - r0):
-                    out[e, r, c] = read(e, r + c * (r1 - r0))
+                    at = r + c * (r1 - r0)
+                    if places is not None:
+                        at = places[at]
+                        if at < 0:
+                            continue
+                    out[e, r, c] = read(e, at)
         return out
 
     fill = kernel_eval.Slot(me.SEED)
@@ -311,7 +330,7 @@ def _two_trips(shape, arch, monkeypatch, count=7, poison=False, **options):
     got = memory(output, lambda e, s: mem.get((f'{output.name}@{e}', s),
                                               fill.read(f'{output.name}@{e}',
                                                         s)))
-    want = me._reference(me._descrs(shape, 4, 's'))(
+    want = me._reference(me._descrs(shape, order, 's'))(
         inputs, inputs[output.alias])
     for e in range(count):
         scale = np.abs(want[e]).max() or 1.0
@@ -358,10 +377,37 @@ def test_a_slots_padding_is_zero_on_the_oracle(monkeypatch):
     _two_trips('chain', 'sm_90a', monkeypatch, poison=True)
 
 
+@pytest.mark.parametrize('arch,engine', [('sm_90a', 'HGMMA'),
+                                         ('sm_100a', 'UTCHMMA')])
+def test_compiled_the_producer_copies_a_sparse_stars_cells(arch, engine,
+                                                          tmp_path):
+    """Built for the arch-specific targets with the stars stored sparse:
+    the producer's nine bulk copies of I's columns (UBLKCP) and its 72
+    asynchronous copies of the stars' stored cells (LDGSTS), the engine's
+    45 products."""
+    import test_multi_element_async as ma
+    sass = ma._sass(arch, tmp_path, 'sparse-star', 6, element_producer=True)
+    assert ma._count(sass, 'UBLKCP') == 9
+    assert ma._count(sass, 'LDGSTS') == 72
+    assert ma._count(sass, engine) == 45
+
+
+@pytest.mark.parametrize('arch', ['sm_90', 'sm_90a', 'sm_100a'],
+                         ids=['mma_sync', 'wgmma', 'tcgen05'])
+@pytest.mark.parametrize('order', [4, 6])
+def test_every_element_of_two_trips_with_sparse_stars_on_the_oracle(
+        order, arch, monkeypatch):
+    """The volume with its stars stored sparse, as a SeisSol GPU build
+    stores them: the producer's copies of the stored cells, the slot's zeros
+    at the others -- with shared memory nothing wrote reading NaN, a cell
+    the copies left out and the zeros missed would reach every product."""
+    _two_trips('sparse-star', arch, monkeypatch, poison=True, order=order)
+
+
 # -- on the hardware ----------------------------------------------------------- #
 
 GPU_CASES = [('volume', 6), ('volume', 4), ('chain', 6), ('reuse', 6),
-             ('assign', 6)]
+             ('assign', 6), ('sparse-star', 6), ('sparse-star', 4)]
 
 
 @pytest.mark.parametrize('shape,order', GPU_CASES,

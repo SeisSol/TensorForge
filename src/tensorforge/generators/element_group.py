@@ -1482,13 +1482,11 @@ def producer_refusal(section: GroupSection, context) -> Optional[str]:
     The producer copies an element's box of an input a column at a time,
     one bulk copy a column (`IRBuilder.copy_bulk` into a `RingSlot`), where
     the copy takes it (`bulk_input`), and a cell an asynchronous copy of
-    its first warp otherwise: the target has the bulk copy (sm_90 on),
-    every input is stored dense --
-    an element's operand stored sparse, SeisSol's `star` under its GPU
-    memory layout, is read cell by cell through its places
-    (`compute.multi_element._sparse_read`), which no copy of a box does --
-    and at least one input takes the bulk copy: the producer is there for
-    the large ones.  F32 only, as the matrix tiling's group is."""
+    its first warp otherwise -- of an input stored sparse, SeisSol's `star`
+    under its GPU memory layout, the cells it stores, each from its place
+    (`compute.multi_element._stored_cells`): the target has the bulk copy
+    (sm_90 on), and at least one input takes it -- the producer is there
+    for the large ones.  F32 only, as the matrix tiling's group is."""
     options = context.get_user_options()
     if not getattr(options, 'element_producer', False):
         return 'the option is off'
@@ -1498,14 +1496,6 @@ def producer_refusal(section: GroupSection, context) -> Optional[str]:
         return f'{section.dtype} inputs'
     if not section.inputs:
         return 'no inputs'
-    sparse = [b.tensor.alias for b in section.inputs
-              if not b.tensor.is_dense()]
-    if sparse:
-        # Its cells are where its storage keeps them, each read through its
-        # place (`compute.multi_element._sparse_read`): the producer copies
-        # an element's box as stored dense.
-        return (f'{sparse[0]} is stored sparse, and the producer copies '
-                f'boxes stored dense')
     if not any(bulk_input(b) for b in section.inputs):
         return 'no input a bulk copy takes'
     return None

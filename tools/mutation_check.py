@@ -5929,6 +5929,17 @@ GROUPS = {
         ('a hop of the producer\'s lanes skipped',
          sub(ME_SECTION, "                for hop in range(0, total, per):\n",
              "                for hop in range(0, total, 2 * per):\n", 1)),
+        # A sparse star's stored cells (`_stored_cells`): each from its place
+        # among the stored entries to where the element's box holds it.
+        ('a sparse star\'s cells read at their place in the box',
+         sub(ME_SECTION, "            place = places[(row - lower[0]) + (col - lower[1]) * height]\n",
+             "            place = ((row - lower[0]) + (col - lower[1]) * height\n"
+             "                     if places[(row - lower[0]) + (col - lower[1]) * height] >= 0\n"
+             "                     else -1)\n", 1)),
+        ('a sparse star\'s cells written at their place among the stored',
+         sub(ME_SECTION, "                out.append(((row - buffer.rows[0])\n"
+                         "                            + (col - buffer.cols[0]) * buffer.pitch, place))\n",
+             "                out.append((place, place))\n", 1)),
     ]),
 }
 

@@ -204,6 +204,27 @@ def _positions(tensor) -> tuple:
     return tuple(out)
 
 
+def _stored_cells(buffer) -> list:
+    """The cells of an input stored sparse that its storage keeps, over the
+    group's buffer's box: `(at, place)`, where the box holds the cell in an
+    element's share of the buffer -- column by column over its pitch -- and
+    its place among the stored entries (`_positions`).  What the producer
+    copies of the input (`MultiElementSection._produce_copies`), and what
+    `_sparse_read` reads of it without the ring."""
+    tensor = buffer.tensor
+    lower = [int(x) for x in tensor.bbox.lower()]
+    height = int(tensor.bbox.sizes()[0])
+    places = _positions(tensor)
+    out = []
+    for col in range(*buffer.cols):
+        for row in range(*buffer.rows):
+            place = places[(row - lower[0]) + (col - lower[1]) * height]
+            if place >= 0:
+                out.append(((row - buffer.rows[0])
+                            + (col - buffer.cols[0]) * buffer.pitch, place))
+    return out
+
+
 def _sparse_read(builder, context, tables, source, tensor, index, fp,
                  uniform=None, hint='s'):
     """`tensor`'s cell at `index` -- its place in the box, column by column
@@ -3040,7 +3061,15 @@ class MultiElementSection(AbstractInstruction):
         may alias the window the store before it wrote, so the compiler
         issued them a load and a store at a time, one latency each -- 243 of
         them a trip, which held the element warps at the ring for five times
-        their own trip (p5d's ncu).  A copy has no value to wait for."""
+        their own trip (p5d's ncu).  A copy has no value to wait for.
+
+        An input stored sparse -- SeisSol's `star` under its GPU memory
+        layout, 24 of 81 cells -- is copied a stored cell a copy, the cells
+        `_sparse_read` stages without the ring: each from its place among
+        the stored entries to where the box holds it (`_stored_cells`), the
+        lanes of an element every `32 // E`-th of them, a branch a share of
+        the lanes.  The cells it does not store are the slot's zeros, which
+        nothing writes after the prologue (`MultiElementOperators._ring`)."""
         from tensorforge.backend.pir.core import SIZE
         b = trip.builder
         section = self._group.section
@@ -3061,6 +3090,21 @@ class MultiElementSection(AbstractInstruction):
                 pointer = _element_pointer(b, self._context, symbol, source,
                                            section.dtype)
                 base = b.op('mul', INDEX, mine, buffer.per_element, hint='b')
+                if not buffer.tensor.is_dense():
+                    cells = _stored_cells(buffer)
+                    for k in range(per):
+                        ours = cells[k::per]
+                        if not ours:
+                            continue
+                        with b.if_(b.op('eq', BOOL, share, k, hint='sh')):
+                            for at, place in ours:
+                                copies.append(b.copy_async(
+                                    window, pointer,
+                                    dst_index=(_index(b, 'add', base, at,
+                                                      'd'),),
+                                    src_index=(place,), elems=1,
+                                    threads=lanes))
+                    continue
                 height = buffer.height
                 total = height * (buffer.cols[1] - buffer.cols[0])
                 for hop in range(0, total, per):
