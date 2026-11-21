@@ -2056,6 +2056,32 @@ declare('fission',
             'order-8 kernels it cuts 14 % faster (Max 1550), 0 everywhere '
             'else.')
 
+declare('fission_cut',
+        default='flops',
+        parse=lambda text: text.strip(),
+        doc='Where `Options.fission` cuts among the legal points '
+            '(`generator.fission_cuts`).  `flops`: as near to equal shares of '
+            'the arithmetic as the points allow.  `operators`: so that the '
+            'largest set of batch-constant operands one piece reads, by the '
+            'bytes they are stored over, is as small as it can be -- the '
+            'pieces then read operator sets of their own where the list has '
+            'such boundaries, SeisSol\'s local step between its time '
+            'derivative, volume and local flux -- and among the cuts that '
+            'reach that, the most equal shares of the arithmetic.  An '
+            'experiment (fused local step, 2026-11-20).')
+
+declare('preload_by_section',
+        default=False,
+        parse=parse_bool,
+        doc='Where a kernel is built in several sections (`Options.fission`, '
+            'a block barrier of its own), stage in each section\'s prologue '
+            'the batch-constant operands that section reads, and decide '
+            'whether its block streams the operators that do not fit '
+            '(`Options.stream_shards`) from those alone -- rather than from '
+            'every operand of the kernel, which stages in every piece the '
+            'same first operators, read there or not.  An experiment (fused '
+            'local step, 2026-11-20).')
+
 declare('min_blocks_per_sm',
         default=1,
         env='TF_MIN_BLOCKS_PER_SM',
