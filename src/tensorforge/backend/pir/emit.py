@@ -760,8 +760,10 @@ class Emitter:
         return lex.get_operation(fn, s.target[0].type.base, *args,
                                  *[''] * (2 - len(args)))
 
-    def _fma(self, v: Value, args: Sequence[str]) -> str:
-        """`a * b + c`, unless the lexic spells a vector one itself.
+    def _fma(self, v: Value, args: Sequence[str],
+             fused: bool = False) -> str:
+        """`a * b + c`, unless the lexic spells a vector one itself, or the
+        op asks for the one operation it is (`fused`, `Lexic.fused_fma`).
 
         The infix form is exact for scalars, and for GNU vectors, which
         contract it.  CUDA's vector structs contract it too, through their
@@ -769,6 +771,10 @@ class Emitter:
         sm_100 is only reached through a call the lexic names.
         """
         lex = self._lexic()
+        if fused and lex is not None:
+            spelled = lex.fused_fma(*args)
+            if spelled is not None:
+                return spelled
         if lex is not None and getattr(v.type, 'length', None) is not None:
             spelled = lex.vector_fma(*args)
             if spelled is not None:
@@ -2266,7 +2272,7 @@ class Emitter:
             if op in _INFIX and len(args) == 2:
                 expr = self._infix(op, v, args)
             elif op == 'fma' and len(args) == 3:
-                expr = self._fma(v, args)
+                expr = self._fma(v, args, fused=bool(s.attr('fused')))
             elif op == 'select' and len(args) == 3:
                 # The arms in the result's type: an immediate spelled bare is
                 # a `double` in C++, and `p ? x : 0.0` turns a float select

@@ -181,7 +181,7 @@ class SyclLexic(Lexic):
       raise ValueError(f'sycl_grf={grf!r}: 128, 256, auto or default')
     return f'sycl::ext::oneapi::experimental::properties{{{what}}}, '
 
-  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None, grf=None):
+  def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None, total_shared_mem_size=None, global_symbols=None, lanes=None, grf=None, features=None):
     if self._explicit_simd:
       # The arena is reserved inside the kernel instead; see
       # `declare_shared_memory`.  Declaring an accessor as well would reserve
@@ -270,6 +270,23 @@ class SyclLexic(Lexic):
     # two agree (`__syncwarp`, `s_waitcnt`), and only on SYCL is the wave
     # narrow enough (16 on PVC) for ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
+
+  def fused_fma(self, a, b, c):
+    """`sycl::fma`, under SPMD: an FMA the compiler keeps where it stands
+    (`Lexic.fused_fma`).  None under the explicit vector, whose operands are
+    vectors and whose FMAs are its own."""
+    if self._explicit_simd:
+      return None
+    return f'sycl::fma({a}, {b}, {c})'
+
+  def opaque_zero(self, value):
+    """Under SPMD, `value` less its broadcast from the sub-group's first
+    lane: zero, where every lane holds it alike, and a cross-lane read the
+    compiler does not see through.  None under the explicit vector."""
+    if self._explicit_simd:
+      return None
+    return (f'(sycl::group_broadcast(item.get_sub_group(), {value}, 0) - '
+            f'({value}))')
 
   def pin_fence(self):
     """The sub-group barrier, as `__syncwarp()` is on CUDA: no work in

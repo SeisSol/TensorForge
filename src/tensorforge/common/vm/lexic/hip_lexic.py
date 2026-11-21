@@ -236,6 +236,35 @@ class HipLexic(CudaLexic):
     # with barriers around them -- 22 % faster.
     return '__builtin_amdgcn_sched_barrier(0);', False
 
+  def opaque_zero(self, value):
+    if self._underlying_hardware != 'amd':
+      return super().opaque_zero(value)
+    # An empty `asm volatile` that writes it (`hip.h`): a side effect, which
+    # nothing hoists, merges or folds.
+    return 'tensorforge::opaqueZero()'
+
+  def chained_zero(self, value):
+    if self._underlying_hardware != 'amd':
+      return super().chained_zero(value)
+    # An empty `asm volatile` that reads `value` and writes the zero
+    # (`hip.h`): AMDGPU's instruction selection puts every read of a block
+    # ahead of its FMAs, which no scheduling barrier undoes; a read whose
+    # address is formed of this comes after `value`.  The lanes form's flux
+    # kernels so: localFlux[0] o6 F32 on gfx1150 from 964 B of spill to none
+    # at 194 VGPRs, localFluxAll o4 F64 from 5.3 kB to 0.2 kB.
+    return f'tensorforge::opaqueZeroAfter({value})'
+
+  def opaque_value(self, value):
+    if self._underlying_hardware != 'amd':
+      return super().opaque_value(value)
+    # An empty `asm volatile` that reads and writes it (`hip.h`): InstCombine
+    # sinks a value used only under a guard into the guard's block, and with
+    # it every FMA the value takes -- the lanes form's column behind its
+    # loads: localFluxAll at o4 in F32 spilled 1.2 kB a lane on gfx942 and
+    # 2.2 kB on gfx1150 so, none and 1.0 kB with the column's values held
+    # here.
+    return f'tensorforge::opaque({value})'
+
   def loop_body_fence(self):
     if self._underlying_hardware != 'amd':
       return super().loop_body_fence()
@@ -343,6 +372,11 @@ class HipLexic(CudaLexic):
       # that translation unit does not include.
       return None
     return f'__builtin_prefetch({address}, 0, 3);'
+
+  def fused_fma(self, a, b, c):
+    # The math library's overloaded `fma`, float or double: one operation,
+    # which hipcc neither splits nor reassociates (`Lexic.fused_fma`).
+    return f'fma({a}, {b}, {c})'
 
   def vector_fma(self, a, b, c):
     # GNU vectors: the infix form contracts, into packed FMAs where the

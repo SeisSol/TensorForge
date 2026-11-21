@@ -148,7 +148,7 @@ def run_case(case, target: Target, cache_root: Path,
     """
     dt = case.DTYPE
     batch = int(getattr(case, "BATCH", 8))
-    rtol, atol = getattr(case, "TOL", (1e-5, 1e-5))
+    tol = getattr(case, "TOL", (1e-5, 1e-5))
 
     descr_list = case.descr_list()
     # A case that needs an option turned says so (`OPTIONS`); everything
@@ -236,6 +236,10 @@ def run_case(case, target: Target, cache_root: Path,
     elems: Dict[str, object] = {}
     dest_in_view = None
     for op in ops_meta:
+        if op.is_scalar:
+            # Passed by value, the driver's literal (`scalar_value`): no
+            # buffer, and nothing the reference is handed.
+            continue
         key = op.alias or op.kernel_name
         elems[op.kernel_name] = odt = layout.datatype_of(op.ctype, dt)
         # Batch-constant operands (Addressing.NONE) live in one shared
@@ -303,6 +307,11 @@ def run_case(case, target: Target, cache_root: Path,
         flats[op.kernel_name] = flat
 
     expected = _reference_for_case(case, inputs_by_alias, dest_in_view)
+    # A case whose output's size is not known ahead -- a chain of products
+    # whose rows grow by orders of magnitude -- states its tolerance as a
+    # function of the expected array; `atol` may be an array then, which
+    # broadcasts against it.
+    rtol, atol = tol(np.asarray(expected)) if callable(tol) else tol
 
     # Lay out a per-run work directory (separate from compile cache).
     with tempfile.TemporaryDirectory(prefix=f"tf_run_{case.NAME}_") as tmp:
@@ -313,7 +322,7 @@ def run_case(case, target: Target, cache_root: Path,
             (in_dir / "in_elementIndices.bin").write_bytes(
                 indices.astype(np.uint32).tobytes())
         for op in ops_meta:
-            if op.is_source:
+            if op.is_source and not op.is_scalar:
                 elem = elems[op.kernel_name]
                 (in_dir / f"in_{op.kernel_name}.bin").write_bytes(
                     flats[op.kernel_name].astype(

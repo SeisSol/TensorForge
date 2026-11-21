@@ -105,10 +105,13 @@ class CudaLexic(Lexic):
 
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None,
-                        lanes=None, grf=None):
+                        lanes=None, grf=None, features=None):
     args = [str(item) for item in kernel_bounds]
     bounds = f"\n__launch_bounds__({', '.join(args)})\n"
-    header = f'__global__ void {bounds} kernel_{base_name}({params})'
+    # clang's per-function target features (`Lexic.kernel_definition`).
+    target = (f' __attribute__((target("{features}")))' if features
+              else '')
+    header = f'__global__ void{target} {bounds} kernel_{base_name}({params})'
     shmdef = f'extern __shared__ char {GeneralLexicon.TOTAL_SHR_MEM}Ptr[];\n'
     return MultiBlock(file, [header, shmdef])
 

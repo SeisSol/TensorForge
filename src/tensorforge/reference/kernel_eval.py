@@ -1409,6 +1409,13 @@ def _py(expr: str) -> str:
     e = _fold_reads(e)
     # `pick<G>(m, a, b, ...)`: multiplication `m`'s value among `G`.
     e = re.sub(r'\btensorforge::pick\s*<\s*(\d+)\s*>\s*\(', r'PICK(\1, ', e)
+    # `opaqueZero()`, the zero an `asm volatile` hands over so that an
+    # address is formed where it is read (`hip.h`): zero.
+    e = re.sub(r'\btensorforge::opaqueZero\s*\(\s*\)', '0', e)
+    # `opaqueZeroAfter(x)`: zero as well, after `x` (`hip.h`).
+    e = re.sub(r'\btensorforge::opaqueZeroAfter\s*\(\s*\w+\s*\)', '0', e)
+    # `opaque(x)`, `x` an `asm volatile` hands back unchanged (`hip.h`).
+    e = re.sub(r'\btensorforge::opaque\s*\(', '(', e)
     # `bufferLoad<T, N>(r, i, keep)`: `N` elements of `T` through the
     # resource `r` (`Interp._buffer_load`), the element's size said here.
     e = re.sub(r'\btensorforge::bufferLoad\s*<\s*([\w:]+)\s*(?:,\s*(\d+)\s*)?'
@@ -1439,6 +1446,9 @@ def _py(expr: str) -> str:
     e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
     # The address of a warp's quarter of tensor memory's lanes (`cuda.h`).
     e = re.sub(r'\btensorforge::tmemWarpAddress\s*\(', 'TMEMADDR(', e)
+    # The math library's `fma(a, b, c)` a lexic spells for an FMA the compiler
+    # is to keep where it stands (`Lexic.fused_fma`): the same arithmetic.
+    e = re.sub(r'(?<![\w:])fma\s*\(', 'FMA(', e)
     # The standard library's functions, which the environment holds by their
     # own names.
     e = re.sub(r'\bstd::(?=\w+\s*\()', '', e)

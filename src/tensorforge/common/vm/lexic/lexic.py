@@ -235,10 +235,12 @@ class Lexic(ABC):
   @abstractmethod
   def kernel_definition(self, file, kernel_bounds, base_name, params, precision=None,
                         total_shared_mem_size=None, global_symbols=None,
-                        lanes=None, grf=None):
+                        lanes=None, grf=None, features=None):
     """The kernel's head.  `grf` is the register file it asks for where the
     backend can (`Options.sycl_grf`): `'128'`, `'256'`, `'auto'`, or None
-    for the backend's default."""
+    for the backend's default.  `features`: target features the kernel's
+    compile turns on or off, as the backend's compiler spells them (HIP's
+    `target` attribute), or None."""
 
   @abstractmethod
   def sync_block(self):
@@ -252,6 +254,32 @@ class Lexic(ABC):
     """`(statement, converged)`: what keeps the compiler to the body's order
     of its loads (`Options.pin_loads`), and whether it needs every lane of the
     warp to arrive -- or None where the backend has no such statement."""
+    return None
+
+  def opaque_zero(self, value: str):
+    """A zero the compiler cannot see through, of `value` -- an index every
+    lane of the warp holds alike -- or None where the backend has none.
+
+    What anchors an address to the loop iteration that forms it: added in,
+    it makes the address the iteration's own, which the compiler cannot
+    take out of the loop and hold across it (the multi-element layout's
+    lanes form, `element_group.lane_anchors`)."""
+    return None
+
+  def chained_zero(self, value: str):
+    """A zero the compiler cannot see through, formed after `value` -- a
+    lane's value it reads -- or None where the backend needs none: an
+    anchor that orders the reads formed of it after the arithmetic that
+    makes `value` (the multi-element layout's lanes form,
+    `compute.multi_element`)."""
+    return None
+
+  def opaque_value(self, value: str):
+    """`value` as the compiler cannot see it come from: what keeps the
+    arithmetic that makes it where it stands, ahead of a guarded use the
+    compiler would otherwise sink all of it behind -- or None where the
+    backend needs none (the multi-element layout's lanes form,
+    `compute.multi_element`)."""
     return None
 
   def loop_body_fence(self) -> str:
@@ -415,6 +443,20 @@ class Lexic(ABC):
     if op == Operation.OR:
       return f'({value1} {"||" if boolean else "|"} {value2})'
     raise NotImplementedError(f'{op}')
+
+  def fused_fma(self, a, b, c):
+    """`a * b + c` as the one operation it is, a call the compiler does not
+    reassociate, or None where the infix form keeps its place.
+
+    Where the compiler may reassociate floating-point arithmetic -- icpx's
+    default model is fast -- a chain of infix FMAs into one accumulator is
+    an addition it reorders: on PVC the lanes form's accumulator chains were
+    sunk behind every read of the operators' numbers, which IGC then held
+    and spilled (13.5 kB on the o6 volume in F32), where the calls keep
+    each FMA after its read and spill nothing.  Asked for by the op
+    (`fused`), not taken for every FMA: the other kernels' text stays
+    theirs."""
+    return None
 
   def vector_fma(self, a, b, c):
     """`a * b + c` over the target's vector type, spelled as a call, or

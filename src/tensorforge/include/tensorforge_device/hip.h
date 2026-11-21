@@ -518,6 +518,44 @@ template <typename T> __device__ __forceinline__ void pin(T &v) {
   asm volatile("" : "+v"(v));
 }
 
+/// Zero, as a value the compiler cannot see through: an empty `asm volatile`
+/// that writes it, in a scalar register.  No instruction; what it buys is an
+/// anchor.  Added into an address, it makes the address the loop iteration's
+/// that forms it -- an `asm volatile` is a side effect, which LICM neither
+/// hoists nor merges -- so that the compiler forms it there instead of taking
+/// it out of the loop and holding it across: the multi-element lanes form's
+/// reads of an element's rows and of an operator's numbers, the same in every
+/// column (`element_group.lane_anchors`).
+__device__ __forceinline__ int opaqueZero() {
+  int zero = 0;
+  asm volatile("" : "+s"(zero));
+  return zero;
+}
+
+/// `x` as an empty `asm volatile` hands it back, read and written in vector
+/// registers: no instruction, and the arithmetic that makes `x` stays ahead
+/// of it.  A value used only under a later guard -- the multi-element lanes
+/// form's column, written back under each lane's mask -- has LLVM's
+/// InstCombine sink all the arithmetic it takes into that guard's block,
+/// behind every load of the block before it, and the column's reads are then
+/// every row at once (`Lexic.opaque_value`).
+template <typename T> __device__ __forceinline__ T opaque(T x) {
+  asm volatile("" : "+v"(x));
+  return x;
+}
+
+/// Zero, as `opaqueZero` hands it over, and after `x`: the empty `asm volatile`
+/// reads `x`, so that an address formed of it is formed after the arithmetic
+/// that makes `x`.  The multi-element lanes form reads each tile of an
+/// element's rows at such an anchor, of the arithmetic of the tile before
+/// (`Lexic.chained_zero`): instruction selection otherwise puts every read of a
+/// walk ahead of its FMAs, and none of the scheduler's fences moves them back.
+template <typename T> __device__ __forceinline__ int opaqueZeroAfter(T x) {
+  int zero = 0;
+  asm volatile("" : "+s"(zero) : "v"(x));
+  return zero;
+}
+
 /// The row share as an instruction of its own: every lane of a 16-lane row
 /// gets lane `Row`'s value.  Any trivially copyable value -- `dpp` moves it
 /// in 64-bit units where the target can, so a float pair or a `double` is one
