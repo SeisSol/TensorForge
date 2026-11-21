@@ -77,6 +77,13 @@ class BuildMetrics:
         #: (`record_written_code`).
         self.written_code_units: Optional[int] = None
 
+        #: `code_units` per section, in the order the kernel runs them
+        #: (`record_section_code`): what each piece of a cut kernel
+        #: (`Options.fission`) lays down, its loop and what runs ahead of it
+        #: included.  The instruction cache holds one piece at a time, so this
+        #: is what `fission='auto'` weighs (`generator.plan_fission`).
+        self.section_code_units: Optional[List[int]] = None
+
         #: What the instructions occupy, by category (`record_mix`): category
         #: -> [issued per element and lane, copies in the code].
         self.issue_mix: Optional[Dict[str, List[int]]] = None
@@ -152,6 +159,13 @@ class BuildMetrics:
         as an FMA does.
         """
         self.code_units = (self.code_units or 0) + value
+
+    def record_section_code(self, value: int) -> None:
+        """The units one section laid down, after the ones before it
+        (`section_code_units`)."""
+        if self.section_code_units is None:
+            self.section_code_units = []
+        self.section_code_units.append(value)
 
     def record_written_code(self, value: int = 1) -> None:
         """Count what `record_code` counts, as a build that wrote every

@@ -129,3 +129,123 @@ def test_a_list_of_few_flops_is_not_built_twice_to_decide(monkeypatch):
     assert sections() == 1 and not built
     monkeypatch.setattr(G, 'FISSION_PROBE_FLOPS', 100_000)
     assert sections() == 1 and built
+
+
+# -- fission='auto' on NVIDIA: by the fetch a cut saves (`plan_fission`) ------
+
+
+def _sm90(**options):
+    from tensorforge.common.basic_types import Datatype
+    return Context(arch='sm_90', backend='cuda', fp_type=Datatype.F32,
+                   options=Options(**options))
+
+
+def _whole_code(ctx_options=None):
+    from tensorforge.analysis.icache import code_bytes
+    gen = Generator(_case().descr_list(), _sm90(fission=0))
+    gen.generate()
+    return code_bytes(gen.metrics.code_units, gen._context.target.hw)
+
+
+def test_auto_on_nvidia_keeps_a_kernel_that_fits_and_builds_it_once(
+        monkeypatch):
+    """Under the cache the probe is the kernel: taken over, not built
+    again."""
+    from tensorforge.generators import generator as G
+    built = []
+    real = G.Generator._sibling
+    monkeypatch.setattr(G.Generator, '_sibling',
+                        lambda self, *a, **k: built.append(1)
+                        or real(self, *a, **k))
+    gen = Generator(_case().descr_list(), _sm90(fission='auto'))
+    gen.generate()
+    assert len(gen.built._sections) == 1
+    assert gen.built is not gen and len(built) == 1
+
+
+def test_auto_on_nvidia_cuts_a_kernel_past_the_cache(monkeypatch):
+    """With the cache patched to three fifths of the chain's code, the two
+    halves fit and the whole does not: cut where the one legal point is, its
+    two pieces' code counted apart."""
+    whole = _whole_code()
+    ctx = _sm90(fission='auto')
+    monkeypatch.setattr(ctx.target.hw, 'icache_size', int(0.6 * whole))
+    gen = Generator(_case().descr_list(), ctx)
+    gen.generate()
+    assert len(gen.built._sections) == 2
+    assert len(gen.metrics.section_code_units) == 2
+
+
+def test_auto_on_nvidia_needs_the_part_s_fetch_penalty(monkeypatch):
+    """No `icache_miss_factor` stated (sm_86, say): nothing to weigh a cut
+    by, so no probe either."""
+    from tensorforge.generators import generator as G
+    built = []
+    real = G.Generator._sibling
+    monkeypatch.setattr(G.Generator, '_sibling',
+                        lambda self, *a, **k: built.append(1)
+                        or real(self, *a, **k))
+    whole = _whole_code()
+    built.clear()
+    ctx = _sm90(fission='auto')
+    monkeypatch.setattr(ctx.target.hw, 'icache_size', int(0.6 * whole))
+    monkeypatch.setattr(ctx.target.hw, 'icache_miss_factor', None)
+    gen = Generator(_case().descr_list(), ctx)
+    gen.generate()
+    assert len(gen.built._sections) == 1 and not built
+
+
+def test_auto_on_nvidia_leaves_a_caller_s_cut_alone(monkeypatch):
+    """A list that holds a block barrier of its own is built as the caller
+    cut it, without a probe."""
+    from tensorforge.generators import generator as G
+    from tensorforge.generators.descriptions import BlockBarrierDescr
+    built = []
+    real = G.Generator._sibling
+    monkeypatch.setattr(G.Generator, '_sibling',
+                        lambda self, *a, **k: built.append(1)
+                        or real(self, *a, **k))
+    descrs = _case().descr_list()
+    gen = Generator(descrs[:2] + [BlockBarrierDescr()] + descrs[2:],
+                    _sm90(fission='auto'))
+    gen.generate()
+    assert len(gen.built._sections) == 2 and not built
+
+
+#: The code of SeisSol's order-8 time derivative in double between its legal
+#: cuts, kB, as a build cut at all 29 of them laid it down (sm_90, the SASS a
+#: converged warp runs); whole 349 kB.
+ORDER8_SEGMENTS = [18.2, 13.7, 61.5, 28.3, 82.0, 10.9, 36.8, 19.2, 47.6, 8.0,
+                   25.7, 29.6, 30.2, 8.5, 17.4, 20.0, 20.7, 5.4, 10.6, 11.9,
+                   12.5, 5.4, 8.9, 9.6, 10.3, 5.4, 7.2, 8.3, 8.6, 4.4]
+
+
+def test_plan_cuts_the_order8_derivative_by_its_code():
+    """Into the fewest pieces that each fit the cache, the runs shared out
+    by their code less each section's frame -- not the flop-balanced thirds,
+    whose last piece held 217 of 406 kB -- and on a part whose fetch penalty
+    is mild (A100, 1.28) not at all."""
+    from tensorforge.common.basic_types import Datatype
+    from tensorforge.generators.generator import plan_fission
+    hw = _sm90().target.hw
+    kib = 1024
+    plan = plan_fission(349 * kib, [s * kib for s in ORDER8_SEGMENTS], hw)
+    # Ahead of operations 6, 11 and 20: the first derivative, the second
+    # with the third's first direction, then the rest in two.
+    cuts = [1, 2, 4, 6, 8, 9, 11, 13, 15, 16, 18, 20, 22, 23, 25, 27, 29, 30,
+            32, 34, 36, 37, 39, 41, 43, 44, 46, 48, 50]
+    assert [cuts[b - 1] for b in plan] == [6, 11, 20]
+    a100 = Context(arch='sm_80', backend='cuda',
+                   fp_type=Datatype.F64).target.hw
+    assert plan_fission(349 * kib, [s * kib for s in ORDER8_SEGMENTS],
+                        a100) is None
+
+
+def test_plan_keeps_what_fits_or_barely_passes_whole():
+    """Under the cache nothing to save; the order-6 derivative in single,
+    133 kB of which two pieces would fit, saves less than the cut adds."""
+    from tensorforge.generators.generator import plan_fission
+    hw = _sm90().target.hw
+    kib = 1024
+    assert plan_fission(120 * kib, [40 * kib, 80 * kib], hw) is None
+    assert plan_fission(133 * kib, [48 * kib, 30 * kib, 76 * kib], hw) is None

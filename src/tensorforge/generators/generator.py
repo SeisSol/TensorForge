@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import Dict, List, Optional, Tuple, Union, Type
+from typing import Dict, List, Optional, Sequence, Tuple, Union, Type
 import copy
 import dataclasses
 import functools
@@ -277,6 +277,160 @@ def fission_pieces(code: Optional[int], hw) -> int:
   if code <= FISSION_PAST * capacity:
     return 1
   return max(2, -(-int(code) // int(share * capacity)))
+
+
+#: On NVIDIA `fission='auto'` weighs what a cut saves in instruction fetch
+#: against what it adds (`plan_fission`).  A batch loop runs its body once an
+#: element, and a body past the instruction cache fetches what does not fit
+#: again on every trip; the part's penalty for that (`icache_miss_factor`,
+#: written-out FFMA chains at two warps a scheduler) is charged at this share,
+#: since a kernel's other waits hide some of the fetch.  What a piece of a cut
+#: kernel runs is its own loop, so a cut pays where it brings pieces under the
+#: cache.  Fitted on GH200 (Vista 1157459, 262144 elements, SeisSol's three
+#: launches each at the former `fission='auto'`): the order-8 time derivative
+#: cut in three ran 20 % faster in double and 35 % in single, the order-8
+#: volume in double cut in two 22 % -- the model with this share says 21, 38
+#: and 25 % from the code the pieces hold (the SASS a converged warp runs,
+#: sm_90: whole 349, 419 and 188 kB; pieces 76 | 113 | 217, 119 | 94 | 202
+#: and 131 | 71 kB).  On GB200 the same cuts ran 16, 13 and 7 % faster
+#: (Horizon 100929), where the model says 19, 36 and 20 %.
+FISSION_FETCH_SHARE = 0.75
+
+#: The code a cut adds per piece past the first, as a share of the kernel's,
+#: by the bytes of its numbers: what crosses the cut read again, addresses
+#: set up again, values a piece loads that the whole kernel kept -- beyond the
+#: frame of a section's loop, which `plan_fission` counts itself.  SeisSol's
+#: order-6 and order-8 kernels cut into two to four pieces grew their machine
+#: code 6 to 8 % a piece in double and 0 to 3 % in single (sm_90, sm_100).
+FISSION_CUT_OVERHEAD = {8: 0.06, 4: 0.015}
+
+#: The least share of the modeled cost a cut has to save to be taken.
+FISSION_MIN_GAIN = 0.05
+
+#: The share of the instruction cache a piece of a cut kernel is cut to fit
+#: (`plan_fission`).  Between 128 and 144 kB of written-out FFMA chains the
+#: time per instruction triples on GH200 at two warps a scheduler -- a cliff
+#: rather than a slope -- so a piece a few kB past the cache may pay all of
+#: the fetch; the margin is for the estimate's error per piece, which can be
+#: larger (`plan_fission`).
+FISSION_FIT = 0.95
+
+#: The most segments the build that measures where a kernel's code lies is
+#: cut into (`Generator._decide_by_fetch`); past it, the legal cuts nearest to
+#: equal shares of the arithmetic.
+FISSION_SEGMENTS = 32
+
+#: The most pieces `plan_fission` cuts a kernel into.
+FISSION_MAX_PIECES = 8
+
+
+def fetch_cost(code: float, hw) -> float:
+  """What a loop body of `code` bytes costs a trip in the model
+  `plan_fission` decides by: its code, and the share of it past the
+  instruction cache once more for every unit of the part's fetch penalty
+  (`icache_miss_factor` less one, at `FISSION_FETCH_SHARE`).  The code
+  alone where the part states neither cache nor penalty."""
+  capacity = getattr(hw, 'icache_size', None)
+  factor = getattr(hw, 'icache_miss_factor', None)
+  if not capacity or not factor or code <= capacity:
+    return float(code)
+  alpha = FISSION_FETCH_SHARE * max(float(factor) - 1.0, 0.0)
+  return code * (1.0 + alpha * (1.0 - capacity / code))
+
+
+def _partitions(count: int, pieces: int, cost, combine):
+  """The cheapest way to cut `count` segments into `pieces` runs of
+  neighbors, by `cost(a, b)` of the run of segments `a` to `b` and `combine`
+  of two costs (a sum, or a maximum): `(cost, starts of the runs past the
+  first)`, or None where there are fewer segments than pieces."""
+  best = {(0, 0): (0.0, 0)}
+  for k in range(1, pieces + 1):
+    for j in range(k, count - (pieces - k) + 1):
+      options = [(combine(best[(k - 1, i)][0], cost(i, j)), i)
+                 for i in range(k - 1, j) if (k - 1, i) in best]
+      if options:
+        best[(k, j)] = min(options)
+  if (pieces, count) not in best:
+    return None
+  bounds, j = [], count
+  for k in range(pieces, 0, -1):
+    j = best[(k, j)][1]
+    bounds.append(j)
+  return best[(pieces, count)][0], sorted(b for b in bounds if b)
+
+
+def plan_fission(whole: Optional[int], segments: Sequence[int], hw,
+                 overhead: float = FISSION_CUT_OVERHEAD[8]
+                 ) -> Optional[List[int]]:
+  """Where `fission='auto'` cuts a kernel on NVIDIA, or None where it stays
+  whole.
+
+  `whole` is the code of the kernel built whole, in bytes; `segments` the
+  code of each run between two neighboring legal cuts (`fission_cuts`), as a
+  build cut at every one of them lays them down.  Each of those carries the
+  frame of a section's loop, and a small run more of it than a large one, so
+  the segments say where the code lies rather than how much there is: the
+  frame -- the smallest segment, or what the cut build holds past the whole
+  kernel a section, whichever is less -- comes off every segment, the whole
+  kernel's code less one frame is shared out by what is left, and a piece
+  holds its share and a frame; every piece past the first adds `overhead` of
+  the kernel's code (`FISSION_CUT_OVERHEAD`).
+
+  How many pieces: the fewest whose largest -- the runs shared out so that
+  the largest is as small as it can be -- fits `FISSION_FIT` of the cache;
+  where no count up to `FISSION_MAX_PIECES` makes them fit, the cut
+  `fetch_cost` says is cheapest.  Whether to cut: where the pieces cost
+  `FISSION_MIN_GAIN` less than the whole kernel by `fetch_cost`.  The
+  answer is the segment boundaries (1 to `len(segments) - 1`) ahead of which
+  the pieces start.
+
+  SeisSol's order-8 time derivative, whose later derivatives are narrow and
+  hold more code per flop than the first, is cut by its code rather than its
+  arithmetic: the flop-balanced thirds left its last piece past the cache
+  (217 of 406 kB in double on sm_90), and a cut by the smooth cost alone two
+  of three pieces a few kB past it (141 and 145 kB).  The emitter's units
+  of a run follow its machine code only to 0.9-1.9 times -- the wide
+  products of the third direction are counted high, the narrow last
+  derivatives low -- so a piece can come out a few kB past the cache all
+  the same (the last of the derivative's on sm_90, 145 kB in double)."""
+  count = len(segments)
+  total = float(sum(segments))
+  capacity = getattr(hw, 'icache_size', None)
+  if count < 2 or total <= 0 or not whole or not capacity:
+    return None
+  frame = max(0.0, min(min(segments), (total - whole) / (count - 1)))
+  body = [max(float(code) - frame, 0.0) for code in segments]
+  spread = sum(body) or 1.0
+  prefix = [0.0]
+  for code in body:
+    prefix.append(prefix[-1] + code / spread)
+  base = fetch_cost(whole, hw)
+  chosen = None
+  cheapest = None
+  for pieces in range(2, min(count, FISSION_MAX_PIECES) + 1):
+    grown = 1.0 + overhead * (pieces - 1)
+
+    def size(a: int, b: int) -> float:
+      return grown * ((whole - frame) * (prefix[b] - prefix[a]) + frame)
+
+    balanced = _partitions(count, pieces, size, max)
+    if balanced is None:
+      break
+    largest, bounds = balanced
+    if largest <= FISSION_FIT * capacity:
+      cost = sum(fetch_cost(size(a, b), hw) for a, b in
+                 zip([0] + bounds, bounds + [count]))
+      chosen = (cost, bounds)
+      break
+    found = _partitions(count, pieces, lambda a, b: fetch_cost(size(a, b), hw),
+                        lambda x, y: x + y)
+    if found is not None and (cheapest is None or found[0] < cheapest[0]):
+      cheapest = found
+  if chosen is None:
+    chosen = cheapest
+  if chosen is None or chosen[0] > (1.0 - FISSION_MIN_GAIN) * base:
+    return None
+  return chosen[1]
 
 
 def sections_reading(sections) -> Dict[int, tuple]:
@@ -699,6 +853,11 @@ class Generator:
     #: The pieces `fission='auto'` decided (`_decide_fission`); None until
     #: it has.
     self._fission_pieces: Optional[int] = None
+    #: Where `fission='auto'` cuts, where it chose the points itself rather
+    #: than leave them to `_cut_for_fission`'s balance: indices into the list
+    #: built, ahead of which a piece starts (`_decide_by_fetch`); None
+    #: otherwise.
+    self._fission_at: Optional[List[int]] = None
     #: How this build left its operands stored (`_stored_operands`), once it
     #: is built.
     self._storage: Dict[int, tuple] = {}
@@ -777,6 +936,9 @@ class Generator:
     #: `_auto_merge`, or because this generator is one of its probes or the
     #: rebuild it asked for -- so that neither probes in turn.
     self._merge_decided: bool = merge_within is not None
+    #: The runs this generator was asked to merge (`merge_within`), so that a
+    #: probe of `fission='auto'` builds the list it builds (`_decide_by_fetch`).
+    self._merge_within: Optional[tuple] = merge_within
 
     options = context.get_user_options()
     if options.reassociate_products and not self._lanes_take(context):
@@ -1035,7 +1197,9 @@ class Generator:
     if self._auto_merge():
       # built, by the generator this one has taken over
       return None
-    self._decide_fission()
+    if self._decide_fission():
+      # built whole, by the probe `fission='auto'` decided by
+      return None
 
     self.register()
 
@@ -1743,32 +1907,37 @@ class Generator:
       return self._sections[index].count_index
     return getattr(self._section, 'count_index', index)
 
-  def _decide_fission(self) -> None:
+  def _decide_fission(self) -> bool:
     """`fission='auto'`: the pieces this kernel is cut into
     (`fission_pieces`), from the code a build of it whole lays down -- a
     sibling's, so that this generator builds once, cut or not.  Nothing to
     decide on a part `FISSION_PIECE` does not name, or where a list cannot
-    be cut at all."""
+    be cut at all.  On NVIDIA by the fetch it saves (`_decide_by_fetch`).
+
+    True where this generator took the probe's build over -- the kernel
+    whole, built once -- and False where it builds its own."""
     if self._fission_pieces is not None:
-      return
+      return False
     self._fission_pieces = 0
     opts = self._context.get_user_options()
     hw = self._context.target.hw
     if getattr(opts, 'fission', 0) != 'auto':
-      return
+      return False
     if opts.multi_element in ('force', 'auto'):
       # The multi-element layout plans the kernel's one section whole
       # (`element_group.plan`), and a piece would be a section of its own.
       flat = [op for descr in self._descr_list for op in descr.operations()]
       if element_group.plan(flat, self._context) is not None:
-        return
+        return False
+    if str(hw.vendor).lower() == 'nvidia':
+      return self._decide_by_fetch(hw)
     if fission_pieces(1 << 40, hw) <= 1 or not fission_cuts(self._given):
-      return
+      return False
     if (not getattr(hw, 'icache_size', None)
         and str(hw.vendor).lower() in FISSION_CODE):
       from tensorforge.analysis.cost import list_cost
       if list_cost(self._given).flops < FISSION_PROBE_FLOPS:
-        return
+        return False
     from tensorforge.analysis.icache import code_bytes
     # The probe shares the caller's tensors and states its storage on them:
     # orders, packings, and through a merged run's stand-in its members'.
@@ -1782,7 +1951,7 @@ class Generator:
     try:
       probe.generate()
     except Exception:                         # noqa: BLE001
-      return
+      return False
     finally:
       _store_as(before)
     self._fission_pieces = fission_pieces(
@@ -1790,6 +1959,121 @@ class Generator:
     # The probe named the shared operands for the list it built; this
     # generator builds its own (`_keep_written_out`).
     self._name_operands(self._descr_list)
+    return False
+
+  def _decide_by_fetch(self, hw) -> bool:
+    """`fission='auto'` on NVIDIA: cut where the pieces' loops fetch so much
+    less code past the instruction cache than the whole kernel's that it
+    pays for what the cut adds (`plan_fission`).
+
+    The kernel is built whole first -- a sibling, taken over where it stays
+    whole, so that a kernel that is not cut is built once.  Where its code
+    is past the cache, a second sibling cut at every legal point
+    (`fission_cuts`; at most `FISSION_SEGMENTS` runs) says where the code
+    lies, and the plan picks how many pieces and where.  A cut that leaves
+    a piece with next to none of the arithmetic is not a candidate: it
+    moves no code out of the loop that holds the rest.  A part that states
+    no fetch penalty (`icache_miss_factor`) is not cut.
+
+    Why the code and not the arithmetic: what a piece's loop fetches on
+    every trip is its own code, and a cut kernel's pieces hold about the
+    code of the whole between them -- SeisSol's order-8 time derivative ran
+    26801 machine instructions an element whole on sm_90 and 26704 cut in
+    three, yet 20 to 35 % faster on GH200, where two of the three pieces
+    fit the cache.  True where the whole build was taken over."""
+    import warnings
+    from tensorforge.analysis.cost import list_cost
+    from tensorforge.analysis.icache import ICacheBudgetWarning, code_bytes
+    capacity = getattr(hw, 'icache_size', None)
+    if not capacity or not getattr(hw, 'icache_miss_factor', None):
+      return False
+    descrs = list(self._descr_list)
+    if any(d.barrier() for d in descrs):
+      # Cut where the caller cut it (`_cut_for_fission` adds nothing then).
+      return False
+    cuts = fission_cuts(descrs)
+    work = [list_cost(list(d.operations()) if isinstance(d, ForDescr)
+                      else [d]).flops for d in descrs]
+    total = sum(work)
+    if not cuts or total < FISSION_PROBE_FLOPS:
+      # Too little arithmetic to come near the cache: SeisSol's densest
+      # code is about a byte a flop (the order-4 derivative, 39 kB).
+      return False
+    share = {i: sum(work[:i]) / total for i in cuts}
+    cuts = [i for i in cuts if 0.02 < share[i] < 0.98]
+    if not cuts:
+      return False
+    before = self._operand_storage(self._given, self._descr_list)
+    probe = self._sibling(merge_within=self._merge_within)
+    probe._fission_pieces = 0
+    try:
+      # The probes' sizes are this decision's to weigh; the kernel built
+      # says its own (`_warn_icache`, `_take_over_whole`).
+      with warnings.catch_warnings():
+        warnings.simplefilter('ignore', ICacheBudgetWarning)
+        probe.generate()
+    except Exception:                         # noqa: BLE001
+      return False
+    finally:
+      _store_as(before)
+    whole = code_bytes(probe.metrics.code_units, hw)
+    if not whole or whole <= capacity:
+      return self._take_over_whole(probe)
+    if len(cuts) >= FISSION_SEGMENTS:
+      # The legal cuts nearest to equal shares of the arithmetic.
+      kept = []
+      for k in range(1, FISSION_SEGMENTS):
+        free = [i for i in cuts if not kept or i > kept[-1]]
+        if free:
+          kept.append(min(free,
+                          key=lambda i: abs(share[i] - k / FISSION_SEGMENTS)))
+      cuts = sorted(set(kept))
+    segments = self._sibling(merge_within=self._merge_within)
+    segments._fission_pieces = len(cuts) + 1
+    segments._fission_at = list(cuts)
+    try:
+      with warnings.catch_warnings():
+        warnings.simplefilter('ignore', ICacheBudgetWarning)
+        segments.generate()
+      units = segments.metrics.section_code_units or []
+    except Exception:                         # noqa: BLE001
+      units = []
+    finally:
+      _store_as(before)
+    if len(units) != len(cuts) + 1:
+      return self._take_over_whole(probe)
+    plan = plan_fission(
+        whole, [code_bytes(u, hw) for u in units], hw,
+        FISSION_CUT_OVERHEAD.get(self._context.fp_type.size(),
+                                 FISSION_CUT_OVERHEAD[8]))
+    if plan is None:
+      return self._take_over_whole(probe)
+    self._fission_at = [cuts[b - 1] for b in plan]
+    self._fission_pieces = len(self._fission_at) + 1
+    if self._fission_at == list(cuts):
+      # Cut at every point the measuring build was: that build is the
+      # kernel (SeisSol's order-8 volume in double, in three).
+      return self._take_over_whole(segments)
+    # The probes named the shared operands for the lists they built; this
+    # generator builds its own (`_keep_written_out`).
+    self._name_operands(self._descr_list)
+    return False
+
+  def _take_over_whole(self, probe: 'Generator') -> bool:
+    """The kernel as `probe` built it (`_decide_by_fetch`) -- whole, or cut
+    where it was the build that measured the runs and the plan cuts at all of
+    them -- rather than built again; unless this generator's build would
+    differ from it, as `_auto_merge` takes its probes over: where it was told
+    to emit loops, or was handed operand tables, which name symbols of its
+    own."""
+    if (self._emit_loops != probe._emit_loops or self._param_tables
+            or len(probe._descr_list) != len(self._descr_list)):
+      self._name_operands(self._descr_list)
+      return False
+    self._take_over(probe)
+    # What the probe left unsaid while it was one (`_decide_by_fetch`).
+    probe._warn_icache()
+    return True
 
   def count_heads(self) -> List[int]:
     """The sections whose element count (and flags) is a parameter: every
@@ -1823,7 +2107,12 @@ class Generator:
     total = sum(flops) or 1
     before = {i: sum(flops[:i]) / total for i in cuts}
     chosen = None
-    if self._context.get_user_options().fission_cut == 'operators':
+    if (asked == 'auto' and self._fission_at is not None
+            and len(self._fission_at) == pieces - 1
+            and all(i in cuts for i in self._fission_at)):
+      # Where `fission='auto'` chose the points itself (`_decide_by_fetch`).
+      chosen = sorted(self._fission_at)
+    elif self._context.get_user_options().fission_cut == 'operators':
       # The arithmetic of a merged run is its iterations' (`list_cost` has
       # no cost for the loop itself and counts it as nothing).
       work = [list_cost(list(d.operations()) if isinstance(d, ForDescr)
@@ -3118,10 +3407,15 @@ class Generator:
         self._context.kernel_bodies = tuple(s.body for s in sections)
         try:
           for section in sections:
+            # What each section lays down, for `fission='auto'`
+            # (`BuildMetrics.section_code_units`).
+            before = self._metrics.code_units or 0
             with writer.AnonymousScope():
               AbstractInstruction._emit_shared_body(
                   self._context, writer, section.body, self._metrics,
                   self._num_threads)
+            self._metrics.record_section_code(
+                (self._metrics.code_units or 0) - before)
         finally:
           self._context.kernel_bodies = None
 
@@ -3171,16 +3465,20 @@ class Generator:
     runs, and slower -- the batch loop keeps its body resident only if the
     cache holds it, and otherwise fetches the difference again on every
     iteration.  The tuning scorer is what acts on it (`tuning.static_score`).
+    A kernel cut into pieces (`Options.fission`) runs one piece's loop at a
+    time, so its largest piece is what has to fit.
     """
     import warnings
     from tensorforge.analysis.icache import (ICacheBudgetWarning, code_bytes,
                                              icache_excess)
     hw = self._context.target.hw
-    excess = icache_excess(self._metrics.code_units, hw)
+    pieces = self._metrics.section_code_units or []
+    units = max(pieces) if len(pieces) > 1 else self._metrics.code_units
+    excess = icache_excess(units, hw)
     if excess:
       warnings.warn(
           f'{self._base_kernel_name}: about '
-          f'{code_bytes(self._metrics.code_units, hw)} '
+          f'{code_bytes(units, hw)} '
           f'B of code against an instruction cache of {hw.icache_size} B on '
           f'{hw.model}; the batch loop fetches the difference again on every '
           f'iteration.  Rolling a reduction (`k_roll`, `k_unroll_max`), '
