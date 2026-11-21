@@ -1406,6 +1406,9 @@ def _py(expr: str) -> str:
     e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
     # The address of a warp's quarter of tensor memory's lanes (`cuda.h`).
     e = re.sub(r'\btensorforge::tmemWarpAddress\s*\(', 'TMEMADDR(', e)
+    # The math library's `fma(a, b, c)` a lexic spells for an FMA the compiler
+    # is to keep where it stands (`Lexic.fused_fma`): the same arithmetic.
+    e = re.sub(r'(?<![\w:])fma\s*\(', 'FMA(', e)
     # The standard library's functions, which the environment holds by their
     # own names.
     e = re.sub(r'\bstd::(?=\w+\s*\()', '', e)

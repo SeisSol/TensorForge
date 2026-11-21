@@ -426,6 +426,20 @@ class Lexic(ABC):
       return f'({value1} {"||" if boolean else "|"} {value2})'
     raise NotImplementedError(f'{op}')
 
+  def fused_fma(self, a, b, c):
+    """`a * b + c` as the one operation it is, a call the compiler does not
+    reassociate, or None where the infix form keeps its place.
+
+    Where the compiler may reassociate floating-point arithmetic -- icpx's
+    default model is fast -- a chain of infix FMAs into one accumulator is
+    an addition it reorders: on PVC the lanes form's accumulator chains were
+    sunk behind every read of the operators' numbers, which IGC then held
+    and spilled (13.5 kB on the o6 volume in F32), where the calls keep
+    each FMA after its read and spill nothing.  Asked for by the op
+    (`fused`), not taken for every FMA: the other kernels' text stays
+    theirs."""
+    return None
+
   def vector_fma(self, a, b, c):
     """`a * b + c` over the target's vector type, spelled as a call, or
     None where the infix form already says everything.

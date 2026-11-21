@@ -350,6 +350,11 @@ class HipLexic(CudaLexic):
       return None
     return f'__builtin_prefetch({address}, 0, 3);'
 
+  def fused_fma(self, a, b, c):
+    # The math library's overloaded `fma`, float or double: one operation,
+    # which hipcc neither splits nor reassociates (`Lexic.fused_fma`).
+    return f'fma({a}, {b}, {c})'
+
   def vector_fma(self, a, b, c):
     # GNU vectors: the infix form contracts, into packed FMAs where the
     # target has them.  `hip.h` declares no `tensorforge::fma` to call.

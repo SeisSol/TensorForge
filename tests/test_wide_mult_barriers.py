@@ -65,7 +65,7 @@ def test_sixty_four_lanes_meet_between_a_staging_and_its_reads(kernel):
 
 
 def test_the_index_is_the_blocks_at_one_multiplication_a_block():
-    from tensorforge.backend.instructions.batch_loop import BatchLoop
+    from tensorforge.backend.instructions.batch_loop import BatchLoop, Trip
     from tensorforge.backend.pir.core import Uniformity
 
     class One(BatchLoop):
@@ -73,6 +73,8 @@ def test_the_index_is_the_blocks_at_one_multiplication_a_block():
             self._mults_per_block = mults
             self._group_size = 1
             self._grouped_flag = grouped
+            # What every loop has: a trip, an element's here.
+            self._trip = Trip.ELEMENT
 
         def _grouped(self):
             return self._grouped_flag

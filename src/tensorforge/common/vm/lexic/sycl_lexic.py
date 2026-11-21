@@ -271,6 +271,14 @@ class SyclLexic(Lexic):
     # narrow enough (16 on PVC) for ordinary operator shapes to reach it.
     return "sycl::group_barrier(item.get_sub_group());"
 
+  def fused_fma(self, a, b, c):
+    """`sycl::fma`, under SPMD: an FMA the compiler keeps where it stands
+    (`Lexic.fused_fma`).  None under the explicit vector, whose operands are
+    vectors and whose FMAs are its own."""
+    if self._explicit_simd:
+      return None
+    return f'sycl::fma({a}, {b}, {c})'
+
   def opaque_zero(self, value):
     """Under SPMD, `value` less its broadcast from the sub-group's first
     lane: zero, where every lane holds it alike, and a cross-lane read the

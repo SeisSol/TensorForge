@@ -1352,6 +1352,54 @@ def test_the_lanes_forms_flops_are_its_cones(shape, order, precision):
         == _lanes_flops(shape, order, precision)
 
 
+@pytest.mark.parametrize('shape,order,precision', [
+    ('volume', 4, 's'), ('localFlux', 4, 's'), ('columns', 4, 's')])
+def test_a_pass_of_several_columns(shape, order, precision, monkeypatch):
+    """Where the registers allow it (`LANE_COLUMNS`), a pass takes a class's
+    columns together (`Lanes.columns`): each of the operators' numbers once
+    for all of them, the same arithmetic in fewer passes -- at the same row
+    ranges the count the same, the passes a third.  (Where the columns take
+    more ranges, each range computes its mixing entries again.)"""
+    section = eg.classify(_descrs(shape, order, precision))[0]
+    one = eg.lanes_plan(section, _context('sm_90', precision))[0]
+    flops = _executed(shape, order, precision, multi_element_fma='lanes')
+    monkeypatch.setitem(eg.LANE_COLUMNS, 'nvidia', 3)
+    monkeypatch.setattr(eg, 'LANE_REGISTERS', 255)
+    three = eg.lanes_plan(section, _context('sm_90', precision))[0]
+    assert one.columns == 1 and three.columns == 3
+    assert three.ranges == one.ranges and three.classes == 3
+    assert _executed(shape, order, precision,
+                     multi_element_fma='lanes') == flops
+    kernel = _generate(_descrs(shape, order, precision), _context(
+        'sm_90', precision, **LANES)).get_kernel()
+    assert re.search(r'for \(int32_t v\d+_c = 0; v\d+_c < 1;', kernel)
+
+
+@pytest.mark.parametrize('backend,arch,spelled', [
+    ('cuda', 'sm_90', None), ('hip', 'gfx942', 'fma('),
+    ('oneapi', 'pvc', 'sycl::fma(')])
+def test_the_lanes_forms_fmas_stand_where_they_are(backend, arch, spelled):
+    """Where the target spells an FMA as a call (`Lexic.fused_fma`), the
+    lanes form's FMAs are such calls, each a statement of its own: icpx may
+    reassociate an infix chain, and a chain inlined into one expression at
+    its last use moves the arithmetic behind every read of the operators'
+    numbers, which IGC then held and spilled.  The warp form's text, and
+    CUDA's, keep the infix form."""
+    lanes = _generate(_volume(4, 's'), _context(
+        arch, backend=backend, **LANES)).get_kernel()
+    warp = _generate(_volume(4, 's'), _context(
+        arch, backend=backend, multi_element='force')).get_kernel()
+    if spelled is None:
+        assert 'fma(' not in lanes
+        return
+    calls = re.findall(r'^\s*float v\d+_[xt] = ' + re.escape(spelled), lanes,
+                       re.M)
+    assert calls
+    assert not re.search(r'= ' + re.escape(spelled) + r'[^;]*' +
+                         re.escape(spelled), lanes)
+    assert spelled not in warp
+
+
 @pytest.mark.parametrize('shape', ['volume', 'chain'])
 def test_off_is_the_kernel_without_the_option(shape):
     """Byte for byte: the switch off builds what the default builds."""
@@ -1445,7 +1493,9 @@ SEED = 29
     ('volume', 4, 's', {**LANES, 'multi_element_values': 'memory'}),
     ('volume', 4, 's', {**LANES, 'multi_element_values': 'table'}),
     ('localFlux', 4, 'd', {**LANES, 'arch': 'gfx942',
-                           'multi_element_values': 'table'})],
+                           'multi_element_values': 'table'}),
+    ('volume', 4, 'd', {**LANES, 'columns': 3}),
+    ('localFluxAll', 4, 's', {**LANES, 'columns': 3, 'arch': 'gfx942'})],
     ids=['volume-o4d', 'volume-o4s-dense', 'reuse-o4s', 'localFlux-o4d',
          'neighboringFlux-o4s-own-barriers', 'localFluxAll-o4d',
          'direction-o4s', 'columns-o4d', 'lanes-volume-o4d',
@@ -1457,7 +1507,8 @@ SEED = 29
          'gfx1150-localFlux-o4s', 'gfx942-lanes-volume-o4d',
          'gfx942-lanes-localFluxAll-o4s', 'gfx1150-lanes-localFlux-o4d',
          'lanes-volume-o4s-memory', 'lanes-volume-o4s-table',
-         'gfx942-lanes-localFlux-o4d-table'])
+         'gfx942-lanes-localFlux-o4d-table', 'lanes-volume-o4d-columns',
+         'gfx942-lanes-localFluxAll-o4s-columns'])
 def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
                                                   options, monkeypatch):
     """A group over itself and seven more elements on the host oracle: two
@@ -1474,6 +1525,11 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
     from tensorforge.reference import kernel_eval
     options = dict(options)
     arch = options.pop('arch', 'sm_90')
+    columns = options.pop('columns', None)
+    if columns is not None:
+        for vendor in ('nvidia', 'amd'):
+            monkeypatch.setitem(eg.LANE_COLUMNS, vendor, columns)
+        monkeypatch.setattr(eg, 'LANE_REGISTERS', 255)
     backend = 'cuda' if arch.startswith('sm_') else 'hip'
     context = _context(arch, precision, backend=backend,
                        **{'multi_element': 'force', **options})
@@ -1729,6 +1785,9 @@ def test_the_lanes_form_computes_on_the_gpu(shape, order, precision, target,
     to about 1e-3 in single precision, and an output near zero meets it
     absolutely."""
     from harness.runner import run_case
+    if (target.backend, target.vendor) not in eg.TARGETS:
+        pytest.skip(f'the layout is not written for {target.backend} on '
+                    f'{target.vendor}')
     group = eg.plan(_descrs(shape, order, precision),
                     _context(target.arch, precision, backend=target.backend,
                              **LANES))

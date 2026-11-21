@@ -1067,6 +1067,18 @@ LANE_RANGES = 8
 #: eight sub-groups are eight of an Xe core's 32 threads in the large file.
 LANE_WARPS = 8
 
+#: The most of a class's columns the lanes form computes in one pass
+#: (`Lanes.columns`), by vendor, where the plan's registers allow it: one
+#: everywhere so far.  A pass of several reads each number of the operators
+#: once for all of them, and each row of the element's operands once.
+LANE_COLUMNS: Dict[str, int] = {}
+
+
+def lane_columns(context) -> int:
+    """The most columns a pass of the lanes form takes on the context's
+    target (`LANE_COLUMNS`)."""
+    return LANE_COLUMNS.get(getattr(context.target.hw, 'vendor', None), 1)
+
 
 @dataclass(frozen=True)
 class Lanes:
@@ -1074,7 +1086,8 @@ class Lanes:
     (`Options.multi_element_fma` `lanes`): E elements a group, a lane each,
     and `warps` warps that all take the same E elements, each a share of
     the one output, the last step's destination -- the columns of its
-    class (`classes`), one after another, over its row range (`ranges`).
+    class (`classes`), `columns` of them a pass, one pass after another,
+    over its row range (`ranges`).
 
     What a warp computes for a column is its cone (`cone`): the output's
     rows of its range, and of every tensor upstream the rows those read.
@@ -1091,6 +1104,11 @@ class Lanes:
     #: The plan's estimate of the registers a lane holds live at the
     #: costliest range, in 32-bit words.
     registers: int
+    #: The class's columns a pass computes together: they share the
+    #: operators' numbers and the element's rows each pass reads.  More
+    #: than one only where they divide the class's columns, and every class
+    #: has as many (`lanes_plan`).
+    columns: int = 1
 
     @property
     def warps(self) -> int:
@@ -1200,14 +1218,15 @@ class Cones:
                     total += len(here) * (p.depth[1] - p.depth[0])
         return total
 
-    def live(self, rows, tile: int = 1) -> int:
-        """The values a lane holds live for a column of the output's `rows`,
-        in elements: the rows it adds into, and at the costliest point
-        either a column some product reads materialized -- with what its own
-        products hold -- or what the walk over the computed entries holds:
-        each mixing product's column of its small operand and the rows of
-        the operand it mixes one read brings in (`tile`), which the
-        products share; and a few temporaries."""
+    def live(self, rows, tile: int = 1, columns: int = 1) -> int:
+        """The values a lane holds live for `columns` columns of the
+        output's `rows`, in elements: the rows it adds into, and at the
+        costliest point either a column some product reads materialized --
+        with what its own products hold -- or what the walk over the
+        computed entries holds: each mixing product's column of its small
+        operand and the rows of the operand it mixes one read brings in
+        (`tile`), which the products and the columns share; and a few
+        temporaries."""
         need = self.need(rows)
 
         def held(step, own):
@@ -1228,7 +1247,8 @@ class Cones:
                              for q in source.products)
                 row = max([row] + [q.depth[1] - q.depth[0]
                                    for q in source.products])
-            return own + max(materialized, small + row * tile)
+            return (own * columns
+                    + max(materialized, small * columns + row * tile))
 
         return max(held(step, len(rows)) for step in self.outputs) + 4
 
@@ -1298,15 +1318,24 @@ def lanes_plan(section: GroupSection,
     # (`compute.multi_element._LaneTrip.own`).
     tile = max(1, 16 // section.dtype.size())
     lo, hi = cones.rows
-    classes = max(1, min(LANE_CLASSES, cones.cols[1] - cones.cols[0]))
+    width = cones.cols[1] - cones.cols[0]
+    classes = max(1, min(LANE_CLASSES, width))
     budget = lane_registers(context, lane_elements(context))
     live = None
-    for count in range(1, min(LANE_RANGES, hi - lo) + 1):
-        ranges = cones.ranges(count)
-        live = max(cones.live(range(*r), tile) for r in ranges) * size
-        if live <= budget:
-            return Lanes(max(1, min(classes, LANE_WARPS // count)), ranges,
-                         live), ''
+    # The most columns a pass takes first, each at as few row ranges as
+    # hold it; a pass of several only where they divide the class's
+    # columns and every class has as many.
+    for columns in range(lane_columns(context), 0, -1):
+        for count in range(1, min(LANE_RANGES, hi - lo) + 1):
+            kinds = max(1, min(classes, LANE_WARPS // count))
+            trips = -(-width // kinds)
+            if columns > 1 and (trips % columns or width % kinds):
+                continue
+            ranges = cones.ranges(count)
+            live = max(cones.live(range(*r), tile, columns)
+                       for r in ranges) * size
+            if live <= budget:
+                return Lanes(kinds, ranges, live, columns), ''
     return None, (f'a lane would hold {live} registers at {LANE_RANGES} row '
                   f'ranges, more than the {budget} the lanes form takes '
                   f'here')
@@ -1398,13 +1427,13 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
 
 __all__ = ['Buffer', 'Cones', 'DEFAULT_ELEMENTS', 'ELEMENTS', 'ElementGroup',
            'FMA_FORMS', 'GroupSection', 'Kind', 'LANE_ANCHORS',
-           'LANE_CLASSES', 'LANE_RANGES', 'LANE_REGISTERS', 'LANE_VALUES',
-           'LANE_WARPS', 'LOWERING', 'Lanes', 'MATRIX', 'MATRIX_LOWERINGS',
-           'MIN_ELEMENTS', 'POINTER_BYTES', 'Product', 'Role',
-           'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step', 'TARGETS',
-           'Terms', 'async_staging', 'classify', 'fill', 'fma_form',
-           'lane_anchors', 'lane_elements', 'lane_grf', 'lane_literals',
-           'lane_registers', 'lane_values', 'lanes_plan', 'lower',
-           'matrix_enabled', 'matrix_shape', 'nonzero_terms',
-           'operator_nonzeros', 'plan', 'second_stages', 'shared_bytes',
-           'split', 'table_elements', 'tiled']
+           'LANE_CLASSES', 'LANE_COLUMNS', 'LANE_RANGES', 'LANE_REGISTERS',
+           'LANE_VALUES', 'LANE_WARPS', 'LOWERING', 'Lanes', 'MATRIX',
+           'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES', 'Product',
+           'Role', 'SHARED_RESERVE', 'SMALL_EXTENT', 'Stage', 'Step',
+           'TARGETS', 'Terms', 'async_staging', 'classify', 'fill',
+           'fma_form', 'lane_anchors', 'lane_columns', 'lane_elements',
+           'lane_grf', 'lane_literals', 'lane_registers', 'lane_values',
+           'lanes_plan', 'lower', 'matrix_enabled', 'matrix_shape',
+           'nonzero_terms', 'operator_nonzeros', 'plan', 'second_stages',
+           'shared_bytes', 'split', 'table_elements', 'tiled']
