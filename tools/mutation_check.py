@@ -5261,9 +5261,13 @@ GROUPS = {
         ('a block\'s rows held off a block early',
          sub(ME_SECTION, "                'lt', BOOL, first, height - v, hint='in')\n",
              "                'lt', BOOL, first, height - v - vec, hint='in')\n", 1)),
+        # The copies of a trip, where pitched inputs go: an input has a
+        # pitch only where the matrix tiling reads it, on NVIDIA from sm_80
+        # on, where every dense input is copied by cp.async, and a group
+        # operand is dense -- the loads and stores never stage one.
         ('a pitched input staged over its box\'s rows',
-         sub(ME_SECTION, '        with b.for_(trip.lane, pitch * width, trip.group.threads,\n',
-             '        with b.for_(trip.lane, height * width, trip.group.threads,\n', 1)),
+         sub(ME_SECTION, '            total = pitch * width\n',
+             '            total = height * width\n', 1)),
         # The matrix tiling's kept tiles of B and its walk over units: a
         # warp's N tiles in slots, its M tiles in groups (`TileUnits`).
         ('a tile of zeros kept',
@@ -5277,9 +5281,14 @@ GROUPS = {
         ('a group\'s M tile past its unit kept',
          sub(ME_SECTION, "                            'lt', BOOL, mq, hi, hint='in'), b.op(\n",
              "                            'lt', BOOL, mq, b.op('add', INDEX, hi, 1, hint='g'), hint='in'), b.op(\n", 1)),
-        ('A split again for every slot',
-         sub(ME_SECTION, '                    halves = ([nvidia.tfconvert(b, x) for x in a]\n',
-             '                    halves = (None and [nvidia.tfconvert(b, x) for x in a]\n', 1)),
+        # Not 'A split again for every slot' (`halves` None, so that each
+        # slot's products split A themselves): the same values, and with one
+        # slot a warp, the default, the same code -- a cost no test of the
+        # numbers can see.  The split's reuse that changes values instead: an
+        # M tile of the group multiplied with another's A.
+        ('every M tile of a group multiplied with the first one\'s A',
+         sub(ME_SECTION, '                                    else halves[q])\n',
+             '                                    else halves[0])\n', 1)),
         ('a warp walking no unit',
          sub(ME_SECTION, "    with b.for_(read(t_warp, w, 'u'), read(t_warp, _index(b, 'add', w, 1,\n",
              "    with b.for_(read(t_warp, _index(b, 'add', w, 1, 'u'), 'u'), read(t_warp, _index(b, 'add', w, 1,\n", 1)),

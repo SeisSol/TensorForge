@@ -1884,6 +1884,7 @@ def test_a_grid_aligned_to_the_tiles_computes_on_the_oracle(shape,
         got, _ = kernel.run({'multi_element': 'force'})
     want = kernel.expected()
     assert written and written <= stored, sorted(written - stored)
+    assert all(math.isfinite(got[key]) for key in want)
     scale = max(abs(v) for v in want.values())
     assert max(abs(got[key] - want[key]) for key in want) <= 1e-6 * scale
 
@@ -2416,7 +2417,8 @@ def _host():
 
 def _oracle_errors(shape, precision, arch, options):
     """The kernel run by the host interpreter against NumPy: each output's
-    error, normwise."""
+    error, normwise -- infinite where a cell of it is no finite number,
+    which Python's `max` would pass over unless it came first."""
     host = _host()
     kernel = host.Kernel(DESCRIPTIONS[shape](6, precision), _dtype(precision),
                          arch)
@@ -2428,6 +2430,9 @@ def _oracle_errors(shape, precision, arch, options):
     for alias in {alias for alias, _ in want}:
         keys = [key for key in want if key[0] == alias]
         scale = max(abs(want[key]) for key in keys) or 1.0
+        if not all(math.isfinite(got[key]) for key in keys):
+            errors[alias] = math.inf
+            continue
         errors[alias] = max(abs(got[key] - want[key]) for key in keys) / scale
     return errors
 
@@ -2484,6 +2489,7 @@ def test_a_number_in_the_padding_reaches_no_result(monkeypatch):
         got, _ = kernel.run({'multi_element': 'force'})
     want = kernel.expected()
     assert max(abs(want[key]) for key in want) > 1e15
+    assert all(math.isfinite(got[key]) for key in want)
     for alias in {alias for alias, _ in want}:
         keys = [key for key in want if key[0] == alias]
         scale = max(abs(want[key]) for key in keys)
