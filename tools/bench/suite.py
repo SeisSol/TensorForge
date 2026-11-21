@@ -118,7 +118,8 @@ class Config:
     wave_wide: bool = False
     #: How a kernel is cut into launches (`PARTITIONS`): `whole`, one;
     #: `chains`, the launches gemmforge-chainforge makes of it; `ops`, one per
-    #: operation.  Anything but `whole` needs an exported kernel
+    #: operation; `kernels`, one per kernel a combined description was made
+    #: of (`kernels_partition`).  Anything but `whole` needs an exported kernel
     #: (`Workload.description`) and is timed as the sequence of its launches,
     #: one after the other on one stream, the way SeisSol issues them.
     partition: str = 'whole'
@@ -548,11 +549,31 @@ def chain_partition(description: Dict) -> List[Launch]:
     return launches
 
 
+def kernels_partition(description: Dict) -> List[Launch]:
+    """The launches of the kernels a description was combined from: one
+    per kernel, as SeisSol launches them, where `description['parts']`
+    names the kernels in order with their counts of operations
+    (`suites/seissolfused.py`).  The kernel as one launch where it names
+    none."""
+    parts = description.get('parts')
+    if not parts:
+        return whole_partition(description)
+    launches, start = [], 0
+    for _, count in parts:
+        launches.append(Launch('kernel', tuple(range(start, start + count))))
+        start += count
+    if start != len(description['operations']):
+        raise ValueError(f'the parts take {start} operations of '
+                         f'{len(description["operations"])}')
+    return launches
+
+
 #: How a configuration cuts a kernel into launches (`Config.partition`).
 PARTITIONS: Dict[str, Callable[[Dict], List[Launch]]] = {
     'whole': whole_partition,
     'chains': chain_partition,
     'ops': ops_partition,
+    'kernels': kernels_partition,
 }
 
 
