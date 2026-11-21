@@ -374,6 +374,12 @@ def _traffic(descr, datatype) -> List[TensorTraffic]:
     shared memory or registers for the life of the kernel, so it never reaches
     global memory and a byte count including it would not be comparable with
     anything a DRAM counter reports.
+
+    An accumulating descriptor (`add`) reads its destination back: the `+=`
+    reads what it adds to.  The descriptor says so, whatever direction the
+    tensor's data flow was classified with -- a kernel whose every write to a
+    tensor accumulates leaves it a `SINK`, as SeisSol's volume does `Q`, and
+    the tensor's reads (`effective_boxes`) do not list it.
     """
     boxes = descr.effective_boxes()
     if boxes is None:
@@ -404,6 +410,8 @@ def _traffic(descr, datatype) -> List[TensorTraffic]:
         add(tensor, box, reading=True)
     if dest is not None:
         add(dest.tensor, write_box, reading=False)
+        if getattr(descr, 'add', False):
+            add(dest.tensor, write_box, reading=True)
     return [out[k] for k in sorted(out)]
 
 

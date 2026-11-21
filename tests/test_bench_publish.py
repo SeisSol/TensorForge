@@ -846,9 +846,10 @@ def test_a_mark_says_which_side_of_the_ridge_and_how_far():
 
 
 def test_the_intensity_is_marked_against_each_machines_ridge(tmp_path):
-    """The volume kernel at order 6 needs 5.56 flop per byte in double:
-    under A's ridge of 10, by less than half, and over B's of 2.5, by more
-    than twice -- and B, the lower ridge, stands first."""
+    """The volume kernel at order 6 needs 3.78 flop per byte in double, its
+    destination read back as well as written: under A's ridge of 10, by
+    more than half, and over B's of 2.5, by less than twice -- and B, the
+    lower ridge, stands first."""
     import dataclasses
     import describe
     kernels = ['gpu_volume', 'gpu_derivative']
@@ -865,10 +866,10 @@ def test_the_intensity_is_marked_against_each_machines_ridge(tmp_path):
     at = {(r['kernel'], r['order'], r['arch']): r for r in f64.rows
           if r['equation'] == 'elastic'}
     assert at[('gpu_volume', 6, 'A')]['intensity'] == pytest.approx(
-        5.56, rel=1e-2)
-    assert at[('gpu_volume', 6, 'A')]['step'] == 3
-    assert at[('gpu_volume', 6, 'B')]['step'] == 6
-    assert '\\tfbound{6}\\tfbound{3}' in f64.tex
+        3.78, rel=1e-2)
+    assert at[('gpu_volume', 6, 'A')]['step'] == 2
+    assert at[('gpu_volume', 6, 'B')]['step'] == 5
+    assert '\\tfbound{5}\\tfbound{2}' in f64.tex
     assert f64.caption.index('\\texttt{B}') < f64.caption.index(
         '\\texttt{A}')
     assert 'the operation needs' in f64.caption

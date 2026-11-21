@@ -97,6 +97,29 @@ def test_accumulation_pays_for_the_destination_it_reads_back():
     assert accum.mults == assign.mults
 
 
+def test_accumulation_reads_the_destination_back_from_memory():
+    """`add=True` moves the destination twice: read back, then written.
+
+    The bytes side of the test above.  The descriptor's flag decides it, not
+    the tensor's data-flow direction: SeisSol's volume accumulates into `Q`
+    in every descriptor that writes it, which leaves `Q` a `SINK`, and its
+    reads do not list it -- counted from the reads alone, the order-6 volume
+    in single precision moved 4212 bytes an element instead of 6192.
+    """
+    target, permute = [[0, -1], [-1, 1]], [[0, 1], [0, 1]]
+
+    def c_traffic(add):
+        cost = descr_cost(MultilinearDescr(
+            SubTensor(_tensor("C", [8, 8])),
+            [SubTensor(_tensor("A", [8, 8])), SubTensor(_tensor("B", [8, 8]))],
+            target, permute, add=add))
+        return next(t for t in cost.tensors if t.name == "C")
+
+    assign, accum = c_traffic(False), c_traffic(True)
+    assert (assign.read, assign.write) == (0, 8 * 8 * 4)
+    assert (accum.read, accum.write) == (8 * 8 * 4, 8 * 8 * 4)
+
+
 def test_alpha_is_one_multiply_per_output_element():
     """A scalar operand does not multiply once per contraction point.
 
