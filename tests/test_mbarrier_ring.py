@@ -40,7 +40,7 @@ from tensorforge.backend.pir.build import (IRBuilder, RingSlot, Role,
                                            barrier_stmt)
 from tensorforge.backend.pir.core import (BOOL, INDEX, IRError, MemSpace, Op,
                                           Participants, ScalarType,
-                                          Uniformity, walk)
+                                          Uniformity, walk, walk_stmts)
 from tensorforge.backend.pir.emit import Emitter
 from tensorforge.backend.pir.passes import verify
 from tensorforge.common.basic_types import Datatype
@@ -232,6 +232,19 @@ def test_a_role_barrier_outside_the_roles_is_refused():
     b = IRBuilder(fptype=F32, arena='shrMem', context=_ctx())
     with pytest.raises(IRError, match='outside the roles'):
         b.barrier(Participants.ROLE)
+
+
+def test_the_verifier_names_a_role_barrier_outside_the_roles():
+    """Past the builder's own refusal -- a pass that moves a statement, a
+    body built without the builder -- the verifier names a role's barrier
+    that stands outside the roles of a block: no role is entered there, so
+    its threads never all arrive."""
+    built, _, _ = _body()
+    (stray,) = [s for s in walk_stmts(built) if s.op == Op.BARRIER
+                and getattr(engines.object_of(s), 'participants', None)
+                is Participants.ROLE]
+    diag = verify(tuple(built) + (stray,), strict=False)
+    assert any("a role's barrier outside the roles" in d for d in diag), diag
 
 
 def test_a_block_barrier_inside_a_role_is_refused():

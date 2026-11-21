@@ -5941,6 +5941,39 @@ GROUPS = {
                          "                            + (col - buffer.cols[0]) * buffer.pitch, place))\n",
              "                out.append((place, place))\n", 1)),
     ]),
+    # The ring of mbarriers and the roles in PIR (`IRBuilder.mbarrier_ring`,
+    # `roles`), the register budget, and the host oracle's ring model, as
+    # tests/test_mbarrier_ring.py builds them without the multi-element
+    # layout.
+    'ring': ('tests/test_mbarrier_ring.py', [
+        ('the empty side read as the full one',
+         sub(ENGINES, "    offset = obj.slots if s.attr('side') == 'empty' else 0\n",
+             '    offset = 0\n', 1)),
+        ("a round's parity the trip's own",
+         sub(BUILD, "        parity = self.op('rem', INDEX, self.op(\n"
+                    "            'div', INDEX, trip, ring.slots, hint=f'{hint}p'), 2,\n"
+                    "            hint=f'{hint}p')\n",
+             "        parity = self.op('rem', INDEX, trip, 2, hint=f'{hint}p')\n", 1)),
+        ("the empty barriers counting the full side's arrivals",
+         sub(ENGINES, '            f\'{s.attr("empty")});\',\n',
+             '            f\'{s.attr("full")});\',\n', 1)),
+        ("a role's barrier outside the roles let through",
+         sub(PASSES, '            if role_level is None:\n',
+             '            if False:\n', 1)),
+        ("the slot's bytes announced as a plain arrival",
+         sub(ENGINES, "        if tx:\n            return Lowered((f'tensorforge::mbarrierExpect('\n",
+             "        if False:\n            return Lowered((f'tensorforge::mbarrierExpect('\n", 1)),
+        ('an arrival past the count let through',
+         sub(ORACLE, "        if state['pending'] <= 0:\n",
+             '        if False:\n', 1)),
+        ("no barrier behind the ring's arming",
+         sub(BUILD, "                                 leader=leader, extern=f'{name}_ring'))\n"
+                    "        b.barrier(Participants.BLOCK)\n",
+             "                                 leader=leader, extern=f'{name}_ring'))\n", 1)),
+        ('a register budget where the target moves none',
+         sub(ENGINES, "    if env.family != 'cuda' or target is None or not getattr(\n",
+             "    if False and not getattr(\n", 1)),
+    ]),
 }
 
 
