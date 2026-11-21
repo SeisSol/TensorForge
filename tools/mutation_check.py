@@ -4289,8 +4289,9 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel_spmd.py'), '        layouts=(a_fragment_bits(), b_fragment_bits(), d_fragment_bits()),\n',
              '        layouts=None,\n', 1)),
         ('a matrix op not ending a run',
-         sub(BLOCKS, '                                  Op.SET_PRIORITY, Op.MATRIX_MAC):\n',
-             '                                  Op.SET_PRIORITY):\n', 1)),
+         sub(BLOCKS, '                                  Op.SET_PRIORITY, Op.REGISTER_BUDGET,\n'
+                     '                                  Op.MATRIX_MAC):\n',
+             '                                  Op.SET_PRIORITY, Op.REGISTER_BUDGET):\n', 1)),
     ]),
     # wgmma on the matrix op (engines phase 3b, part 1): the asynchronous
     # product of a warpgroup on sm_90a -- its descriptors, the text it is
@@ -4581,8 +4582,8 @@ GROUPS = {
          sub(BUILD, "        if not placed or placed % align:\n            raise IRError(f'a tensor copy into {dst}, which is not placed on '\n",
              "        if False:\n            raise IRError(f'a tensor copy into {dst}, which is not placed on '\n", 1)),
         ('the copy announcing the padded box',
-         sub(BUILD, "                 ('object', barrier), ('width', tmap.box_bytes()),\n",
-             "                 ('object', barrier), ('width', tmap.shared_bytes()),\n", 1)),
+         sub(BUILD, "                 ('width', tmap.box_bytes()),\n                 ('shape', tuple(tmap.box)), ('map', tmap))\n",
+             "                 ('width', tmap.shared_bytes()),\n                 ('shape', tuple(tmap.box)), ('map', tmap))\n", 1)),
         ('a descriptor over a buffer of another swizzle',
          sub(BUILD, '        if form is not None and form != engines.swizzle_form(desc.swizzle,\n',
              '        if False and form != engines.swizzle_form(desc.swizzle,\n', 1)),
@@ -5558,8 +5559,8 @@ GROUPS = {
          sub(ENGINES, "            and getattr(getattr(t, 'base', None), 'name', None) == 'BOOL'):\n",
              '            ):\n', 1)),
         ('the condition of a fill taken for an index',
-         sub(CORE, "        end = len(self.args) - (self.attr('fill') is not None)\n",
-             '        end = len(self.args)\n', 1)),
+         sub(CORE, "        end = (len(self.args) - (self.attr('fill') is not None)\n",
+             "        end = (len(self.args)\n", 1)),
         ('a copy that fills read as one that does not',
          sub(CORE, "        return self.args[-1] if self.attr('fill') is not None else None\n",
              '        return None\n', 1)),

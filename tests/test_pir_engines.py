@@ -59,7 +59,8 @@ def test_every_engine_op_is_a_name_pir_knows():
         Op.BARRIER, Op.SYNC_INIT, Op.ARRIVE, Op.WAIT_PHASE, Op.FENCE,
         Op.WAIT_COUNTER, Op.SET_PRIORITY, Op.COMMIT_GROUP, Op.MATRIX_MAC,
         Op.TMEM_ALLOC, Op.TMEM_DEALLOC, Op.TMEM_LD, Op.TMEM_ST,
-        Op.MATRIX_LOAD, Op.MATRIX_STORE, Op.RELAYOUT, Op.GRID_WAIT}
+        Op.MATRIX_LOAD, Op.MATRIX_STORE, Op.RELAYOUT, Op.GRID_WAIT,
+        Op.REGISTER_BUDGET}
     for name, spec in engines.REGISTRY.items():
         assert name in Op.KNOWN and spec.name == name
         assert '*' in spec.lower
@@ -153,12 +154,31 @@ def test_an_object_whose_parts_disagree_is_refused():
 
 #: What a barrier may cover: every set but the warpgroup, which is what
 #: wgmma executes together and no barrier's object (`sync_object`).
-BARRIER_SETS = [p for p in Participants if p is not Participants.WARPGROUP]
+#: A role's barrier is one only inside the roles of a block, which name it
+#: (`IRBuilder.roles`, `test_a_role_s_barrier_names_its_role`).
+BARRIER_SETS = [p for p in Participants
+                if p not in (Participants.WARPGROUP, Participants.ROLE)]
 
 
 def test_a_warpgroup_is_no_barrier_s():
     with pytest.raises(IRError, match='warpgroup'):
         engines.sync_object(Participants.WARPGROUP, 32, 128)
+
+
+def test_a_role_s_barrier_names_its_role():
+    """A named barrier of the role's own: its threads and its id, which
+    every thread computes as its role's, spelled `bar.sync id, threads`;
+    every thread of the role arrives, as at the block's."""
+    with pytest.raises(IRError, match='role'):
+        engines.sync_object(Participants.ROLE, 32, 64)
+    obj = engines.sync_object(Participants.ROLE, 32, 64, '(14 + (y >= 2))')
+    assert obj.kind is engines.SyncKind.NAMED
+    assert obj.scope is SyncScope.ROLE and obj.arrival is Uniformity.BLOCK
+    assert _lines(engines.barrier(obj), _target('cuda', 'sm_90')) == (
+        'asm volatile("barrier.sync %0, %1;" :: "r"((14 + (y >= 2))), '
+        '"r"(64) : "memory");',)
+    with pytest.raises(IRError, match='no spelling'):
+        _lines(engines.barrier(obj), _target('hip', 'gfx942'))
 
 
 @pytest.mark.parametrize('who', BARRIER_SETS)

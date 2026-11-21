@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import re
 from contextlib import contextmanager
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import (Any, Dict, List, Mapping, NamedTuple, Optional,
+                    Sequence, Tuple, Union)
 
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError
@@ -216,6 +217,41 @@ def _names_in(code: str, name: str) -> bool:
     return re.search(rf'\b{re.escape(name)}\b', code) is not None
 
 
+class Ring(NamedTuple):
+    """A ring of mbarrier pairs a body set up (`IRBuilder.mbarrier_ring`):
+    the object its statements name, `slots` slots, each full barrier
+    counting `full` arrivals a phase and each empty one `empty`.
+
+    A producer waits on a slot's empty side for its round (`ring_wait`),
+    announces the slot's bytes on its full side (`ring_arrive`) and copies
+    into the slot (`copy_bulk`, `copy_tma` with a `RingSlot`); its
+    consumers wait on the full side and arrive at the empty one once done.
+    Every role counts its rounds of the ring from its trips (`ring_round`).
+    """
+    name: str
+    object: Value
+    slots: int
+    full: int
+    empty: int
+
+
+class Role(NamedTuple):
+    """A role of the block (`IRBuilder.roles`): `threads` of its threads,
+    meeting on a named barrier of their own, whose id `ident` is text every
+    thread of the block evaluates to its own role's -- one id a role, so
+    that a thread of one role is no member of the other's barrier."""
+    name: str
+    threads: int
+    ident: str
+
+
+class RingSlot(NamedTuple):
+    """The slot of a ring a copy completes on (`IRBuilder.copy_bulk`,
+    `copy_tma`): an operand, the trip's (`IRBuilder.ring_round`)."""
+    ring: Ring
+    slot: Operand
+
+
 class IRBuilder:
     #: Monotonic, never reused.  `id()` is not an identity for this purpose:
     #: a builder that has been finished and collected frees its address, and
@@ -301,6 +337,9 @@ class IRBuilder:
         #: window name -> the mbarrier its bulk copies complete on in this
         #: body, spelled as the window's cursor
         self._bulk_cursors: Dict[str, Value] = {}
+        #: The roles the statements being built are in, innermost last
+        #: (`roles`): whose barrier `Participants.ROLE` names.
+        self._roles: List[Role] = []
         #: The operation of a shared body being built, where its operands are
         #: to be taken over only within it (`begin_operation`); None otherwise.
         self._operation: Optional[int] = None
@@ -2185,7 +2224,90 @@ class IRBuilder:
         self.on_rollback(undo)
         return obj
 
-    def copy_bulk(self, dst: Any, src: Any, *, barrier: Value,
+    def mbarrier_ring(self, name: str, slots: int, *, full: int,
+                      empty: int, leader: str,
+                      arena: Optional[str] = None) -> Optional[Ring]:
+        """A ring of `slots` slots for a producer and its consumers, set up
+        ahead of everything else in the body, as `bulk_channel`'s barrier is
+        -- or None in a body without an arena.
+
+        Its storage: a pair of mbarriers a slot, eight bytes each, occupied
+        for the whole body (`lifetime`), in `arena` -- the block's, as both
+        roles name the same barriers.  The thread `leader` picks sets each
+        slot's full barrier up for `full` arrivals a phase -- the producer's,
+        announcing the slot's bytes -- and its empty one for `empty`, its
+        consumers' (`engines.ring_init`); a block barrier behind shows them
+        to every thread."""
+        if self._arena is None:
+            return None
+        start = len(self._prologue)
+        b = self.scratch()
+        per = max(1, 8 // self._fptype.size())
+        storage = b.alloc(self._fptype, (2 * int(slots) * per,),
+                          MemSpace.SHARED, hint=f'{name}Ring',
+                          place_align=per, lifetime='body', arena=arena)
+        obj = self.new_object(engines.mbarrier_ring(slots),
+                              hint=f'{name}_ring')
+        b.emit(engines.ring_init(obj, storage, full=full, empty=empty,
+                                 leader=leader, extern=f'{name}_ring'))
+        b.barrier(Participants.BLOCK)
+        self._prologue += list(b.finish())
+
+        def undo():
+            # As `bulk_channel`'s: the setup goes with a discarded attempt.
+            del self._prologue[start:]
+        self.on_rollback(undo)
+        return Ring(name, obj, int(slots), int(full), int(empty))
+
+    def ring_round(self, ring: Ring, trip: Operand,
+                   hint: str = 'r') -> Tuple[Operand, Operand]:
+        """The slot of `ring` the trip `trip` (0, 1, ... in a role's own
+        count) uses and the parity of its round: `trip % slots`, and
+        `(trip / slots) % 2`, the phase of the slot's barriers it waits to
+        complete -- the consumers' on the full side.  The producer's on the
+        empty side is the other parity: its first round finds the slots
+        free, the barriers' phase before their first."""
+        slot = self.op('rem', INDEX, trip, ring.slots, hint=f'{hint}s')
+        parity = self.op('rem', INDEX, self.op(
+            'div', INDEX, trip, ring.slots, hint=f'{hint}p'), 2,
+            hint=f'{hint}p')
+        return slot, parity
+
+    def ring_wait(self, ring: Ring, side: str, slot: Operand,
+                  parity: Operand, *, writes: Sequence[Any] = (),
+                  reads: Sequence[Any] = ()) -> Stmt:
+        """Wait for the phase of parity `parity` of the `side` barrier of
+        `ring`'s slot `slot` (`engines.ring_wait`): a consumer on the full
+        side, behind which the slot's buffers `writes` hold what the
+        producer's copies wrote -- declared written there, so that no read
+        of them moves ahead; the producer on the empty side, ahead of its
+        next copies into the slot's buffers `writes`, which no write moves
+        ahead of.  `reads` are buffers it orders reads of as well."""
+        accesses = (tuple(Access(Effect.WRITE, self._space_of(x),
+                                 self.alias_root(x)) for x in writes)
+                    + tuple(Access(Effect.READ, self._space_of(x),
+                                   self.alias_root(x)) for x in reads))
+        return self.emit(engines.ring_wait(ring.object, side, slot, parity,
+                                           accesses))
+
+    def ring_arrive(self, ring: Ring, side: str, slot: Operand,
+                    issue: Operand, *, tx: int = 0,
+                    tokens: Sequence[Value] = ()) -> Stmt:
+        """One arrival at the `side` barrier of `ring`'s slot `slot`, by the
+        thread `issue` picks (`engines.ring_arrive`): the producer's on the
+        full side, announcing the `tx` bytes of its copies into the slot,
+        whose `tokens` it takes -- the consumers' wait is theirs; a
+        consumer's on the empty side, done with the slot."""
+        for tok in tokens:
+            if not (isinstance(tok, Value) and isinstance(tok.type,
+                                                          TokenType)):
+                raise IRError(f'a ring arrival takes the tokens of copies, '
+                              f'not {tok!r}')
+        return self.emit(engines.ring_arrive(ring.object, side, slot, issue,
+                                             tx=tx, tokens=tokens))
+
+    def copy_bulk(self, dst: Any, src: Any, *,
+                  barrier: Union[Value, RingSlot],
                   dst_index: Sequence[Operand] = (),
                   src_index: Sequence[Operand] = (),
                   elems: int = 1,
@@ -2193,6 +2315,11 @@ class IRBuilder:
                   hint: str = 'bk') -> Value:
         """Issue one bulk copy of `elems` elements ``src -> dst``, completing
         on the mbarrier `barrier` (`bulk_channel`); returns its token.
+
+        Or on a ring's slot (`RingSlot`, `mbarrier_ring`): the full barrier
+        of the slot, which the producer's arrival announces the bytes on
+        (`ring_arrive`, which takes the token), by the thread `predicate`
+        picks; pinned in its round, as the arrival is.
 
         A `copy.async` like any other to every pass -- the same accesses on
         the copy and its wait, a token one wait consumes -- but of the whole
@@ -2206,6 +2333,10 @@ class IRBuilder:
         if swizzle is not None and swizzle.width > 1:
             raise IRError(f'a bulk copy writes {dst} in order, and it is '
                           f'permuted ({swizzle})')
+        ring = barrier if isinstance(barrier, RingSlot) else None
+        if ring is not None and predicate is None:
+            raise IRError('a copy into a ring\'s slot is one thread\'s: no '
+                          'predicate picks it')
         dst_space = self._space_of(dst)
         src_space = self._space_of(src)
         accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
@@ -2214,18 +2345,22 @@ class IRBuilder:
         width = engines.width_of(None, dst)
         attrs = (('ndst', len(tuple(dst_index))), ('elems', elems),
                  ('engine', 'bulk'), ('completes', engines.completes_of('bulk')),
-                 ('object', barrier))
+                 ('object', barrier if ring is None else ring.ring.object))
         if width is not None:
             attrs += (('width', width * elems),)
         attrs += (('shape', (elems,)),)
+        if ring is not None:
+            attrs += (('nring', 1),)
         self._emit_op(Op.COPY_ASYNC, (tok,),
-                      (dst, src) + tuple(dst_index) + tuple(src_index),
-                      pure=False, movable=True, predicate=predicate,
+                      (dst, src) + tuple(dst_index) + tuple(src_index)
+                      + ((ring.slot,) if ring is not None else ()),
+                      pure=False, movable=ring is None, predicate=predicate,
                       effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                       accesses=accesses, attrs=attrs)
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
-        self._token_bulk[tok.id] = barrier
+        if ring is None:
+            self._token_bulk[tok.id] = barrier
         return tok
 
     def copy_tensor(self, dst: Any, src: Any, *, shape: Sequence[int],
@@ -2290,8 +2425,11 @@ class IRBuilder:
         return tok
 
     def copy_tma(self, dst: Value, src: Any, tmap: 'engines.TensorMap',
-                 coords: Sequence[Operand], *, barrier: Value,
-                 dst_index: Operand = 0, hint: str = 'tma',
+                 coords: Sequence[Operand], *,
+                 barrier: Union[Value, RingSlot],
+                 dst_index: Operand = 0,
+                 predicate: Optional[Value] = None,
+                 hint: str = 'tma',
                  cache: Optional[str] = None) -> Value:
         """Issue one copy of a box of the tensor `tmap` describes through
         the tensor memory accelerator (`tma`), into the shared buffer `dst`
@@ -2309,7 +2447,10 @@ class IRBuilder:
         A bulk copy to every pass: one thread issues it -- the leader of
         `barrier`, the mbarrier of `bulk_channel` -- the bytes of the box
         announced on it, and its wait is the wait for the barrier's phase
-        (`wait`).  The buffer starts on the swizzle's period, where the
+        (`wait`).  Or into a ring's slot (`RingSlot`), as `copy_bulk` copies
+        into one: the thread `predicate` picks issues it, and the producer's
+        arrival on the slot's full side announces the bytes and takes the
+        token (`ring_arrive`).  The buffer starts on the swizzle's period, where the
         hardware's permutation, which it takes from the shared address,
         is the buffer's; on 128 bytes without one.  A start that is a value
         is the caller's to keep on 128 bytes.  What the copy cannot do is
@@ -2317,7 +2458,8 @@ class IRBuilder:
 
         `cache` is the cache policy the box's lines get in L2
         (`engines.CACHE_POLICIES`, `evict_first` or `evict_last`), through
-        the copy's `.L2::cache_hint`; None for none.
+        the copy's `.L2::cache_hint`; None for none -- and none for a copy
+        into a ring's slot (`cuda_tma.h`'s `tmaLoadOn` takes no policy).
         """
         if not isinstance(tmap, engines.TensorMap):
             raise IRError(f'a tensor copy through {tmap!r}, which is no '
@@ -2332,6 +2474,13 @@ class IRBuilder:
         if not placed or placed % align:
             raise IRError(f'a tensor copy into {dst}, which is not placed on '
                           f'{align} elements')
+        ring = barrier if isinstance(barrier, RingSlot) else None
+        if ring is not None and predicate is None:
+            raise IRError('a copy into a ring\'s slot is one thread\'s: no '
+                          'predicate picks it')
+        if ring is not None and cache is not None:
+            raise IRError(f'a copy into a ring\'s slot under the cache '
+                          f'policy {cache!r}: the slot\'s copy takes none')
         dst_space = self._space_of(dst)
         src_space = self._space_of(src)
         accesses = (Access(Effect.READ, src_space, self.alias_root(src)),
@@ -2339,13 +2488,18 @@ class IRBuilder:
         tok = self.value(TokenType(engines.completes_of('tma')), hint=hint)
         attrs = (('ndst', 1), ('elems', tmap.box_bytes() // elem.size()),
                  ('engine', 'tma'), ('completes', engines.completes_of('tma')),
-                 ('object', barrier), ('width', tmap.box_bytes()),
+                 ('object', barrier if ring is None else ring.ring.object),
+                 ('width', tmap.box_bytes()),
                  ('shape', tuple(tmap.box)), ('map', tmap))
         if cache is not None:
             attrs += (('cache', cache),)
+        if ring is not None:
+            attrs += (('nring', 1),)
         s = self._emit_op(Op.COPY_ASYNC, (tok,),
-                          (dst, src, dst_index) + tuple(coords),
-                          pure=False, movable=True,
+                          (dst, src, dst_index) + tuple(coords)
+                          + ((ring.slot,) if ring is not None else ()),
+                          pure=False, movable=ring is None,
+                          predicate=predicate if ring is not None else None,
                           effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
                           accesses=accesses, attrs=attrs)
         why = engines.tma_refusal(s) or engines.cache_refusal(s)
@@ -2354,7 +2508,8 @@ class IRBuilder:
                           f'{dst}: {why}')
         self._token_accesses[tok.id] = accesses
         self._token_results[tok.id] = ()
-        self._token_bulk[tok.id] = barrier
+        if ring is None:
+            self._token_bulk[tok.id] = barrier
         return tok
 
     def reduce_tma(self, dst: Any, src: Value, tmap: 'engines.TensorMap',
@@ -2608,8 +2763,28 @@ class IRBuilder:
         nothing, the emitter then still owes the compiler a fence
         (`Lexic.handoff_fence`).
         """
+        if _as_participants(participants) is Participants.ROLE:
+            role = self._roles[-1] if self._roles else None
+            if role is None:
+                raise IRError('a role\'s barrier outside the roles of a '
+                              'block (`roles`)')
+            return self.emit(engines.barrier(
+                engines.sync_object(Participants.ROLE, self._wave(),
+                                    role.threads, role.ident),
+                handoff=handoff))
         return self.emit(barrier_stmt(participants, self._wave(), threads,
                                       handoff))
+
+    def roles(self, cond: Operand, first: Role, second: Role) -> '_RolesHandle':
+        """The block split into two roles: the threads `cond` holds for take
+        `first`, the others `second` (`with handle.then():`, `with
+        handle.otherwise():`).  An `if` the passes read as one: inside each
+        region its role is the block -- a barrier of `Participants.ROLE` is
+        its role's, every thread of the role arriving -- and a block's
+        barrier would wait for the other role, which never comes; the roles
+        meet on a ring's barriers alone (`mbarrier_ring`), which no barrier
+        placement stands in for (`barriers`)."""
+        return _RolesHandle(self, cond, (first, second))
 
     def _wave(self) -> int:
         """The target's wave, or 1 for a body built without one."""
@@ -3730,6 +3905,40 @@ class _WhileHandle:
     def yield_(self, value: Operand):
         """Carry `value` across the back edge as the next induction value."""
         return self.builder.yield_(value)
+
+
+class _RolesHandle:
+    """The two regions of `IRBuilder.roles`, each with its role current."""
+
+    def __init__(self, builder, cond, roles):
+        self.builder = builder
+        self.cond = cond
+        self.roles = tuple(roles)
+        self._regions: List[Optional[Region]] = [None, None]
+
+    @contextmanager
+    def _region(self, i):
+        self.builder.push(kind='if')
+        self.builder._roles.append(self.roles[i])
+        try:
+            yield self
+        finally:
+            self.builder._roles.pop()
+        self._regions[i] = self.builder.pop()
+
+    def then(self):
+        return self._region(0)
+
+    @contextmanager
+    def otherwise(self):
+        with self._region(1):
+            yield self
+        regions = tuple(r for r in self._regions if r is not None)
+        if len(regions) != 2:
+            raise IRError('the roles of a block are two regions')
+        self.builder.emit(Stmt(op=Op.IF, args=(self.cond,), regions=regions,
+                               pure=False, movable=False,
+                               attrs=(('roles', self.roles),)))
 
 
 class _IfHandle:

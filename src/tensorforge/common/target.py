@@ -859,6 +859,17 @@ class Target:
         return (self.hw.vendor == 'nvidia' and model.startswith('sm_')
                 and model.endswith('a'))
 
+    def register_budgets(self) -> bool:
+        """Whether a warpgroup may move registers to or from the block's
+        pool as it runs (`setmaxnreg`, engine op `REGISTER_BUDGET`): CUDA on
+        the arch-specific targets of sm_90 on -- sm_90a, sm_100a, sm_120a;
+        the plain targets' PTX has none of it.  The kernel's registers a
+        thread are then fixed at its entry (`__maxnreg__`), which is what
+        the budgets are drawn from."""
+        level = self.hw.sm_level() if self.hw.vendor == 'nvidia' else None
+        return (self.backend == 'cuda' and self.arch_specific()
+                and level is not None and level >= 90)
+
     def wgmma(self) -> bool:
         """Whether a product may go to wgmma, the asynchronous matrix engine
         of a warpgroup (`engines.MATRIX_ENGINES['wgmma']`): CUDA on sm_90a

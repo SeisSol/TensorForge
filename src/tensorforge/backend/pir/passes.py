@@ -22,7 +22,8 @@ from .schedule import can_reorder
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Region, ScalarType, Stmt, TokenType, Value,
                    accesses_conflict, base_elem, collect_accesses,
-                   collect_effect, deep_uses, def_use, walk_stmts, Uniformity)
+                   collect_effect, deep_uses, def_use, walk_stmts, Uniformity,
+                   Participants)
 from .asyncmem import check_commits, check_tokens
 from . import engines
 from .buffers import verify_buffer
@@ -250,7 +251,8 @@ def _risen(s: Stmt) -> set:
 
 
 def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
-                 reachable_at: Uniformity, in_while: bool = False) -> None:
+                 reachable_at: Uniformity, in_while: bool = False,
+                 role_level: Optional[Uniformity] = None) -> None:
     """``live`` is the set of value ids visible from enclosing scopes.
 
     ``in_while`` says whether this body is a queried loop's region, which is
@@ -366,7 +368,22 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # multiplication-wide barrier inside a multiplication-wide loop -- a
         # rendezvous of exactly the threads that agree on the trip count, and
         # therefore fine.
-        if s.effect & Effect.BARRIER:
+        role_barrier = (s.effect & Effect.BARRIER and s.op in engines.REGISTRY
+                        and getattr(engines.object_of(s), 'participants',
+                                    None) is Participants.ROLE)
+        if role_barrier:
+            # Every thread of its role arrives: legal where the role is
+            # entered as a block is, inside the roles of a block alone.
+            if role_level is None:
+                diag.append(f'{s.op}: a role\'s barrier outside the roles of '
+                            f'a block (`IRBuilder.roles`)')
+            elif role_level < Uniformity.BLOCK:
+                diag.append(
+                    f'{s.op}: a role\'s barrier in a region its role only '
+                    f'reaches uniformly at {role_level.name.lower()} level; '
+                    f'the threads of the role that took another path never '
+                    f'arrive (deadlock, not a wrong answer)')
+        elif s.effect & Effect.BARRIER:
             scope = engines.arrival_of(s)
             if reachable_at < scope:
                 diag.append(
@@ -610,9 +627,18 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # -- recurse ------------------------------------------------------- #
         if s.regions:
             inner = min(reachable_at, _entry_uniformity(s))
+            if s.op == Op.IF and s.attr('roles'):
+                # Each role is entered by all of its threads where the split
+                # is reached by the block's (`IRBuilder.roles`).
+                inner_role = reachable_at
+            elif role_level is not None:
+                inner_role = min(role_level, _entry_uniformity(s))
+            else:
+                inner_role = None
             for r in s.regions:
                 _check_scope(r.body, live | {a.id for a in r.args}, diag, inner,
-                             in_while=(s.op == Op.WHILE))
+                             in_while=(s.op == Op.WHILE),
+                             role_level=inner_role)
             live.update(_risen(s))
 
         for t in s.target:
@@ -745,7 +771,7 @@ def _dce_protected(s: Stmt) -> bool:
         # terminate, so whether its body is observable says nothing about
         # whether the loop is.
         return True
-    if s.op in (Op.PREFETCH, Op.SET_PRIORITY):
+    if s.op in (Op.PREFETCH, Op.SET_PRIORITY, Op.REGISTER_BUDGET):
         # A hint has no result and no side effect, which is precisely the
         # shape the last rule below deletes.  Deleting it is always
         # *correct* -- and always wrong, since a statement whose entire
