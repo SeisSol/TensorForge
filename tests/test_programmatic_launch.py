@@ -198,7 +198,10 @@ class TestWhereTheKernelWaits:
         stage = [i for i, line in enumerate(lines) if re.search(r'bkDivM\d+\[', line)
                  and '=' in line.split('[', 1)[0] + '=']
         assert stage and max(i for i in stage if i < wait) < wait
-        loop = next(i for i, line in enumerate(lines) if 'for (size_t batchIdGroup' in line)
+        # The batch loop's counter, with or without a value number in front
+        # of its name (dev3 at 632ab2d8 writes `v108_batchIdGroup0`).
+        loop = next(i for i, line in enumerate(lines)
+                    if re.search(r'for \(size_t (?:\w+_)?batchIdGroup', line))
         assert wait < loop
         assert wait < _first_use(gen, _per_element(gen))
 
