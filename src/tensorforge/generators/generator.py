@@ -4546,10 +4546,18 @@ class Generator:
           streamed=element_group.streamed(planned),
           double=planned.doubled > 0, ring=planned.ring,
           registers=planned.registers,
-          halves=element_group.halves(planned))
+          halves=element_group.halves(planned),
+          prepared=element_group.prepared(planned))
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
+    # The stages the plan sized as prepared and streamed, and no others.
+    staged = [[(st.tensor.alias, st.window, st.prepared, st.streamed)
+               for st in s.stages]
+              for s in (section, self._element_group.section)]
+    if staged[0] != staged[1]:
+      raise InternalError(f'a multi-element section stages {staged[0]}, its '
+                          f'plan {staged[1]}')
     # The buffers the plan sized with A's TF32 halves, and no others.
     halved = [[b.tensor.alias for b in s.intermediates if b.halves]
               for s in (section, self._element_group.section)]
@@ -5163,15 +5171,19 @@ class Generator:
     definitions = []
     copies = getattr(self, '_module_tables', {}) or {}
     for name in sorted(set(tables) | set(copies)):
-      datatype, values = tables[name] if name in tables else copies[name]
+      entry = tables[name] if name in tables else copies[name]
+      datatype, values = entry[:2]
       numbers = (list(values) if datatype is Datatype.I32
                  else [datatype.literal(v) for v in values])
       guard = f'TENSORFORGE_TABLE_{name.upper()}'
       # An operator copy is read by fragments, sixteen bytes a lane at once
       # and 512 a warp, adjacent: aligned to less than a cache line, every
       # such read spans one sector more than it fills -- as a buffer from the
-      # allocator, at 256, does not (`COPY_ALIGN`).
-      align = Generator.COPY_ALIGN if name in copies else None
+      # allocator, at 256, does not (`COPY_ALIGN`).  An instruction's table
+      # states its own where it needs one: a bulk copy's source starts on
+      # sixteen bytes (`multi_element`'s prepared operators).
+      align = (Generator.COPY_ALIGN if name in copies
+               else entry[2] if len(entry) > 2 else None)
       definitions.append(
           f'#ifndef {guard}\n#define {guard}\n'
           f'{lexic.module_constant(str(datatype), name, numbers, align=align)}\n#endif')
@@ -5191,6 +5203,13 @@ class Generator:
              f'({self._small_pick[0].label()})')
     if self._launch is not None:
       writer(f'// launch: {self._launch.describe()}')
+    if self._element_group is not None:
+      # Where the asynchronous engines' B comes from where the options ask
+      # for it prepared: the table of the description's numbers -- the
+      # operators' pointers not read for it -- or why it is not.
+      for note in element_group.ring_notes(self._element_group.section,
+                                           self._context):
+        writer(f'// operator ring: {note}')
     groups = self._launch_groups()
     if len(groups) > 1:
       writer(f'// launches: {len(groups)}, cut at the grid barriers, one after '

@@ -427,7 +427,15 @@ class Stage:
     the ones along K 128 bytes apart and those along N `depth` x 32
     (`canonical_offset`); split, the upper halves' layout whole, then the
     lower halves'.  Whole: its descriptors walk every tile, and its N grid
-    is the step's first row on, D's columns the step's rows."""
+    is the step's first row on, D's columns the step's rows.
+
+    `prepared`: such a B, split, made at generation from the description's
+    numbers (`Options.matrix_ring` `prepared`) -- the operator carries them
+    -- in the order the engine reads it, a table of the generated file
+    (`prepared_table`) the block copies by bulk copies: once, where the
+    stage is resident; a chunk at a time through the step's prepared ring
+    (`ring_chunks`), where it is streamed.  The operator's own memory is
+    not read for it."""
 
     tensor: object
     window: Optional[Tuple[Range, Range]] = None
@@ -443,6 +451,8 @@ class Stage:
     #: the loop (`RING_SLOTS`, `ring_volume`): nothing of it is in shared
     #: memory between the trips.
     streamed: bool = False
+    #: Prepared at generation and bulk-copied (see above).
+    prepared: bool = False
 
     @property
     def regs(self) -> int:
@@ -524,6 +534,12 @@ class GroupSection:
     #: gives the rest to the element warps (`register_budgets`), 0 where
     #: every warp keeps what the kernel's entry gives it.
     registers: int = 0
+    #: The prepared operator ring of the steps whose B streams prepared
+    #: (`Stage.prepared`, `Options.matrix_ring_slots`, `matrix_ring_rows`):
+    #: its slots and the rows of K a piece of a product holds; 0 where no
+    #: stage streams prepared.
+    ring_slots: int = 0
+    ring_rows: int = 0
 
     @property
     def chained(self) -> bool:
@@ -1042,13 +1058,15 @@ def _round(value: int, step: int) -> int:
 
 def _staged(section: GroupSection, sm: int, split: bool = False,
             sparse: bool = True, aligned: bool = False,
-            streamed: bool = False) -> GroupSection:
+            streamed: bool = False, prepared: bool = False) -> GroupSection:
     """The section with its operators' stages, for the steps' lowerings:
     an operator as stored where an FMA form reads it, a B a window where a
     matrix step does -- in TF32 halves where `split` asks, its tiles of
     zeros left out where `sparse` lets the operator's pattern say which
     (`kept_tiles`), its N grid from the step's first row or, `aligned`,
-    from that rounded down to a tile."""
+    from that rounded down to a tile; an asynchronous step's halves
+    prepared at generation where `prepared` asks and every operator of the
+    step carries its numbers (`Stage.prepared`, `prepared_refusal`)."""
     stages: List[Stage] = []
 
     def add(stage):
@@ -1065,6 +1083,10 @@ def _staged(section: GroupSection, sm: int, split: bool = False,
             # read where they are stored, and each lane reads its own
             # element where it is stored.
             continue
+        # A step's B prepared where every operator of it carries its
+        # numbers: one ring a step, of prepared chunks or converted ones.
+        ready = (prepared and split and step.lowering in ASYNC_LOWERINGS
+                 and step_refusal(step) is None)
         for p in step.products:
             t = p.first.tensor if p.kind is Kind.OPERATOR else None
             if t is None:
@@ -1090,8 +1112,20 @@ def _staged(section: GroupSection, sm: int, split: bool = False,
                           p, n0, k, depth, width,
                           sparse and not asynchronous))),
                       'canonical' if asynchronous else 'fragments',
-                      streamed and asynchronous))
+                      streamed and asynchronous, ready))
     return dataclasses.replace(section, stages=tuple(stages))
+
+
+def step_refusal(step: Step) -> Optional[str]:
+    """Why an asynchronous step's B cannot be prepared at generation
+    (`Stage.prepared`), or None: an operator of it that carries no numbers
+    -- the halves are made from the description's, not read from the
+    operator's memory."""
+    for p in step.products:
+        tensor = p.first.tensor
+        if not tensor.has_values():
+            return f'{tensor.alias} carries no numbers'
+    return None
 
 
 def kept_tiles(product: Product, n0: int, k: int, depth: int, width: int,
@@ -1472,7 +1506,8 @@ def lower(section: GroupSection, context, matrix: bool = True,
           split: bool = False, lanes: bool = False,
           engine: Optional[str] = None, streamed: bool = False,
           double: bool = True, ring: int = 0,
-          registers: int = 0, halves: int = 0) -> GroupSection:
+          registers: int = 0, halves: int = 0,
+          prepared: bool = False) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
@@ -1486,6 +1521,10 @@ def lower(section: GroupSection, context, matrix: bool = True,
     `engine` holds F32 to mma_sync where it says so (`_lowering`).  `ring`
     slots of a ring a producer warp fills the inputs through, in place of
     the second stage, where the section takes one (`producer_refusal`).
+    `prepared`: an asynchronous step's B halves prepared at generation
+    where its operators carry their numbers (`Stage.prepared`), streamed
+    through the prepared ring of the options' slots and rows where
+    `streamed` asks.
     The matrix tiling is NVIDIA's: elsewhere every step takes an FMA form,
     as below sm_80."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
@@ -1506,7 +1545,12 @@ def lower(section: GroupSection, context, matrix: bool = True,
         steps = [dataclasses.replace(s, lowering='mix')
                  if _mixes(s, section) else s for s in steps]
     staged = _staged(dataclasses.replace(section, steps=tuple(steps)), sm,
-                     split, sparse, streamed=streamed)
+                     split, sparse, streamed=streamed, prepared=prepared)
+    if any(st.prepared and st.streamed for st in staged.stages):
+        options = context.get_user_options()
+        staged = dataclasses.replace(
+            staged, ring_slots=int(options.matrix_ring_slots),
+            ring_rows=int(options.matrix_ring_rows))
     pitched = _pitched(staged)
     if ring and not lanes:
         ringed = _bulk_pitched(pitched)
@@ -1695,20 +1739,160 @@ def streamed(section: GroupSection) -> bool:
     return any(st.streamed for st in section.stages)
 
 
+def _step_stages(section: GroupSection, step: Step) -> List[Stage]:
+    """The stages a matrix step reads, a product each, in its order."""
+    return [section.stage(p.first.tensor, (p.rows, p.depth))
+            for p in step.products]
+
+
 def ring_volume(section: GroupSection) -> int:
     """Elements of the rings the section's streamed steps take: for each,
-    `RING_SLOTS` slots of a chunk of its B, both halves where split."""
+    `RING_SLOTS` slots of a chunk of its B, both halves where split -- or,
+    where it streams prepared, the prepared ring's slots of its largest
+    chunk (`ring_chunks`) and their pair of mbarriers each, eight bytes
+    apiece in elements of the section's type."""
     total = 0
     for step in section.steps:
-        stages = [st for st in section.stages if st.streamed
-                  and any(st.tensor is p.first.tensor
-                          and st.window == (p.rows, p.depth)
-                          for p in step.products)]
-        if stages:
-            width = max(st.width for st in stages)
-            halves = 2 if stages[0].split else 1
-            total += RING_SLOTS * RING_CHUNK * width * halves
+        if step.lowering not in MATRIX_LOWERINGS:
+            continue
+        stages = [st for st in _step_stages(section, step) if st.streamed]
+        if not stages:
+            continue
+        if stages[0].prepared:
+            total += section.ring_slots * max(
+                chunk_volume(section, step, chunk)
+                for chunk in ring_chunks(section, step))
+            total += 2 * section.ring_slots * 8 // section.dtype.size()
+            continue
+        width = max(st.width for st in stages)
+        halves = 2 if stages[0].split else 1
+        total += RING_SLOTS * RING_CHUNK * width * halves
     return total
+
+
+def ring_chunks(section: GroupSection, step: Step) -> Tuple[
+        Tuple[Tuple[int, int, int], ...], ...]:
+    """The chunks a step streams its prepared B through the ring in, in the
+    order its products read them: each a slot's worth, pieces `(product,
+    k0, rows)` -- `rows` rows of K of the product's stage from `k0` on,
+    each piece both halves, the upper ones' canonical layout over its rows
+    and then the lower ones' (`_Piece`).  A product's depth in pieces of
+    the ring's rows (`GroupSection.ring_rows`), a piece a chunk."""
+    stages = _step_stages(section, step)
+    rows = section.ring_rows or RING_CHUNK
+    return tuple(((p, k0, min(rows, st.depth - k0)),)
+                 for p, st in enumerate(stages)
+                 for k0 in range(0, st.depth, rows))
+
+
+def chunk_volume(section: GroupSection, step: Step, chunk) -> int:
+    """Elements a chunk of a step's prepared ring holds: each piece's rows
+    of its stage's width, both halves."""
+    stages = _step_stages(section, step)
+    return sum(rows * stages[p].width * 2 for p, _, rows in chunk)
+
+
+def prepared(section: GroupSection) -> bool:
+    """Whether a stage of the section is prepared at generation
+    (`Stage.prepared`)."""
+    return any(st.prepared for st in section.stages)
+
+
+def ring_asked(context) -> bool:
+    """Whether the options ask for the asynchronous engines' B prepared
+    (`Options.matrix_ring` `prepared`)."""
+    return context.get_user_options().matrix_ring == 'prepared'
+
+
+def ring_notes(section: GroupSection, context) -> List[str]:
+    """What the kernel's comment says of its asynchronous steps' B where the
+    options ask for it prepared (`Options.matrix_ring`): the table each
+    step's B comes from -- the description's numbers, the operators'
+    pointers not read for it -- and its ring; or why a step keeps B
+    converted by the element warps."""
+    if not ring_asked(context):
+        return []
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    sm = nvidia.sm_of(context)
+    notes = []
+    for step in section.steps:
+        if step.lowering not in ASYNC_LOWERINGS:
+            continue
+        stages = _step_stages(section, step)
+        operators = ', '.join(st.tensor.alias for st in stages)
+        if not stages[0].prepared:
+            why = step_refusal(step) or ('its B is not split into TF32 '
+                                         'halves')
+            notes.append(f'matrix_ring=prepared declined for {operators} '
+                         f'into {step.dest.alias}: {why}; B converted by '
+                         f'the element warps')
+            continue
+        name, numbers, _ = prepared_table(section, step, sm)
+        where = (f'streamed through a ring of {section.ring_slots} slots, '
+                 f'{len(ring_chunks(section, step))} chunks a trip'
+                 if stages[0].streamed else 'copied once a block')
+        notes.append(f'B of {operators} into {step.dest.alias} prepared from '
+                     f'the description\'s numbers in {name} ({len(numbers)} '
+                     f'floats), {where}; the operators\' pointers are not '
+                     f'read for it')
+    return notes
+
+
+def prepared_table(section: GroupSection, step: Step, sm: int):
+    """`(name, numbers, offsets)`: a step's B prepared at generation
+    (`Stage.prepared`) as the table of the generated file its bulk copies
+    read -- the TF32 halves of the description's numbers, split as
+    `splitFloatTF32` splits them on the target (`prepare.tf32_halves`) --
+    and where each piece starts in it, by `(product, k0)`.
+
+    Streamed, the ring's chunks one after another (`ring_chunks`); resident,
+    each product's stage whole, as `MultiElementOperators._canonical` lays
+    it out.  A piece: the upper halves of its rows of K in the canonical
+    K-major layout over those rows -- core matrices of eight rows of N by
+    four of K, 128 bytes apart along K and `rows` x 32 along N -- then the
+    lower halves the same way; `B(k, n)` the operator's `(n0 + n, k0' + k)`
+    inside the product's window and zero outside it, past its contraction
+    too (`Stage`).  Named after its numbers (`multilinear.
+    _module_table_name`): kernels of one file with the same B share it."""
+    import numpy as np
+    from tensorforge.backend.instructions.compute.multilinear import \
+        _module_table_name
+    from tensorforge.common.matrix.prepare import tf32_halves
+    stages = _step_stages(section, step)
+    if not all(st.prepared for st in stages):
+        raise ValueError(f'{step.dest.alias}: a step whose B is not prepared')
+    if stages[0].streamed:
+        pieces = [piece for chunk in ring_chunks(section, step)
+                  for piece in chunk]
+    else:
+        pieces = [(p, 0, st.depth) for p, st in enumerate(stages)]
+    parts, offsets, at = [], {}, 0
+    for p, k0, rows in pieces:
+        stage = stages[p]
+        values = np.asarray(stage.tensor.get_values(), dtype=np.float64)
+        (r0, r1), (d0, d1) = stage.window
+        block = np.zeros((rows, stage.width))
+        for k in range(rows):
+            col = d0 + k0 + k
+            if col >= d1:
+                continue
+            for n in range(stage.width):
+                row = stage.n0 + n
+                if r0 <= row < r1:
+                    block[k, n] = values[row, col]
+        upper, lower = tf32_halves(block.ravel(),
+                                   'even' if sm >= 90 else 'away')
+        laid = np.zeros(2 * rows * stage.width, dtype=np.float32)
+        for k in range(rows):
+            for n in range(stage.width):
+                slot = (n // 8) * rows * 8 + (k // 4) * 32 + (n % 8) * 4 + k % 4
+                laid[slot] = upper[k * stage.width + n]
+                laid[rows * stage.width + slot] = lower[k * stage.width + n]
+        offsets[(p, k0)] = at
+        at += laid.size
+        parts.append(laid)
+    numbers = tuple(float(v) for v in np.concatenate(parts))
+    return _module_table_name('bk', Datatype.F32, numbers), numbers, offsets
 
 
 def split(section: GroupSection) -> bool:
@@ -2382,15 +2566,19 @@ def fill(section: GroupSection, context,
     # The matrix tiling, with B in TF32 halves where that costs no group
     # size -- the halves take twice B's room -- then the FMA forms.  An
     # asynchronous engine's tiling is followed by mma_sync's, for a group
-    # it does not take.
-    tilings = [lower(section, context, split=True)]
+    # it does not take.  Its halves prepared at generation where the
+    # options ask (`Options.matrix_ring`) and the operators carry their
+    # numbers: resident ones copied once, streamed ones through the
+    # prepared ring in place of the converting one.
+    asked = ring_asked(context)
+    tilings = [lower(section, context, split=True, prepared=asked)]
     if not tiled(tilings[0]):
         tilings = []
     elif split(tilings[0]):
         if asynchronous(tilings[0]):
             # B's halves streamed through a ring ahead of B whole.
             tilings.append(lower(section, context, split=True,
-                                 streamed=True))
+                                 streamed=True, prepared=asked))
         tilings.append(lower(section, context))
     candidates = [(tilings, None)] if tilings else []
     if tilings and asynchronous(tilings[0]):
@@ -2404,7 +2592,8 @@ def fill(section: GroupSection, context,
     for lowerings, engine in candidates:
         lowerings += [lower(section, context, matrix=tiled(t),
                             split=split(t), engine=engine,
-                            streamed=streamed(t), double=False)
+                            streamed=streamed(t), double=False,
+                            prepared=prepared(t))
                       for t in lowerings if t.doubled]
         # Each tiling on mma_sync again with A in TF32 halves (`_halved`)
         # where the layout's switch takes them (`HALVES`), in as many of its
@@ -2429,7 +2618,8 @@ def fill(section: GroupSection, context,
                            0) or 0)
         rings = [lower(section, context, matrix=tiled(first),
                        split=split(first), engine=engine,
-                       streamed=streamed(first), ring=slots, registers=keep)
+                       streamed=streamed(first), ring=slots, registers=keep,
+                       prepared=prepared(first))
                  for slots in PRODUCER_SLOTS]
         lowerings[:0] = [r for r in rings if r.ring]
     candidates = [lowerings for lowerings, _ in candidates]
@@ -2543,6 +2733,9 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'lane_values', 'lanes_plan', 'lower', 'matrix_enabled',
            'matrix_shape', 'nonzero_terms', 'operator_nonzeros', 'plan',
            'PRODUCER_SLOTS', 'PRODUCER_WARPS', 'bulk_input', 'bulk_rows',
-           'producer_refusal', 'register_budgets', 'ring_volume',
+           'chunk_volume', 'prepared', 'prepared_table',
+           'producer_refusal', 'register_budgets', 'ring_asked',
+           'ring_chunks', 'ring_notes', 'ring_volume',
            'second_stages', 'shared_bytes', 'SM_REGISTERS', 'split',
-           'streamed', 'table_elements', 'tile_units', 'tiled']
+           'step_refusal', 'streamed', 'table_elements', 'tile_units',
+           'tiled']

@@ -505,6 +505,11 @@ _TC_QUIET = re.compile(r'^tensorforge::(?:tmemWaitLd|tmemWaitSt|'
                        r'tcgen05FenceBefore|tcgen05FenceAfter)\s*\(\s*\)$')
 _TC_COMMIT = re.compile(
     r'^tensorforge::tcgen05Commit\s*\(\s*(?P<cursor>\w+)\s*,(?P<issue>.+)\)$')
+#: `tensorforge::tcgen05CommitOn(&ring[i], issue)` (`cuda.h`): the products
+#: committed onto a ring's slot, its empty side (`mbarrier_ring`).
+_TC_COMMIT_ON = re.compile(
+    r'^tensorforge::tcgen05CommitOn\s*\(\s*&\s*(?P<bar>\w+)\s*'
+    r'\[(?P<bi>[^\]]*)\]\s*,(?P<issue>.+)\)$')
 #: The product and the loads and stores of tensor memory, as the engines'
 #: lowerings write them inside their asm.
 _TC_MMA = re.compile(
@@ -2233,6 +2238,9 @@ class Interp:
                 for lane, released in state['history'].get(done, ()):
                     tracker.met(self.lane, lane, released)
                 tracker.bulk_wait(self.lane, f'mbar:{key[0]}:{key[1]}')
+            # tcgen05's products committed onto it, landed for the waiter
+            # (`tcgen05CommitOn`).
+            self._tc_land(f'mbar:{key[0]}:{key[1]}')
             return
         m = _MB_ARRIVE.match(stmt)
         if m:
@@ -2274,7 +2282,9 @@ class Interp:
         what it moved, which the barrier's announced bytes count down."""
         dst = self.env.get(m.group('dst'))
         src = self.env.get(m.group('src'))
-        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+        # The source may be a table of the generated file, which the run
+        # holds as its numbers (`_MODULE_ARRAY`): a prepared operator.
+        if not isinstance(dst, Ptr) or not isinstance(src, (Ptr, list)):
             raise Abort(f'bulk copy between unknown buffers: {stmt!r}')
         width = self.widths.get(m.group('dst'))
         nbytes = int(m.group('bytes'))
@@ -2283,6 +2293,7 @@ class Interp:
                         f'whose element size is {width!r}: {stmt!r}')
         di = int(self.ev(m.group('di')))
         si = int(self.ev(m.group('si')))
+        _table_reach(src, si, nbytes // width, stmt)
         for k in range(nbytes // width):
             dst[di + k] = src[si + k]
         return nbytes
@@ -2404,7 +2415,7 @@ class Interp:
         product in flight writes will hold, with how many write it."""
         state = getattr(self.mem, 'tc_state', None)
         if state is None:
-            state = {'open': [], 'bound': {}, 'overlay': {}, 'writers': {}}
+            state = {'open': [], 'bound': [], 'overlay': {}, 'writers': {}}
             self.mem.tc_state = state
         return state
 
@@ -2520,14 +2531,26 @@ class Interp:
         state['open'].append((tuple(writes), tuple(reads), stmt))
 
     def _tc_land(self, cursor: str) -> None:
-        """The products committed onto `cursor`'s mbarrier, landed: the
+        """The products committed onto `cursor`'s mbarrier -- a cursor's
+        name, or a ring's barrier (`mbar:<buffer>:<slot>`) -- landed, and
+        every product committed before them: a commit tracks all of its
+        thread's products issued before it (PTX ISA, "tcgen05.commit"), so
+        the phase its products arrive at completes behind theirs.  The
         values of the cells no product still in flight writes go to tensor
         memory, and what each read is checked unchanged -- a write of an
         operand ahead of the wait is a race with the engine."""
         state = getattr(self.mem, 'tc_state', None)
         if state is None:
             return
-        for writes, reads, issued in state['bound'].pop(cursor, []):
+        bound = state['bound']
+        last = max((i for i, (key, _) in enumerate(bound) if key == cursor),
+                   default=None)
+        if last is None:
+            return
+        landing = [record for _, records in bound[:last + 1]
+                   for record in records]
+        del bound[:last + 1]
+        for writes, reads, issued in landing:
             for base, slot, value in reads:
                 if not _same(self.mem.read(base, slot), value):
                     raise Abort(f'{base}[{slot}] written while the tcgen05 '
@@ -3060,7 +3083,8 @@ class Interp:
         self._mbarrier_arrive(cursor, stmt)
         dst = self.env.get(bc.group('dst'))
         src = self.env.get(bc.group('src'))
-        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+        # The source may be a table of the generated file (`_bulk_bytes`).
+        if not isinstance(dst, Ptr) or not isinstance(src, (Ptr, list)):
             raise Abort(f'bulk copy between unknown buffers: {stmt!r}')
         width = self.widths.get(bc.group('dst'))
         nbytes = int(bc.group('bytes'))
@@ -3069,6 +3093,7 @@ class Interp:
                         f'whose element size is {width!r}: {stmt!r}')
         di = int(self.ev(bc.group('di')))
         si = int(self.ev(bc.group('si')))
+        _table_reach(src, si, nbytes // width, stmt)
         tracker = self.mem.tracker
         if tracker is not None:
             tracker.bulk = cursor.name
@@ -3108,7 +3133,8 @@ class Interp:
         td = _TMEM_DEALLOC.match(stmt)
         if td:
             state = self._tc_state()
-            if state['open'] or any(state['bound'].values()) \
+            if state['open'] or any(records for _, records
+                                    in state['bound']) \
                     or state['overlay']:
                 raise Abort(f'tensor memory freed with products in flight: '
                             f'{stmt!r}')
@@ -3131,9 +3157,23 @@ class Interp:
             if bool(self.ev(tc.group('issue'))):
                 self._mbarrier_arrive(cursor, stmt)
                 state = self._tc_state()
-                state['bound'].setdefault(tc.group('cursor'), []).extend(
-                    state['open'])
+                state['bound'].append((tc.group('cursor'), state['open']))
                 state['open'] = []
+            return
+        tc = _TC_COMMIT_ON.match(stmt)
+        if tc:
+            # The products the issuing thread issued, onto a ring's slot,
+            # which they arrive at once complete: the arrival here, the
+            # products bound to it -- they land where a thread waits for
+            # its phase, or for a later commit's (`_tc_land`).
+            if bool(self.ev(tc.group('issue'))):
+                key = self._mb_key(tc, stmt)
+                ring = self._mb_state(key, stmt)
+                state = self._tc_state()
+                state['bound'].append((f'mbar:{key[0]}:{key[1]}',
+                                       state['open']))
+                state['open'] = []
+                self._mb_arrive(key, ring, stmt)
             return
         md = _MATRIX_DESC.match(stmt)
         if md:
@@ -3548,6 +3588,15 @@ def _kernel_start(src: str) -> int:
 _MODULE_ARRAY = re.compile(
     r'(?:__device__\s+)?(?:const|constexpr)\s+[\w:]+\s+(?P<name>\w+)\s*'
     r'\[\s*\d+\s*\]\s*=\s*\{(?P<values>[^}]*)\}\s*;')
+
+
+def _table_reach(src, at: int, count: int, stmt: str) -> None:
+    """A copy out of a table of the generated file reads inside it: the
+    table ends where its numbers do, and a slot past them is a read past
+    the definition.  (A buffer of memory has no end here.)"""
+    if isinstance(src, list) and not (0 <= at and at + count <= len(src)):
+        raise Abort(f'a copy of {count} elements from {at} on out of a table '
+                    f'of {len(src)}: {stmt!r}')
 
 
 def _number(text: str):

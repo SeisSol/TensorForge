@@ -3478,6 +3478,13 @@ def _lower_commit_group_cuda(s: Stmt, env: Spelling) -> Lowered:
     if engine == 'tcgen05':
         _tcgen05_available(env)
         _spelled_mbarrier(s, env, object_value(s))
+        if s.attr('side') is not None:
+            # Onto a ring's slot (`mbarrier_ring`), its empty side: the
+            # products arrive there once complete, which hands the slot back
+            # to its producer (`tensorforge::tcgen05CommitOn`).
+            return Lowered((f'tensorforge::tcgen05CommitOn('
+                            f'{_ring_barrier(s, env)}, '
+                            f'{env.name(s.args[1])});',))
         return Lowered((f'tensorforge::tcgen05Commit('
                         f'{env.name(object_value(s))}, '
                         f'{env.name(s.args[0])});',))
@@ -3504,6 +3511,18 @@ def _check_commit_group(s: Stmt) -> List[str]:
                 or object_value(s) is None:
             return [f'{s.op}: {engine} commits onto an mbarrier the body '
                     f'set up, not {obj!r}']
+        if obj.slots:
+            # Onto a ring's slot: the slot, then the thread that issued.
+            if s.attr('side') != 'empty':
+                return [f'{s.op}: {engine} commits onto the empty side of a '
+                        f'ring\'s slot, which its producer waits on, not '
+                        f'{s.attr("side")!r}']
+            if len(s.args) != 2 or not isinstance(s.args[1], Value):
+                return [f'{s.op}: {engine} commits onto a ring\'s slot what '
+                        f'the thread one value picks issued']
+            return []
+        if s.attr('side') is not None:
+            return [f'{s.op}: a side of an mbarrier that is no ring\'s']
         if len(s.args) != 1 or not isinstance(s.args[0], Value):
             return [f'{s.op}: {engine} commits what the thread one value '
                     f'picks issued']
@@ -3783,7 +3802,8 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     # it may be predicated away, and DCE keeps it.
     OpSpec(Op.COMMIT_GROUP, operands=(Slot('engine', (str,)),
                                       Slot('object', (SyncObjectType, Value),
-                                           False)),
+                                           False),
+                                      Slot('side', (str,), False)),
            results=(), effect=Effect.ASYNC, movable=False,
            completes=Completion.GROUP, retires=None, settles=False,
            units=1, pipe='sync',
@@ -4294,10 +4314,14 @@ def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
 
 
 def commit_group(engine: str, obj: Optional[Value] = None,
-                 issue: Optional[Value] = None) -> Stmt:
+                 issue: Optional[Value] = None,
+                 slot: Optional[Any] = None) -> Stmt:
     """Close what `engine` issued since its last commit into one group
     (`COMMIT_ENGINES`): `wgmma.commit_group`; tcgen05's onto the mbarrier
-    `obj` (`IRBuilder.bulk_channel`), what the thread `issue` picks issued.
+    `obj` (`IRBuilder.bulk_channel`), what the thread `issue` picks issued
+    -- or, `slot` given, onto the empty side of that slot of the ring `obj`
+    (`mbarrier_ring`), which the products arrive at once complete: the
+    consumer's release of the slot, for its producer to fill again.
     Pinned and asynchronous; the object named in `object`, as a bulk copy
     names it."""
     if engine not in COMMIT_ENGINES:
@@ -4311,7 +4335,10 @@ def commit_group(engine: str, obj: Optional[Value] = None,
                           f'thread `issue` picks issued')
         attrs += (('object', obj),)
         args = (issue,)
-    elif obj is not None or issue is not None:
+        if slot is not None:
+            attrs += (('side', 'empty'),)
+            args = (slot, issue)
+    elif obj is not None or issue is not None or slot is not None:
         raise IRError(f'{engine} commits onto its counter')
     return _stmt(Op.COMMIT_GROUP, attrs, args=args)
 

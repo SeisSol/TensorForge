@@ -347,6 +347,9 @@ class MultiElementOperators(AbstractInstruction):
         #: of its slots' windows (`GroupSection.ring`).
         self.ring = None
         self.ring_slots: Dict[int, object] = {}
+        #: The prepared rings of the steps whose B streams prepared
+        #: (`_OperatorRing`), by the step's `id`.
+        self.rings: Dict[int, _OperatorRing] = {}
         self._is_ready = True
         for symbol in self.symbols:
             symbol.add_user(self)
@@ -433,7 +436,7 @@ class MultiElementOperators(AbstractInstruction):
         for stage in section.stages:
             if stage.streamed:
                 # Its step streams it through a ring, a trip at a time
-                # (`_ring_fetch`, `_ring_put`).
+                # (`_ring_fetch`, `_ring_put`; prepared, `_OperatorRing`).
                 continue
             tensor = stage.tensor
             shared = builder.alloc(section.dtype, (stage.volume,),
@@ -443,6 +446,10 @@ class MultiElementOperators(AbstractInstruction):
                                               else 'b', tensor),
                                    place_align=(None if stage.window is None
                                                 else 4))
+            buffers[(id(tensor), stage.window)] = shared
+            if stage.prepared:
+                # Copied from its table below (`_prepared`).
+                continue
             source = _bound(builder, symbols[id(tensor)])
             if stage.window is None:
                 with builder.for_(tid, stage.volume, threads, hint='i',
@@ -456,7 +463,7 @@ class MultiElementOperators(AbstractInstruction):
             else:
                 self._fragments(builder, stage, source, shared, fp, tid,
                                 threads)
-            buffers[(id(tensor), stage.window)] = shared
+        self._prepared(builder, buffers)
         tables = {id(step.terms): self._pack(builder, step, symbols, tid,
                                              threads)
                   for step in section.steps if step.terms is not None}
@@ -469,16 +476,93 @@ class MultiElementOperators(AbstractInstruction):
         self.tmem = builder.tmem_alloc(
             columns, arena=GeneralLexicon.TOTAL_SHR_MEM) if columns else None
         if any(stage.order == 'canonical' and not stage.streamed
-               for stage in section.stages):
+               and not stage.prepared for stage in section.stages):
             # The asynchronous engines read B through the async proxy, and
             # it was written through the generic one: each thread fences
-            # its stores ahead of the barrier.
+            # its stores ahead of the barrier.  A prepared stage's bulk
+            # copy writes through the async proxy itself.
             from tensorforge.backend.pir.engines import FenceKind
             builder.fence(FenceKind.PROXY)
         builder.barrier(Participants.BLOCK)
         self._budgets(builder)
         self.buffers = buffers
         self.tables = tables
+
+    def _prepared(self, builder, buffers) -> None:
+        """The steps whose B is prepared at generation
+        (`element_group.Stage.prepared`): the table of the generated file
+        each step's halves are in (`element_group.prepared_table`), 128
+        bytes aligned, and from it a resident stage by one bulk copy a
+        product, waited for here -- or, streamed, the step's ring
+        (`_OperatorRing`): its slots in the block's shared memory, each the
+        largest chunk, on 128 bytes, for the whole body, handed over by the
+        ring's barriers alone; full counting the block's first thread, empty
+        the consumers -- tcgen05's commit, or each element warp on wgmma."""
+        from tensorforge.backend.instructions.compute.primitives import \
+            nvidia
+        from tensorforge.generators.element_group import (
+            ASYNC_LOWERINGS, WARPGROUP_WARPS, chunk_volume, prepared_table,
+            ring_chunks)
+        section = self._group.section
+        sm = nvidia.sm_of(self._context)
+        for n, step in enumerate(section.steps):
+            if step.lowering not in ASYNC_LOWERINGS:
+                continue
+            stages = [section.stage(p.first.tensor, (p.rows, p.depth))
+                      for p in step.products]
+            if not stages[0].prepared:
+                continue
+            name, numbers, offsets = prepared_table(section, step, sm)
+            self._module_tables[name] = (Datatype.F32, numbers, 128)
+            if not stages[0].streamed:
+                from tensorforge.backend.pir.core import BufferType
+                table = builder.extern_value(
+                    name, BufferType(Datatype.F32, (len(numbers),),
+                                     MemSpace.GLOBAL, readonly=True),
+                    uniform=Uniformity.GRID, hint='bk')
+                for p, stage in enumerate(stages):
+                    cursor = builder.bulk_channel(
+                        f'bk{n}_{p}', 'threadIdx.x == 0 && threadIdx.y == 0',
+                        participants=Participants.BLOCK,
+                        arena=GeneralLexicon.TOTAL_SHR_MEM)
+                    if cursor is None:
+                        raise InternalError('a prepared stage in a body '
+                                            'without an arena for its '
+                                            'mbarrier')
+                    builder.wait(builder.copy_bulk(
+                        buffers[(id(stage.tensor), stage.window)], table,
+                        barrier=cursor, dst_index=(0,),
+                        src_index=(offsets[(p, 0)],), elems=stage.volume))
+                continue
+            chunks = ring_chunks(section, step)
+            volumes = [chunk_volume(section, step, chunk)
+                       for chunk in chunks]
+            starts = [offsets[chunk[0][:2]] for chunk in chunks]
+            size = max(volumes)
+            slots = section.ring_slots
+            storage = builder.alloc(Datatype.F32, (slots * size,),
+                                    MemSpace.SHARED,
+                                    arena=GeneralLexicon.TOTAL_SHR_MEM,
+                                    hint=f'bk{n}', place_align=32,
+                                    lifetime='body', handed=True)
+            elements = self._group.elements
+            consumers = 1 if step.lowering == 'tcgen05' else elements
+            ring = builder.mbarrier_ring(
+                f'bk{n}', slots, full=1, empty=consumers,
+                leader='threadIdx.x == 0 && threadIdx.y == 0',
+                arena=GeneralLexicon.TOTAL_SHR_MEM)
+            if ring is None:
+                raise InternalError('a prepared ring in a body without an '
+                                    'arena for its mbarriers')
+            found = _OperatorRing(step, ring, storage, size, chunks, name,
+                                  starts, volumes, stages, len(numbers))
+            if step.lowering == 'wgmma':
+                # The tiles of the group's rows a warpgroup takes in turn
+                # (`_wgmma`), each a pass of the step over every chunk.
+                width = step.cols[1] - step.cols[0]
+                tiles = -(-elements * width // 64)
+                found.passes = -(-tiles // (elements // WARPGROUP_WARPS))
+            self.rings[id(step)] = found
 
     def _pack(self, builder, step, symbols, tid, threads) -> tuple:
         """A sparse step's tables in the block's shared memory
@@ -663,6 +747,11 @@ class _Trip:
         #: The trip's stage of D for its tcgen05 steps (`_d_stage`), once the
         #: first of them asks for it.
         self.dstage = None
+        #: The prepared rings of the steps whose B streams prepared, by the
+        #: step's `id` (`MultiElementOperators.rings`), and the block's count
+        #: of its trips, once a ring asks for it (`_trip_count`).
+        self.rings: Dict[int, object] = {}
+        self.trips = None
         #: Whom the lowerings' barriers meet: the block, or the element
         #: warps' role where a producer fills the inputs (`_ring`).
         self.meet = Participants.BLOCK
@@ -1648,12 +1737,15 @@ class _Piece:
 
     def descriptors(self, b, kt, form):
         """The descriptors of the step of K at `kt` of the piece: the upper
-        halves', and the lower halves' where the stage is split."""
+        halves', and the lower halves' where the stage is split.  `at` is a
+        number, or a value where the piece's slot of a ring is one
+        (`_OperatorRing`)."""
         from tensorforge.backend.pir.engines import MatrixDescType
         desc = MatrixDescType(Datatype.TF32, lbo=self.stage.leading,
                               sbo=self.rows * 32, form=form)
         half = self.rows * self.stage.width
-        return [b.matrix_desc(self.buffer, self.at + h * half + kt * 8,
+        return [b.matrix_desc(self.buffer, _index(
+                    b, 'add', self.at, h * half + kt * 8, 'b'),
                               desc=desc, hint='b')
                 for h in range(1 + self.stage.split)]
 
@@ -1705,6 +1797,193 @@ def _pieces(trip, step):
     return pieces, copy
 
 
+def _trip_count(trip):
+    """The block's count of its trips, 0 on, as both roles read it off the
+    group's first element (`MultiElementSection._ring`): the block's trips
+    are its groups in turn, `gridDim.x` groups apart."""
+    from tensorforge.backend.instructions.batch_loop import (BatchLoop,
+                                                             GROUP_KEY)
+    found = getattr(trip, 'trips', None)
+    if found is not None:
+        return found
+    b = trip.builder
+    bound = BatchLoop.indices_in(b)
+    if not bound or GROUP_KEY not in bound:
+        raise InternalError('a ring\'s trip outside the element group\'s '
+                            'loop')
+    block = b.extern_value('blockIdx.x', INDEX, uniform=Uniformity.BLOCK,
+                           hint='bid')
+    grid = b.extern_value('gridDim.x', INDEX, uniform=Uniformity.GRID,
+                          hint='grid')
+    trip.trips = b.op('div', INDEX, b.op('sub', INDEX, b.op(
+        'div', INDEX, bound[GROUP_KEY], trip.group.elements, hint='k'),
+        block, hint='k'), grid, hint='k')
+    return trip.trips
+
+
+class _OperatorRing:
+    """A step's B streamed prepared (`element_group.Stage.prepared`): the
+    table of the generated file its halves are in (`element_group.
+    prepared_table`), cut into chunks (`element_group.ring_chunks`), and a
+    ring of `slots` slots in the block's shared memory that the block's
+    first thread fills by bulk copies from the table, a chunk a slot, the
+    slots handed over on a pair of mbarriers each (`IRBuilder.
+    mbarrier_ring`): the full side counts that thread's arrival and the
+    chunk's bytes, the empty side the consumers -- tcgen05's commit of the
+    chunk's products, or each element warp's arrival behind its wait for
+    them on wgmma.
+
+    The first thread fills the first `slots - 1` chunks of a trip at the
+    trip's head (`head`), and every later chunk into the slot the chunk
+    `slots` before it read, as soon as the products of that one let it go
+    (`ahead`): never past the trip's last chunk, so that no copy is in
+    flight where a trip ends.  The chunks are counted across the block's
+    trips (`_trip_count`) -- chunk `i` of a pass `p` of the step in trip `t`
+    is round `((t P + p) C + i)` of the ring, `P` the step's passes (the
+    tiles a warpgroup takes, one on the volume) and `C` its chunks -- the
+    slot that modulo `slots`, the phase its round's."""
+
+    def __init__(self, step, ring, storage, size, chunks, table, offsets,
+                 volumes, stages, length):
+        self.step, self.ring, self.storage = step, ring, storage
+        #: Elements a slot holds: the largest chunk.
+        self.size = size
+        self.chunks = chunks
+        #: The table's name, where each chunk starts in it and how many
+        #: elements it is, and the stages of the step's products.
+        self.table, self.offsets, self.volumes = table, offsets, volumes
+        self.stages = stages
+        self.length = length
+        self.passes = 1
+
+    @property
+    def slots(self) -> int:
+        return self.ring.slots
+
+    def round(self, trip, i, base=None):
+        """The ring's round of chunk `i` of the trip's step, its slot and
+        the parity of its phase, as values -- and where the slot starts in
+        the ring's buffer."""
+        b = trip.builder
+        if base is None:
+            base = self.base(trip, 0)
+        g = _index(b, 'add', base, i, 'g')
+        slot, parity = b.ring_round(self.ring, g, hint='bk')
+        return slot, parity, b.op('mul', INDEX, slot, self.size, hint='bs')
+
+    def base(self, trip, pass_):
+        """The round of the first chunk of pass `pass_` of the trip."""
+        b = trip.builder
+        count = len(self.chunks)
+        trips = _trip_count(trip)
+        return _index(b, 'mul', _index(b, 'add', _index(
+            b, 'mul', trips, self.passes, 'g'), pass_, 'g'), count, 'g')
+
+    def issue(self, trip):
+        """The block's first thread, which fills the ring."""
+        b = trip.builder
+        return b.op('eq', BOOL, b.op('add', INDEX, trip.lane, b.op(
+            'mul', INDEX, trip.slot, 32, hint='tid'), hint='tid'), 0,
+            hint='issue')
+
+    def table_value(self, trip):
+        """The table as a buffer of global memory: what the bulk copies
+        read, by its name in the generated file."""
+        from tensorforge.backend.pir.core import BufferType
+        return trip.builder.extern_value(
+            self.table, BufferType(Datatype.F32, (self.length,),
+                                   MemSpace.GLOBAL, readonly=True),
+            uniform=Uniformity.GRID, hint='bk')
+
+    def fill(self, trip, j, base, issue) -> None:
+        """Chunk `j` into its slot, by the thread `issue` picks -- under
+        a branch it takes, as the wait is that thread's: the slot back from
+        its last round's consumers, the copy of the chunk from the table,
+        and the arrival that announces its bytes on the slot's full side."""
+        from tensorforge.backend.pir.build import RingSlot
+        b = trip.builder
+        slot, parity, at = self.round(trip, j, base)
+        b.ring_wait(self.ring, 'empty', slot, b.op('sub', INDEX, 1, parity,
+                                                   hint='free'),
+                    writes=[self.storage])
+        token = b.copy_bulk(self.storage, self.table_value(trip),
+                            barrier=RingSlot(self.ring, slot),
+                            dst_index=(at,), src_index=(self.offsets[j],),
+                            elems=self.volumes[j], predicate=issue)
+        b.ring_arrive(self.ring, 'full', slot, issue,
+                      tx=self.volumes[j] * Datatype.F32.size(),
+                      tokens=[token])
+
+    def head(self, trip, base=None, when=None) -> None:
+        """The first `slots - 1` chunks of the trip's step -- of its pass at
+        `base` -- by the block's first thread, where `when` holds too: at
+        the trip's head, behind which the trip stages and mixes while they
+        land."""
+        b = trip.builder
+        issue = self.issue(trip)
+        if base is None:
+            base = self.base(trip, 0)
+        cond = issue if when is None else b.op('and', BOOL, issue, when,
+                                               hint='issue')
+        with b.if_(cond):
+            for j in range(min(self.slots - 1, len(self.chunks))):
+                self.fill(trip, j, base, issue)
+
+    def ahead(self, trip, i, base) -> None:
+        """Behind the consumers' release of chunk `i - 1`: the chunk
+        `slots - 1` past `i` into that slot, where the trip has it."""
+        j = i + self.slots - 1
+        if j >= len(self.chunks):
+            return
+        b = trip.builder
+        issue = self.issue(trip)
+        with b.if_(issue):
+            self.fill(trip, j, base, issue)
+
+    def take(self, trip, i, base, issue=None) -> list:
+        """Chunk `i`'s slot as its bytes land -- the wait of the thread
+        `issue` picks, or of every thread where it is None -- and its
+        pieces (`_Piece`) in the slot."""
+        b = trip.builder
+        slot, parity, at = self.round(trip, i, base)
+        if issue is None:
+            b.ring_wait(self.ring, 'full', slot, parity,
+                        writes=[self.storage])
+        else:
+            with b.if_(issue):
+                b.ring_wait(self.ring, 'full', slot, parity,
+                            writes=[self.storage])
+        pieces, offset = [], 0
+        for p, k0, rows in self.chunks[i]:
+            stage = self.stages[p]
+            pieces.append(_Piece(self.step.products[p], stage, k0, rows,
+                                 self.storage,
+                                 _index(b, 'add', at, offset, 'b')))
+            offset += 2 * rows * stage.width
+        return pieces
+
+    def release(self, trip, i, base, issue=None) -> None:
+        """Chunk `i`'s slot back to its producer: tcgen05's products of it
+        committed onto its empty side by the thread `issue` picks, which
+        they arrive at once complete; elsewhere each warp's first lane's
+        arrival, behind the warp's wait for them and the warp's barrier,
+        which hands what every lane of it is done with to the arrival."""
+        b = trip.builder
+        slot, _, _ = self.round(trip, i, base)
+        if issue is not None:
+            b.commit_group('tcgen05', object=self.ring, issue=issue,
+                           slot=slot)
+            return
+        b.barrier(Participants.WAVE)
+        b.ring_arrive(self.ring, 'empty', slot,
+                      b.op('eq', BOOL, trip.lane, 0, hint='first'))
+
+    def flat_pieces(self):
+        """Every piece of the step, chunk after chunk: `(chunk, piece)`."""
+        return [(i, piece) for i, chunk in enumerate(self.chunks)
+                for piece in chunk]
+
+
 #: Where the four 8x8 matrices of a warp's A start in its 16 rows of a step
 #: of K (`IRBuilder.matrix_load`'s `origins`): mma_sync's A of m16n8k8 over
 #: TF32, which a warp of a warpgroup holds as wgmma's A from registers
@@ -1740,7 +2019,10 @@ def _wgmma(trip, step) -> None:
     before, and reads the one after it, then the wait, the fence of the
     async proxy and the block's barrier.  A chunk waits for itself whatever
     `wgmma_pending` says: the block's next copy writes the slot the chunk
-    before read, which every warpgroup has to have retired.
+    before read, which every warpgroup has to have retired.  Where B
+    streams prepared (`_OperatorRing`), nobody converts it: every thread
+    waits for a chunk's bytes, and the slots go back behind the waits
+    (`_wgmma_ring`).
 
     The tile loop runs as often in every warpgroup -- the collective's
     arrival is the block's, a multiplication being a warp -- so that a
@@ -1790,7 +2072,12 @@ def _wgmma(trip, step) -> None:
                       lm, 0, hint='m')
         accs = [b.declare(fp, hint='c', uniform=Uniformity.LANE)
                 for _ in range(n // 2)]
-        pieces, copy = _pieces(trip, step)
+        ring = trip.rings.get(id(step))
+        pieces, copy = ([], None) if ring is not None else _pieces(trip,
+                                                                  step)
+        if ring is not None:
+            _wgmma_ring(trip, step, ring, loop.induction, accs, lm, lcol,
+                        layouts, n)
         # The groups committed and not retired, oldest first: the A
         # registers each read, and its descriptors.
         flight = []
@@ -1852,6 +2139,65 @@ def _wgmma(trip, step) -> None:
             write(m, col, accs[i], ('w', r), padded)
 
 
+def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
+                n) -> None:
+    """`_wgmma`'s products of pass `pass_` where B streams prepared through
+    the step's ring (`_OperatorRing`): a chunk at a time every thread waits
+    for the chunk's bytes; its steps of K load and split A as without the
+    ring, each into registers of its own, and issue the products through
+    descriptors into the slot; one commit closes the chunk.  Then the wait
+    that leaves only this chunk in flight retires the one before, which each
+    warp's first lane gives back to the ring -- ahead of the block's first
+    thread's wait for that slot, which fills the chunk `slots - 1` ahead
+    into it.  Behind the last chunk, the wait for all of them, and its slot
+    given back.  A later pass's first chunks are filled at its head, as the
+    trip's head filled the first pass's."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import matrix_shape
+    b = trip.builder
+    section = trip.section
+    fp = trip.fp
+    cols = step.cols
+    width = cols[1] - cols[0]
+    _, _, k_ = matrix_shape('wgmma', 90)
+    base = ring.base(trip, pass_)
+    if ring.passes > 1:
+        ring.head(trip, base, when=b.op('gt', BOOL, pass_, 0, hint='later'))
+    flight, first = [], True
+    for i in range(len(ring.chunks)):
+        registers, reads = [], []
+        for piece in ring.take(trip, i, base):
+            product, stage = piece.product, piece.stage
+            group = section.buffer(product.second.tensor)
+            source = trip.buffers[id(product.second.tensor)]
+            k_lo = product.depth[0] + piece.k0
+            for kt in range(0, piece.rows, k_):
+                at = _group_index(b, lm, width, group, cols[0],
+                                  _index(b, 'add', lcol, k_lo + kt, 'k'))
+                a = list(b.matrix_load(source, at, count=4, type_=fp,
+                                       origins=A_ORIGINS, hint='a'))
+                split = nvidia.tfconvert(b, a)
+                halves = ([u for u, _ in split], [lo for _, lo in split])
+                bs = piece.descriptors(b, kt, 'wgmma')
+                b.fence(FenceKind.REGISTERS, engine='wgmma',
+                        registers=accs + halves[0] + halves[1])
+                for ia, ib in _terms(stage):
+                    b.wgmma(n, halves[ia], bs[ib], accs,
+                            scale_d=0 if first else 1, layouts=layouts)
+                    first = False
+                registers += halves[0] + halves[1]
+                reads += bs
+        b.commit_group('wgmma')
+        flight.append((registers, reads))
+        if len(flight) > 1:
+            flight = _wgmma_retire(b, flight, 1, accs)
+            ring.release(trip, i - 1, base)
+        ring.ahead(trip, i, base)
+    _wgmma_retire(b, flight, 0, accs)
+    ring.release(trip, len(ring.chunks) - 1, base)
+
+
 #: Columns a warp loads of tensor memory at once in the epilogue: D's row
 #: a thread, a few of its columns live at a time.
 TMEM_CHUNK = 32
@@ -1896,17 +2242,19 @@ def _tcgen05(trip, step) -> None:
     memory is the
     block's, allocated ahead of the batch loop and freed behind it
     (`MultiElementOperators.tmem`): an allocation gives up the block's
-    permit to allocate again (`tmemAlloc`), so a trip may not allocate."""
-    from tensorforge.backend.pir.engines import FenceKind
+    permit to allocate again (`tmemAlloc`), so a trip may not allocate.
+
+    Where B streams prepared (`_OperatorRing`), the block converts nothing:
+    the issuing thread waits for each chunk's bytes, issues and commits its
+    products onto the slot's empty side, and fills the ring ahead
+    (`_tcgen05_ring`)."""
     from tensorforge.generators.element_group import (TCGEN05_ROWS,
                                                       matrix_shape)
     b = trip.builder
-    section = trip.section
-    fp = trip.fp
     rows, cols = step.rows, step.cols
     width = cols[1] - cols[0]
     height = rows[1] - rows[0]
-    _, n_, k_ = matrix_shape('tcgen05', 100)
+    _, n_, _ = matrix_shape('tcgen05', 100)
     n = _round_up(height, n_)
     M = trip.group.elements * width
     if M > TCGEN05_ROWS:
@@ -1933,6 +2281,93 @@ def _tcgen05(trip, step) -> None:
              trip.lane, hint='m')
     live = b.op('lt', BOOL, m, M, hint='in') if padded else None
     row = b.op('select', INDEX, live, m, 0, hint='m') if padded else m
+    ring = trip.rings.get(id(step))
+    if ring is not None:
+        _tcgen05_ring(trip, step, ring, cursor, issue, n, M)
+    else:
+        _tcgen05_resident(trip, step, cursor, issue, n, M)
+    _tcgen05_epilogue(trip, step, holds, row, live)
+
+
+def _tcgen05_ring(trip, step, ring, cursor, issue, n, M) -> None:
+    """`_tcgen05`'s products where B streams prepared through the step's
+    ring (`_OperatorRing`): A as without it -- every product's apart ahead
+    of all, where tensor memory holds them, else a product's at a time --
+    and a chunk at a time the issuing thread waits for the chunk's bytes,
+    issues its products and commits them onto the slot's empty side, which
+    they arrive at once complete, and fills the chunk `slots - 1` ahead
+    into the slot the chunk before read.  No barrier and no wait of the
+    block a chunk: only where a product's A columns are written again, and
+    behind the step's last chunk, every thread waits for the products
+    committed onto the block's mbarrier -- a commit tracks every product its
+    thread issued before it."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import matrix_shape
+    b = trip.builder
+    section = trip.section
+    tmem = trip.tmem
+    _, _, k_ = matrix_shape('tcgen05', 100)
+    _, columns, apart = _tcgen05_columns(section, step)
+
+    def stored(product, stage, at):
+        _tcgen05_a(trip, product, stage, tmem, at, M)
+
+    def shown():
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
+        b.barrier(trip.meet)
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+
+    if apart:
+        for p, product in enumerate(step.products):
+            stored(product, ring.stages[p], columns[p])
+        shown()
+    base = ring.base(trip, 0)
+    first, reads = True, []
+    for i, chunk in enumerate(ring.chunks):
+        if not apart:
+            # A's columns are the products' in turn: a product's A stored
+            # where its first piece comes, behind the wait for the one before.
+            for p, k0, _ in chunk:
+                if k0 == 0:
+                    stored(step.products[p], ring.stages[p], columns[p])
+                    shown()
+        for piece in ring.take(trip, i, base, issue):
+            stage = piece.stage
+            upper_at = columns[step.products.index(piece.product)]
+            lower_at = upper_at + stage.depth
+            for kt in range(0, piece.rows, k_):
+                bs = piece.descriptors(b, kt, 'tcgen05')
+                for ia, ib in _terms(stage):
+                    b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
+                              enable_input_d=0 if first else 1,
+                              a_column=(upper_at, lower_at)[ia]
+                              + piece.k0 + kt)
+                    first = False
+                reads += bs
+        ring.release(trip, i, base, issue)
+        ring.ahead(trip, i, base)
+        last = i + 1 == len(ring.chunks)
+        # Where the next chunk starts a product, its A goes where the last
+        # product's was: the block waits for that one's products first.
+        turns = not apart and not last and any(
+            k0 == 0 for _, k0, _ in ring.chunks[i + 1])
+        if not (last or turns):
+            continue
+        b.commit_group('tcgen05', object=cursor, issue=issue)
+        b.matrix_wait('tcgen05', object=cursor, reads=reads, tmem=[tmem])
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+        reads = []
+
+
+def _tcgen05_resident(trip, step, cursor, issue, n, M) -> None:
+    """`_tcgen05`'s products where B is resident, or streamed through the
+    ring the element warps convert it into (`_pieces`)."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import matrix_shape
+    b = trip.builder
+    section = trip.section
+    tmem = trip.tmem
+    _, _, k_ = matrix_shape('tcgen05', 100)
     pieces, copy = _pieces(trip, step)
     if copy is not None:
         copy(0)
@@ -1980,6 +2415,17 @@ def _tcgen05(trip, step) -> None:
         if copy is not None:
             b.fence(FenceKind.PROXY)
             b.barrier(trip.meet)
+
+
+def _tcgen05_epilogue(trip, step, holds, row, live) -> None:
+    """`_tcgen05`'s D, the products done: from tensor memory into the
+    trip's stage of it, then to the destination by every element warp."""
+    from tensorforge.backend.pir.engines import FenceKind
+    b = trip.builder
+    fp = trip.fp
+    tmem = trip.tmem
+    height = step.rows[1] - step.rows[0]
+    M = trip.group.elements * (step.cols[1] - step.cols[0])
     write = _d_writer(trip, step)
     # D through shared memory, a row a lane-holding thread, so that every
     # element warp writes a share of it: the writes are reductions through
@@ -2906,9 +3352,14 @@ class MultiElementSection(AbstractInstruction):
         trip.table = lambda prefix, numbers: _module_table(self, prefix,
                                                            numbers)
         trip.tmem = self._operators.tmem
+        trip.rings = dict(self._operators.rings)
         if section.ring:
             self._ring(trip)
             return
+        # The prepared rings' first chunks, at the trip's head: they land
+        # while the trip stages and mixes (`_OperatorRing.head`).
+        for ring in trip.rings.values():
+            ring.head(trip)
         elements = self._group.elements
         for buffer in section.inputs + section.intermediates:
             trip.buffers[id(buffer.tensor)] = builder.alloc(
@@ -2996,6 +3447,8 @@ class MultiElementSection(AbstractInstruction):
         count = b.op('div', INDEX, b.op('sub', INDEX, b.op(
             'div', INDEX, group, elements, hint='k'), block, hint='k'),
             grid, hint='k')
+        # The prepared operator rings count their rounds from it too.
+        trip.trips = count
         slot, parity = b.ring_round(ring, count)
         for buffer in section.inputs:
             trip.buffers[id(buffer.tensor)] = b.alloc(
@@ -3178,6 +3631,11 @@ class MultiElementSection(AbstractInstruction):
         back behind the warp's barrier, done with it."""
         b = trip.builder
         section = self._group.section
+        # The prepared rings' first chunks, at the element warps' head of
+        # the trip (`_OperatorRing.head`): the block's first thread is one
+        # of theirs.
+        for found in trip.rings.values():
+            found.head(trip)
         windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
         b.ring_wait(ring, 'full', slot, parity, writes=windows)
         if not self._context.get_user_options().enable_sync_block_opt:

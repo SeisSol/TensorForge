@@ -1226,11 +1226,19 @@ class IRBuilder:
             base, index, registers, access=access, layout=layout))
 
     def commit_group(self, engine: str, object: Optional[Value] = None,
-                     issue: Optional[Value] = None) -> Stmt:
+                     issue: Optional[Value] = None,
+                     slot: Optional[Operand] = None) -> Stmt:
         """Close what `engine` issued since its last commit into one group
         (`engines.commit_group`): onto the mbarrier `object` for tcgen05,
-        what the thread `issue` picks issued."""
-        return self.emit(engines.commit_group(engine, object, issue))
+        what the thread `issue` picks issued -- or onto the empty side of
+        the slot `slot` of the ring `object` (`mbarrier_ring`), whose
+        producer waits there for the products to have read the slot."""
+        if slot is not None:
+            if not isinstance(object, Ring):
+                raise IRError(f'a commit onto slot {slot!r} of {object!r}, '
+                              f'which is no ring')
+            object = object.object
+        return self.emit(engines.commit_group(engine, object, issue, slot))
 
     def matrix_wait(self, engine: str, count: int = 0,
                     registers: Sequence[Value] = (),

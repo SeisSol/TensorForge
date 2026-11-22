@@ -1057,6 +1057,24 @@ __device__ __forceinline__ void tcgen05Commit(BulkCursor &cursor, bool issue) {
   cursor.pending = true;
 }
 
+/// The products the thread `issue` picks issued since its last commit,
+/// tracked by the mbarrier at `barrier` -- the empty side of a ring's slot
+/// (`mbarrierInit`) -- which they arrive at once complete: the slot's
+/// operand read, its producer may fill it again (PTX ISA,
+/// "tcgen05.commit").  No cursor: the producer waits for the round's parity
+/// (`mbarrierWait`).
+__device__ __forceinline__ void tcgen05CommitOn(void *barrier, bool issue) {
+#if defined(TENSORFORGE_TCGEN05)
+  if (issue) {
+    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+                 "cluster.b64 [%0];" ::"r"(bulk_shared_address(barrier))
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
 ///
 /// A typedef and not a wrapper struct, and the reason is the constraint

@@ -4492,8 +4492,8 @@ GROUPS = {
          sub(TARGET, "        return (self.backend == 'cuda' and self.arch_specific()\n                and self.hw.sm_level() == 100)\n",
              "        return (self.backend == 'cuda' and self.arch_specific()\n                and self.hw.sm_level() >= 90)\n", 1)),
         ('the interpreter not checking the operands at the phase',
-         sub(ORACLE, "        for writes, reads, issued in state['bound'].pop(cursor, []):\n            for base, slot, value in reads:\n",
-             "        for writes, reads, issued in state['bound'].pop(cursor, []):\n            for base, slot, value in ():\n", 1)),
+         sub(ORACLE, "        for writes, reads, issued in landing:\n            for base, slot, value in reads:\n",
+             "        for writes, reads, issued in landing:\n            for base, slot, value in ():\n", 1)),
         ('the interpreter reading a cell a product writes',
          sub(ORACLE, "            if cell in state['overlay']:\n                raise Abort(f'tensor memory at lane {lane}, column '\n",
              "            if False:\n                raise Abort(f'tensor memory at lane {lane}, column '\n", 1)),
@@ -4506,7 +4506,7 @@ GROUPS = {
          sub(ORACLE, "                    cell = self._tmem_cell(r + (a_address >> 16),\n                                           (a_address & 0xFFFF) + x, stmt,\n",
              "                    cell = self._tmem_cell(x + (a_address >> 16),\n                                           (a_address & 0xFFFF) + r, stmt,\n", 1)),
         ('tensor memory freed in flight taken',
-         sub(ORACLE, "            if state['open'] or any(state['bound'].values()) \\\n                    or state['overlay']:\n",
+         sub(ORACLE, "            if state['open'] or any(records for _, records\n                                    in state['bound']) \\\n                    or state['overlay']:\n",
              "            if False:\n", 1)),
         ('the commit helper committing nothing',
          sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'), '    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"\n'
@@ -4726,8 +4726,8 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "                   b.op('mul', INDEX, warp, 16, hint='m'), hint='m')\n",
              "                   b.op('mul', INDEX, warp, 0, hint='m'), hint='m')\n", 1)),
         ('D written over by every wgmma',
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                            scale_d=0 if first else 1, layouts=layouts)\n',
-             '                            scale_d=0, layouts=layouts)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                for ia, ib in terms:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0 if first else 1, layouts=layouts)\n',
+             '                for ia, ib in terms:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0, layouts=layouts)\n', 1)),
         ("the products without A's lower half",
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))\n',
              '    return ((0, 0), (0, 1)) if stage.split else ((0, 0),)\n', 1)),
@@ -4743,15 +4743,19 @@ GROUPS = {
         ("the warp's tile rather than its warpgroup's",
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "        tile = b.op('add', INDEX, wg, b.op('mul', INDEX, loop.induction,\n",
              "        tile = b.op('add', INDEX, warp, b.op('mul', INDEX, loop.induction,\n", 1)),
+        # The converting ring's issue (`_tcgen05_resident`), on lines the
+        # prepared ring's (`_tcgen05_ring`, ahead of it) does not share: a
+        # count-1 anchor on a shared line mutates the copy these tests never
+        # build.  opring mutates the prepared ring's.
         ("A's lower half at the upper's columns",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '        lower_at = upper_at + stage.depth\n',
-             '        lower_at = upper_at\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '        upper_at = columns[step.products.index(product)]\n        lower_at = upper_at + stage.depth\n',
+             '        upper_at = columns[step.products.index(product)]\n        lower_at = upper_at\n', 1)),
         ('D written over by every tcgen05',
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          enable_input_d=0 if first else 1,\n',
-             '                          enable_input_d=0,\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          enable_input_d=0 if first else 1,\n                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n',
+             '                          enable_input_d=0,\n                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n', 1)),
         ('the products committed by nobody',
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "        b.commit_group('tcgen05', object=cursor, issue=issue)\n",
-             '', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "            continue\n        b.commit_group('tcgen05', object=cursor, issue=issue)\n        if copy is not None and i + 1 < len(pieces):\n",
+             "            continue\n        if copy is not None and i + 1 < len(pieces):\n", 1)),
         ('D read from its stage before the lane-holding warps wrote it',
          sub(ME_SECTION, "    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n    b.barrier(trip.meet)\n    threads = trip.group.threads * trip.group.elements\n",
              "    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n    threads = trip.group.threads * trip.group.elements\n", 1)),
@@ -4768,8 +4772,8 @@ GROUPS = {
          sub(ME_SECTION, '    return n + 2 * max(depths), tuple(n for _ in depths), False\n',
              '    return n + 2 * max(depths), tuple(n for _ in depths), len(depths) == 1\n', 1)),
         ('the tensor memory allocated again by a trip',
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '    tmem = trip.tmem\n',
-             '    tmem = b.tmem_alloc(256, arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '    padded = M < TCGEN05_ROWS\n    tmem = trip.tmem\n',
+             '    padded = M < TCGEN05_ROWS\n    tmem = b.tmem_alloc(256, arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
         ('a D stage a tcgen05 step',
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '    if trip.dstage is None:\n',
              '    if True:\n', 1)),
@@ -4817,7 +4821,7 @@ GROUPS = {
          sub(Path('src/tensorforge/generators/element_group.py'), '                       if s.terms is not None)\n                 + ring_volume(section))\n',
              '                       if s.terms is not None))\n', 1)),
         ('B whole tried before its stream',
-         sub(Path('src/tensorforge/generators/element_group.py'), '            tilings.append(lower(section, context, split=True,\n                                 streamed=True))\n',
+         sub(Path('src/tensorforge/generators/element_group.py'), '            tilings.append(lower(section, context, split=True,\n                                 streamed=True, prepared=asked))\n',
              '', 1)),
         ('a streamed stage staged whole besides',
          sub(Path('src/tensorforge/generators/element_group.py'), '        if self.streamed:\n            return 0\n',
@@ -4838,8 +4842,8 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            at = (len(pieces) % RING_SLOTS) * slot\n',
              '            at = 0\n', 1)),
         ("wgmma's A at the product's first rows a chunk",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            k_lo = product.depth[0] + piece.k0\n',
-             '            k_lo = product.depth[0]\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            terms = _terms(stage)\n            k_lo = product.depth[0] + piece.k0\n',
+             '            terms = _terms(stage)\n            k_lo = product.depth[0]\n', 1)),
         ("tcgen05's A at the product's first columns a chunk",
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n',
              '                          a_column=(upper_at, lower_at)[ia] + kt)\n', 1)),
@@ -5511,8 +5515,8 @@ GROUPS = {
          sub(ME_GROUP, '    found = [(-reads[id(b.tensor)], n, b)\n',
              '    found = [(reads[id(b.tensor)], n, b)\n', 1)),
         ('the section lowered without the plan\'s halves',
-         sub(GEN, '          halves=element_group.halves(planned))\n',
-             '          halves=0)\n', 1)),
+         sub(GEN, '          halves=element_group.halves(planned),\n',
+             '          halves=0,\n', 1)),
         # The layout's switch for them (`HALVES`), off by default.
         ('A\'s halves on by default',
          sub(ME_GROUP, 'HALVES = False\n', 'HALVES = True\n', 1)),
@@ -6036,6 +6040,101 @@ GROUPS = {
         ('a register budget where the target moves none',
          sub(ENGINES, "    if env.family != 'cuda' or target is None or not getattr(\n",
              "    if False and not getattr(\n", 1)),
+    ]),
+    # The asynchronous engines' B prepared at generation and streamed
+    # through the operator ring (`Options.matrix_ring` `prepared`,
+    # `multi_element._OperatorRing`): the producer's waits, the consumers'
+    # releases, the bytes, the table's numbers and layout, the trip's head.
+    'opring': ('tests/test_operator_ring.py::test_every_element_of_two_trips_on_the_oracle '
+               'tests/test_operator_ring.py::test_every_element_with_own_barriers_on_the_oracle '
+               'tests/test_operator_ring.py::test_a_slot_is_read_only_where_its_chunk_landed '
+               'tests/test_operator_ring.py::test_the_ring_over_several_rounds_of_trips_on_the_oracle '
+               'tests/test_operator_ring.py::test_the_table_holds_what_the_converting_ring_puts '
+               'tests/test_operator_ring.py::test_the_table_is_zero_outside_the_windows '
+               'tests/test_operator_ring.py::test_the_oracle_refuses_a_copy_past_a_table '
+               'tests/test_operator_ring.py::test_a_resident_table_is_each_stage_in_its_canonical_layout '
+               'tests/test_operator_ring.py::test_the_kernel_copies_b_and_converts_none_of_it '
+               'tests/test_operator_ring.py::test_the_commit_onto_a_rings_slot_is_its_empty_side', [
+        ('the producer copying into a slot it did not wait for',
+         sub(ME_SECTION, "        b.ring_wait(self.ring, 'empty', slot, b.op('sub', INDEX, 1, parity,\n"
+                 "                                                   hint='free'),\n"
+                 "                    writes=[self.storage])\n", '', 1)),
+        ("tcgen05's products never giving their slot back",
+         sub(ME_SECTION, "            b.commit_group('tcgen05', object=self.ring, issue=issue,\n"
+                 "                           slot=slot)\n", '', 1)),
+        # measync's mutations of the converting ring's issue, on the
+        # prepared ring's own copies of its lines.
+        ("the prepared ring's A lower half at the upper's columns",
+         sub(ME_SECTION, '            upper_at = columns[step.products.index(piece.product)]\n'
+                         '            lower_at = upper_at + stage.depth\n',
+             '            upper_at = columns[step.products.index(piece.product)]\n'
+             '            lower_at = upper_at\n', 1)),
+        ('D written over by every tcgen05 of the prepared ring',
+         sub(ME_SECTION, '                              enable_input_d=0 if first else 1,\n'
+                         '                              a_column=(upper_at, lower_at)[ia]\n',
+             '                              enable_input_d=0,\n'
+             '                              a_column=(upper_at, lower_at)[ia]\n', 1)),
+        ("the prepared ring's products committed by nobody",
+         sub(ME_SECTION, '            continue\n'
+                         "        b.commit_group('tcgen05', object=cursor, issue=issue)\n"
+                         "        b.matrix_wait('tcgen05', object=cursor, reads=reads, tmem=[tmem])\n",
+             '            continue\n'
+             "        b.matrix_wait('tcgen05', object=cursor, reads=reads, tmem=[tmem])\n", 1)),
+        ('D written over by every wgmma of the prepared ring',
+         sub(ME_SECTION, '                for ia, ib in _terms(stage):\n'
+                         '                    b.wgmma(n, halves[ia], bs[ib], accs,\n'
+                         '                            scale_d=0 if first else 1, layouts=layouts)\n',
+             '                for ia, ib in _terms(stage):\n'
+             '                    b.wgmma(n, halves[ia], bs[ib], accs,\n'
+             '                            scale_d=0, layouts=layouts)\n', 1)),
+        ("wgmma's A at the product's first rows of a prepared chunk",
+         sub(ME_SECTION, '            source = trip.buffers[id(product.second.tensor)]\n'
+                         '            k_lo = product.depth[0] + piece.k0\n',
+             '            source = trip.buffers[id(product.second.tensor)]\n'
+             '            k_lo = product.depth[0]\n', 1)),
+        ("a chunk's bytes announced short",
+         sub(ME_SECTION, '                      tx=self.volumes[j] * Datatype.F32.size(),\n',
+             '                      tx=(self.volumes[j] - 4) * Datatype.F32.size(),\n', 1)),
+        ("the table's halves swapped",
+         sub(ME_GROUP, '                laid[slot] = upper[k * stage.width + n]\n'
+                       '                laid[rows * stage.width + slot] = lower[k * stage.width + n]\n',
+             '                laid[slot] = lower[k * stage.width + n]\n'
+             '                laid[rows * stage.width + slot] = upper[k * stage.width + n]\n', 1)),
+        ("the table's core matrices along K packed",
+         sub(ME_GROUP, '                slot = (n // 8) * rows * 8 + (k // 4) * 32 + (n % 8) * 4 + k % 4\n',
+             '                slot = (n // 8) * rows * 8 + (k // 4) * 4 + (n % 8) * rows + k % 4\n', 1)),
+        ("the table's numbers past the window's contraction",
+         sub(ME_GROUP, '            if col >= d1:\n                continue\n', '', 1)),
+        ("wgmma's slot given back ahead of the wait for its products",
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, 1, accs)\n'
+                 '            ring.release(trip, i - 1, base)\n',
+             '            ring.release(trip, i - 1, base)\n'
+             '            flight = _wgmma_retire(b, flight, 1, accs)\n', 1)),
+        ("wgmma's slot given back by its first lane alone",
+         sub(ME_SECTION, '        b.barrier(Participants.WAVE)\n'
+                 "        b.ring_arrive(self.ring, 'empty', slot,\n",
+             "        b.ring_arrive(self.ring, 'empty', slot,\n", 1)),
+        ("the trip's head filling every slot",
+         sub(ME_SECTION, '            for j in range(min(self.slots - 1, len(self.chunks))):\n',
+             '            for j in range(min(self.slots, len(self.chunks))):\n', 1)),
+        ("the trip's first chunks never filled",
+         sub(ME_SECTION, '        for ring in trip.rings.values():\n            ring.head(trip)\n', '', 1)),
+        ("a product's A written over its products in flight",
+         sub(ME_SECTION, "        turns = not apart and not last and any(\n"
+                 "            k0 == 0 for _, k0, _ in ring.chunks[i + 1])\n",
+             '        turns = False\n', 1)),
+        ("the rounds of a trip counted from the block's first",
+         sub(ME_SECTION, "        return _index(b, 'mul', _index(b, 'add', _index(\n"
+                 "            b, 'mul', trips, self.passes, 'g'), pass_, 'g'), count, 'g')\n",
+             "        return _index(b, 'mul', pass_, count, 'g')\n", 1)),
+        ('a resident stage read before its copy landed',
+         sub(ME_SECTION, '                    builder.wait(builder.copy_bulk(\n', '                    (builder.copy_bulk(\n', 1)),
+        ('the oracle landing no product a ring commit bound',
+         sub(ORACLE, "            self._tc_land(f'mbar:{key[0]}:{key[1]}')\n            return\n",
+             '            return\n', 1)),
+        ('the oracle taking a table copy past its end',
+         sub(ORACLE, "    if isinstance(src, list) and not (0 <= at and at + count <= len(src)):\n",
+             '    if False:\n', 1)),
     ]),
 }
 

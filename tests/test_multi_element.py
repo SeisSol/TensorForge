@@ -2896,6 +2896,24 @@ def _known_zeros(descrs):
     return out
 
 
+def _normwise(scale=1e-5):
+    """The GPU cases' tolerance where the operators are their description's
+    numbers (`_described`), as `harness.runner.run_case` takes a callable
+    one: each element's cells within `scale` of its largest.  F32 rounds a
+    product's terms at the element's magnitude, and the real operators' sums
+    cancel down to cells far below it -- an elementwise tolerance holds
+    those to their own size, which the device's sums and NumPy's double do
+    not share (the o6 volume on sm_120: every element within 2.7e-6 of its
+    largest cell, and a cell near zero off by a third of itself); a wrong
+    number is wrong by the element's size."""
+    import numpy as np
+
+    def tolerance(want):
+        top = np.abs(want).reshape(want.shape[0], -1).max(axis=1)
+        return scale, (scale * top).reshape((-1,) + (1,) * (want.ndim - 1))
+    return tolerance
+
+
 def _stored_only(descrs):
     """The harness's fill of each element's operand stored sparse, zero at
     the cells it does not store: the harness hands the kernel the stored
@@ -3033,8 +3051,11 @@ def test_a_in_halves_gives_d_bit_for_bit_on_the_gpu(order, target,
 
 def _described(descrs):
     """The harness's fill of each operator that carries its numbers, those
-    numbers: the lanes form takes them as literals, and its operators'
-    memory is never read."""
+    numbers: the lanes form takes them as literals, and the asynchronous
+    engines' prepared B its TF32 halves (`Options.matrix_ring` `prepared`)
+    -- neither reads the operators' memory, so the reference has to
+    multiply the description's matrix, not the harness's random one
+    (`_known_zeros`)."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     out = {}

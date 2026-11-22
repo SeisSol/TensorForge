@@ -210,6 +210,40 @@ def parse_matrix_engine(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_ring` takes.
+MATRIX_RING = ('convert', 'prepared')
+
+
+def parse_matrix_ring(text: str) -> str:
+  """`convert` or `prepared` (`Options.matrix_ring`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_RING:
+    raise ValueError(f'expected one of {MATRIX_RING}, got {text!r}')
+  return value
+
+
+#: The slots `Options.matrix_ring_slots` takes.
+MATRIX_RING_SLOTS = tuple(range(2, 9))
+
+
+def parse_matrix_ring_slots(text: str) -> int:
+  """2 to 8 (`Options.matrix_ring_slots`)."""
+  value = int(str(text).strip())
+  if value not in MATRIX_RING_SLOTS:
+    raise ValueError(f'matrix_ring_slots is one of {MATRIX_RING_SLOTS}, '
+                     f'not {value}')
+  return value
+
+
+def parse_matrix_ring_rows(text: str) -> int:
+  """A positive multiple of 8 (`Options.matrix_ring_rows`)."""
+  value = int(str(text).strip())
+  if value <= 0 or value % 8:
+    raise ValueError(f'matrix_ring_rows is a positive multiple of 8, not '
+                     f'{value}')
+  return value
+
+
 #: What `Options.carry_element_index` takes.
 CARRY_ENTRY = ('auto', 'always', 'never')
 
@@ -2604,6 +2638,45 @@ declare('wgmma_pending',
             'before.  A search parameter: on a GH200 the wait of each step is '
             'about 5 % of the o6 volume\'s time, and each group in flight '
             'holds its A, eight registers a thread.')
+
+declare('matrix_ring',
+        default='convert',
+        env='TF_MATRIX_RING',
+        parse=parse_matrix_ring,
+        doc='Where the asynchronous engines\' operator B comes from in the '
+            'multi-element layout (`matrix_engine` `auto`, `generators.'
+            'element_group`).  `convert`, the default: the element warps '
+            'read the operator, split it into its TF32 halves and store them '
+            'in the canonical layout the descriptors read -- once a block '
+            'where B fits, a chunk at a time through a ring of two slots on '
+            'every trip where it does not.  `prepared`: the halves are '
+            'prepared at generation from the description\'s numbers, in the '
+            'order and layout the engine reads them, as a table of the '
+            'generated file (as `mma_operator_copies` makes its copies, the '
+            'operator\'s pointer not read for it), and copied by bulk copies '
+            '-- once a block, or into a ring of `matrix_ring_slots` slots of '
+            '`matrix_ring_rows` rows of K that the block\'s first thread fills '
+            'ahead of the products, the slots handed over on mbarriers.  An '
+            'operator without numbers keeps `convert`, and the kernel\'s '
+            'comment says why.')
+
+declare('matrix_ring_slots',
+        default=4,
+        env='TF_MATRIX_RING_SLOTS',
+        parse=parse_matrix_ring_slots,
+        doc='The slots of the prepared operator ring (`matrix_ring` '
+            '`prepared`): the chunks of B in flight ahead of the products.  '
+            'Four of `matrix_ring_rows`\' sixteen rows take the room of the '
+            'converting ring\'s two of thirty-two, so that the group keeps '
+            'its size.')
+
+declare('matrix_ring_rows',
+        default=16,
+        env='TF_MATRIX_RING_ROWS',
+        parse=parse_matrix_ring_rows,
+        doc='The rows of K a piece of the prepared operator ring holds of a '
+            'product (`matrix_ring` `prepared`), both halves: a slot is a '
+            'piece, `rows` x N x 2 floats.')
 
 declare('mma_prefetch',
         default=None,

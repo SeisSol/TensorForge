@@ -66,6 +66,35 @@ def split_tf32(flat, planar: int = 0) -> np.ndarray:
     return out
 
 
+def tf32_halves(flat, ties: str = 'even'):
+    """`(upper, lower)`: each scalar's two TF32 halves as ``splitFloatTF32``
+    in ``tensorforge_device/cuda.h`` makes them on the device, bit for bit --
+    the upper half rounded to ten mantissa bits, ties to even
+    (``cvt.rn.tf32.f32``, sm_90 on) or away from zero (``ties='away'``,
+    ``cvt.rna``, before), and the lower half the exact remainder, unrounded:
+    the instruction reads its upper nineteen bits.
+
+    Not `split_tf32`'s pair, which rounds the lower half too: an operand
+    prepared here is read where the kernel would otherwise split it at every
+    read (the asynchronous engines' operator ring), and with the same halves
+    the products are the same numbers.  Both as ``float32`` arrays, a TF32
+    value being a float with its low thirteen mantissa bits zero.  A value
+    that is no finite number keeps its bits, as the conversion does."""
+    x = np.ascontiguousarray(flat, dtype=np.float32)
+    u = x.view(np.uint32).astype(np.uint64)
+    finite = (u & 0x7F800000) != 0x7F800000
+    if ties == 'even':
+        rounded = (u + 0xFFF + ((u >> 13) & 1)) & 0xFFFFE000
+    elif ties == 'away':
+        rounded = (u + 0x1000) & 0xFFFFE000
+    else:
+        raise ValueError(f'ties is even or away, not {ties!r}')
+    upper = np.where(finite, rounded, u).astype(np.uint32).view(np.float32)
+    with np.errstate(invalid='ignore', over='ignore'):
+        lower = np.where(finite, x - upper, np.float32(0)).astype(np.float32)
+    return upper, lower
+
+
 #: Scalars one value occupies when it is stored as the three BF16 terms an
 #: emulated F32 product multiplies (`split.terms`: 8 significand bits each
 #: against F32's 24).
