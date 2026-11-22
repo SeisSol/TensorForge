@@ -235,6 +235,18 @@ def parse_matrix_ring_slots(text: str) -> int:
   return value
 
 
+#: What `Options.matrix_star` takes.
+MATRIX_STAR = ('buffer', 'halves', 'engine')
+
+
+def parse_matrix_star(text: str) -> str:
+  """`buffer`, `halves` or `engine` (`Options.matrix_star`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_STAR:
+    raise ValueError(f'expected one of {MATRIX_STAR}, got {text!r}')
+  return value
+
+
 def parse_matrix_ring_rows(text: str) -> int:
   """A positive multiple of 8 (`Options.matrix_ring_rows`)."""
   value = int(str(text).strip())
@@ -2669,6 +2681,26 @@ declare('matrix_ring_slots',
             'Four of `matrix_ring_rows`\' sixteen rows take the room of the '
             'converting ring\'s two of thirty-two, so that the group keeps '
             'its size.')
+
+declare('matrix_star',
+        default='buffer',
+        env='TF_MATRIX_STAR',
+        parse=parse_matrix_star,
+        doc='Where the star step of the multi-element layout puts A for the '
+            'asynchronous engines (`matrix_engine` `auto`): the intermediates '
+            'a run of `mix` steps writes and an operator step reads as A.  '
+            '`buffer`, the default: the values in shared memory, which wgmma '
+            'loads by ldmatrix and tcgen05 a row a thread, both splitting '
+            'them into their TF32 halves at every read.  `halves`: both '
+            'halves, split once by the star step (`element_group.Buffer.'
+            'halves`), read without a split -- where the group has the room, '
+            'buffer by buffer.  `engine`: the star step folded into the '
+            'operator step, K block by K block of every product, the halves '
+            'written straight where the engine reads A -- tcgen05\'s tensor '
+            'memory, wgmma\'s shared memory in the canonical layout its '
+            'descriptors read -- through a ring of slots, so that A is never '
+            'in shared memory as values (`element_group.fuse_refusal` says '
+            'where a section cannot, and it takes `halves` there).')
 
 declare('matrix_ring_rows',
         default=16,

@@ -362,6 +362,10 @@ class Buffer:
     cols: Range
     stride: int = 0
     halves: bool = False
+    #: An intermediate the star step folded into its reader writes where
+    #: the engine reads A, never into shared memory as values
+    #: (`GroupSection.star`): no room of the group's.
+    held: bool = False
 
     @property
     def height(self) -> int:
@@ -381,7 +385,10 @@ class Buffer:
     @property
     def room(self) -> int:
         """What an element takes of the group's buffer: its box, and as
-        much again for the lower halves where the buffer holds them."""
+        much again for the lower halves where the buffer holds them --
+        nothing where the buffer is held by the engine (`held`)."""
+        if self.held:
+            return 0
         return self.per_element * (2 if self.halves else 1)
 
     def half_offset(self, elements: int) -> int:
@@ -540,6 +547,11 @@ class GroupSection:
     #: stage streams prepared.
     ring_slots: int = 0
     ring_rows: int = 0
+    #: `engine` where the star step is folded into the asynchronous steps
+    #: that read its intermediates as A (`Options.matrix_star`, `fuse`):
+    #: those steps compute A themselves, a block of K of every product at a
+    #: time, into the engine's operand memory (`Buffer.held`).
+    star: str = ''
 
     @property
     def chained(self) -> bool:
@@ -1314,7 +1326,7 @@ def _pitched(section: GroupSection) -> GroupSection:
     need: Dict[int, int] = {}
     unit = 16 // section.dtype.size()
     for step in section.steps:
-        if step.lowering == 'mix':
+        if step.lowering in ('mix', 'fused'):
             buffer = section.buffer(step.products[0].first.tensor)
             need[id(buffer.tensor)] = max(
                 need.get(id(buffer.tensor), buffer.height),
@@ -1346,11 +1358,18 @@ def _pitched(section: GroupSection) -> GroupSection:
         intermediates=tuple(map(pitched, section.intermediates)))
 
 
+#: The lowerings that read A in TF32 halves where the star step writes
+#: them (`halvable`): mma_sync's tiling and wgmma by ldmatrix, tcgen05's
+#: store of A into tensor memory a row a thread.
+HALF_READERS = ('mma_sync',) + ('wgmma', 'tcgen05')
+
+
 def halvable(section: GroupSection) -> List[Buffer]:
     """The buffers the 3xTF32 tiling can read A from in TF32 halves, as the
     step that writes them splits it (`Buffer.halves`): F32 intermediates
-    that only `mix` steps write and only `mma_sync` steps read, as A, by
-    ldmatrix (pitched, `_pitched`).  An input keeps the split at its use:
+    that only `mix` steps write and only matrix steps read, as A
+    (`HALF_READERS`: by ldmatrix, or a row a thread into tcgen05's tensor
+    memory; pitched, `_pitched`).  An input keeps the split at its use:
     its copies cannot split.  So do F64, the FMA forms and the lanes form,
     which read no halves.  The buffers whose readers keep the most tiles of
     B first: a reader reads A once an M tile and k-block it keeps a tile
@@ -1364,7 +1383,7 @@ def halvable(section: GroupSection) -> List[Buffer]:
                 t = sub.tensor
                 if not t.is_tmp:
                     continue
-                if (step.lowering != 'mma_sync' or sub is not p.second
+                if (step.lowering not in HALF_READERS or sub is not p.second
                         or p.first.tensor is t):
                     reads[id(t)] = -1
                 elif reads.get(id(t), 0) >= 0:
@@ -1392,6 +1411,44 @@ def _halved(section: GroupSection, count: int) -> GroupSection:
     return dataclasses.replace(section, intermediates=tuple(
         dataclasses.replace(b, halves=True) if id(b.tensor) in chosen else b
         for b in section.intermediates))
+
+
+def _halves_order(lowerings: Sequence[GroupSection]) -> List[GroupSection]:
+    """`fill`'s lowerings again with A in TF32 halves (`_halved`), in its
+    order of preference: the inputs' second stage first, and within each
+    stage, a run of lowerings at a time, as many of A's buffers in halves as
+    the run's sections hold first, each count over the run in its order --
+    a section whose star step is folded (`fuse`) holds A in no buffer and
+    keeps its place between the runs.  So where the fold is refused for one
+    of B's tilings (`fuse_refusal`: B streamed through the converting
+    ring), that tiling takes the halves in its place, behind the folded ones
+    ahead of it and ahead of those behind it.  On the asynchronous engines
+    a run's tilings of B in halves come before those of B whole, whatever
+    the count: B whole is B in TF32 there (`multi_element._terms`), and A's
+    halves spare work, not precision."""
+    out: List[GroupSection] = []
+    for doubled in sorted({t.doubled for t in lowerings}, reverse=True):
+        run: List[GroupSection] = []
+
+        def flush():
+            parts = ([[t for t in run if split(t)],
+                      [t for t in run if not split(t)]]
+                     if run and asynchronous(run[0]) else [list(run)])
+            for part in parts:
+                most = max((len(halvable(t)) for t in part), default=0)
+                out.extend(_halved(t, n) for n in range(most, -1, -1)
+                           for t in part)
+            run.clear()
+        for t in lowerings:
+            if t.doubled != doubled:
+                continue
+            if t.star:
+                flush()
+                out.append(t)
+            else:
+                run.append(t)
+        flush()
+    return out
 
 
 def matrix_enabled(context) -> bool:
@@ -1507,7 +1564,7 @@ def lower(section: GroupSection, context, matrix: bool = True,
           engine: Optional[str] = None, streamed: bool = False,
           double: bool = True, ring: int = 0,
           registers: int = 0, halves: int = 0,
-          prepared: bool = False) -> GroupSection:
+          prepared: bool = False, star: str = '') -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
@@ -1524,7 +1581,8 @@ def lower(section: GroupSection, context, matrix: bool = True,
     `prepared`: an asynchronous step's B halves prepared at generation
     where its operators carry their numbers (`Stage.prepared`), streamed
     through the prepared ring of the options' slots and rows where
-    `streamed` asks.
+    `streamed` asks.  `star` `engine`: the star step folded into each
+    asynchronous step that can take it (`fuse`).
     The matrix tiling is NVIDIA's: elsewhere every step takes an FMA form,
     as below sm_80."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
@@ -1546,6 +1604,8 @@ def lower(section: GroupSection, context, matrix: bool = True,
                  if _mixes(s, section) else s for s in steps]
     staged = _staged(dataclasses.replace(section, steps=tuple(steps)), sm,
                      split, sparse, streamed=streamed, prepared=prepared)
+    if star == 'engine':
+        staged = fuse(staged)
     if any(st.prepared and st.streamed for st in staged.stages):
         options = context.get_user_options()
         staged = dataclasses.replace(
@@ -1739,6 +1799,167 @@ def streamed(section: GroupSection) -> bool:
     return any(st.streamed for st in section.stages)
 
 
+#: The rows of K a block of the folded star step holds of every product
+#: (`GroupSection.star`): one step of the engines' K -- what a slot of A's
+#: ring holds, and a chunk of B's prepared ring.
+STAR_ROWS = 8
+
+#: The slots of A's ring of the folded star step, by engine: tcgen05's in
+#: tensor memory, a block of K of every product each, both halves -- the
+#: star step a few blocks ahead of the products; wgmma's in shared memory,
+#: a warpgroup's tile of rows of a block each, the next block written while
+#: the engine multiplies this one.
+STAR_SLOTS = {'tcgen05': 4, 'wgmma': 2}
+
+
+def star_mixes(section: GroupSection, step: Step) -> Optional[List[Step]]:
+    """The star steps whose intermediates the products of `step` read as A,
+    a step a product, in the products' order -- or None where some
+    product's A is no intermediate one `mix` step alone writes."""
+    out = []
+    for p in step.products:
+        t = p.second.tensor
+        if not t.is_tmp:
+            return None
+        writers = [s for s in section.steps if s.dest is t]
+        if len(writers) != 1 or writers[0].lowering not in ('mix', 'fused'):
+            return None
+        out.append(writers[0])
+    return out
+
+
+def fuse_refusal(section: GroupSection, step: Step) -> Optional[str]:
+    """Why the star step cannot be folded into `step` (`fuse`), or None:
+    an asynchronous step whose products read as A the intermediates of one
+    run of star steps -- one group operand over one window, each
+    intermediate read by this step alone, as A -- over one contraction, the
+    products' columns their star steps' own; B resident or streamed
+    prepared (the converting ring's chunks are a product's, and the folded
+    star walks K a block of every product at a time); on tcgen05, the
+    tensor memory for D and A's ring."""
+    if step.lowering not in ASYNC_LOWERINGS:
+        return f'{step.lowering} takes no folded star step'
+    mixes = star_mixes(section, step)
+    if mixes is None:
+        return (f'an A of {step.dest.alias} is no intermediate a star step '
+                f'alone writes')
+    for p in step.products:
+        t = p.second.tensor
+        if any(sub.tensor is t for other in section.steps
+               for q in other.products for sub in q.operands
+               if not (other is step and q is p and sub is p.second)):
+            return f'{t.alias} is read besides as the A of {step.dest.alias}'
+    if len({(id(m.products[0].first.tensor), m.products[0].rows,
+             m.products[0].depth) for m in mixes}) != 1:
+        return 'the star steps read different group operands or windows'
+    if len({p.depth for p in step.products}) != 1:
+        return f'the contractions of {step.dest.alias}\'s products differ'
+    for p, mix in zip(step.products, mixes):
+        m = mix.products[0]
+        if not (m.rows[0] <= p.depth[0] and p.depth[1] <= m.rows[1]
+                and p.cols == m.cols):
+            return (f'{p.second.tensor.alias} is read past what its star '
+                    f'step writes')
+    stages = _step_stages(section, step)
+    if not all(st.split for st in stages):
+        return ('B is read whole, in TF32, where its halves leave the group '
+                'no room: the folded star takes B\'s halves')
+    if any(st.streamed and not st.prepared for st in stages):
+        return ('B streams through the converting ring, a product\'s '
+                'chunks at a time, and the folded star walks K a block of '
+                'every product at a time: it needs B resident or prepared '
+                '(matrix_ring=prepared)')
+    if step.lowering == 'tcgen05':
+        _, n_, _ = matrix_shape('tcgen05', 100)
+        n = _round(step.rows[1] - step.rows[0], n_)
+        columns = n + STAR_SLOTS['tcgen05'] * 2 * STAR_ROWS * len(stages)
+        if columns > 512:
+            return (f'D and A\'s ring take {columns} columns of tensor '
+                    f'memory, past its 512')
+    return None
+
+
+def fuse(section: GroupSection) -> GroupSection:
+    """The section with its star steps folded into the asynchronous steps
+    that can take them (`fuse_refusal`): those star steps lowered `fused`
+    -- their work the operator step's -- and their intermediates held
+    (`Buffer.held`), `star` `engine`; unchanged where none can."""
+    folded: Set[int] = set()
+    held: Set[int] = set()
+    for step in section.steps:
+        if fuse_refusal(section, step) is not None:
+            continue
+        for mix in star_mixes(section, step):
+            folded.add(id(mix))
+            held.add(id(mix.dest))
+    if not folded:
+        return section
+    steps = tuple(dataclasses.replace(s, lowering='fused')
+                  if id(s) in folded else s for s in section.steps)
+    return dataclasses.replace(
+        section, steps=steps, star='engine',
+        intermediates=tuple(dataclasses.replace(b, held=True)
+                            if id(b.tensor) in held else b
+                            for b in section.intermediates))
+
+
+def folded(section: GroupSection, step: Step) -> bool:
+    """Whether `step` computes its A itself, the star step folded into it
+    (`GroupSection.star`)."""
+    return (section.star == 'engine' and step.lowering in ASYNC_LOWERINGS
+            and bool(star_mixes(section, step))
+            and all(m.lowering == 'fused' for m in star_mixes(section, step)))
+
+
+def star_volume(section: GroupSection, elements: int) -> int:
+    """Elements of shared memory the folded star's A takes in a group of
+    `elements`: wgmma's ring, `STAR_SLOTS` slots a warpgroup -- its tile of
+    64 rows of a block of every product, both halves; tcgen05's is in
+    tensor memory, and only its mbarriers take shared memory
+    (`shared_bytes`)."""
+    total = 0
+    for step in section.steps:
+        if step.lowering != 'wgmma' or not folded(section, step):
+            continue
+        groups = max(1, elements // WARPGROUP_WARPS)
+        total += (groups * STAR_SLOTS['wgmma'] * 64 * STAR_ROWS * 2
+                  * len(step.products))
+    return total
+
+
+def star_notes(section: GroupSection, context) -> List[str]:
+    """What the kernel's comment says of its star step where the options
+    ask for it folded (`Options.matrix_star` `engine`): which steps compute
+    their A themselves, where it goes, or why a step does not (and takes
+    the halves where they fit)."""
+    if star_asked(context) != 'engine':
+        return []
+    notes = []
+    for step in section.steps:
+        if step.lowering not in ASYNC_LOWERINGS:
+            continue
+        if folded(section, step):
+            where = ('tensor memory' if step.lowering == 'tcgen05'
+                     else 'shared memory, the canonical layout')
+            notes.append(f'the star step folded into {step.dest.alias}: A\'s '
+                         f'halves into {where}, a block of {STAR_ROWS} rows '
+                         f'of every product at a time through a ring of '
+                         f'{STAR_SLOTS[step.lowering]} slots')
+            continue
+        unfolded = dataclasses.replace(section, star='', steps=tuple(
+            dataclasses.replace(s, lowering='mix') if s.lowering == 'fused'
+            else s for s in section.steps))
+        why = fuse_refusal(unfolded, step)
+        if why is None:
+            # A step that takes the fold, the fill rule's choice: the fold
+            # does not leave the group room that the unfolded tiling does.
+            why = ('the fold does not fit the group the fill rule chose, '
+                   'which the unfolded tiling does')
+        notes.append(f'matrix_star=engine declined for {step.dest.alias}: '
+                     f'{why}; A in TF32 halves where they fit')
+    return notes
+
+
 def _step_stages(section: GroupSection, step: Step) -> List[Stage]:
     """The stages a matrix step reads, a product each, in its order."""
     return [section.stage(p.first.tensor, (p.rows, p.depth))
@@ -1779,6 +2000,13 @@ def ring_chunks(section: GroupSection, step: Step) -> Tuple[
     and then the lower ones' (`_Piece`).  A product's depth in pieces of
     the ring's rows (`GroupSection.ring_rows`), a piece a chunk."""
     stages = _step_stages(section, step)
+    if folded(section, step):
+        # The folded star's order: a block of K of every product a chunk,
+        # what a slot of A's ring holds too.
+        depth = max(st.depth for st in stages)
+        return tuple(tuple((p, k0, min(STAR_ROWS, st.depth - k0))
+                           for p, st in enumerate(stages) if k0 < st.depth)
+                     for k0 in range(0, depth, STAR_ROWS))
     rows = section.ring_rows or RING_CHUNK
     return tuple(((p, k0, min(rows, st.depth - k0)),)
                  for p, st in enumerate(stages)
@@ -1796,6 +2024,12 @@ def prepared(section: GroupSection) -> bool:
     """Whether a stage of the section is prepared at generation
     (`Stage.prepared`)."""
     return any(st.prepared for st in section.stages)
+
+
+def star_asked(context) -> str:
+    """Where the options ask the star step to put A for the asynchronous
+    engines (`Options.matrix_star`): `buffer`, `halves` or `engine`."""
+    return context.get_user_options().matrix_star
 
 
 def ring_asked(context) -> bool:
@@ -1927,6 +2161,12 @@ def shared_bytes(section: GroupSection, elements: int) -> int:
         per_element += (section.ring - 1) * sum(b.per_element
                                                 for b in section.inputs)
         operators += 2 * section.ring * 8 // size
+    # The folded star's A: wgmma's ring in shared memory; tcgen05's in
+    # tensor memory, a pair of mbarriers a slot here.
+    operators += star_volume(section, elements)
+    operators += sum(2 * STAR_SLOTS['tcgen05'] * 8 // size
+                     for s in section.steps
+                     if s.lowering == 'tcgen05' and folded(section, s))
     # tcgen05's D staged in shared memory for every element warp to write
     # (`compute.multi_element._tcgen05`): the widest step's rows of the
     # element, an odd number of floats apart.
@@ -2571,15 +2811,25 @@ def fill(section: GroupSection, context,
     # numbers: resident ones copied once, streamed ones through the
     # prepared ring in place of the converting one.
     asked = ring_asked(context)
-    tilings = [lower(section, context, split=True, prepared=asked)]
+    star = star_asked(context)
+    tilings = [lower(section, context, split=True, prepared=asked,
+                     star=star)]
     if not tiled(tilings[0]):
         tilings = []
     elif split(tilings[0]):
         if asynchronous(tilings[0]):
             # B's halves streamed through a ring ahead of B whole.
             tilings.append(lower(section, context, split=True,
-                                 streamed=True, prepared=asked))
-        tilings.append(lower(section, context))
+                                 streamed=True, prepared=asked, star=star))
+            # Where the star step folded, the same tilings without the fold
+            # behind them: B's halves before the fold, where only the
+            # unfolded ones leave the group room -- B whole is B in TF32
+            # on these engines (`multi_element._terms`), which the fold
+            # does not take (`fuse_refusal`).
+            tilings += [lower(section, context, split=True,
+                              streamed=streamed(t), prepared=asked)
+                        for t in list(tilings) if t.star]
+        tilings.append(lower(section, context, star=star))
     candidates = [(tilings, None)] if tilings else []
     if tilings and asynchronous(tilings[0]):
         held = [lower(section, context, split=True, engine='mma_sync')]
@@ -2593,23 +2843,21 @@ def fill(section: GroupSection, context,
         lowerings += [lower(section, context, matrix=tiled(t),
                             split=split(t), engine=engine,
                             streamed=streamed(t), double=False,
-                            prepared=prepared(t))
+                            prepared=prepared(t), star=t.star)
                       for t in lowerings if t.doubled]
         # Each tiling on mma_sync again with A in TF32 halves (`_halved`)
         # where the layout's switch takes them (`HALVES`), in as many of its
         # buffers as fit first -- the walk reads an A tile for every tile of
         # B it keeps an M group over, so a buffer's halves spare many more
         # splits than B's -- and at each count B's halves first; the second
-        # stage, where the options ask for it, before either.
-        if (HALVES and tiled(lowerings[0])
-                and not asynchronous(lowerings[0])):
-            most = len(halvable(lowerings[0]))
-            lowerings[:] = [
-                _halved(t, n)
-                for doubled in sorted({t.doubled for t in lowerings},
-                                      reverse=True)
-                for n in range(most, -1, -1)
-                for t in lowerings if t.doubled == doubled]
+        # stage, where the options ask for it, before either.  An
+        # asynchronous engine's where `Options.matrix_star` asks for them
+        # (`_halves_order`: a folded star keeps its place, and a tiling the
+        # fold was refused for takes the halves there).
+        if tiled(lowerings[0]) and (
+                star_asked(context) in ('halves', 'engine')
+                if asynchronous(lowerings[0]) else HALVES):
+            lowerings[:] = _halves_order(lowerings)
         # Ahead of all of them, the first through a producer's ring, the
         # deepest that fits first: the producer's trips run ahead of the
         # element warps' (`producer_refusal`).
@@ -2619,7 +2867,7 @@ def fill(section: GroupSection, context,
         rings = [lower(section, context, matrix=tiled(first),
                        split=split(first), engine=engine,
                        streamed=streamed(first), ring=slots, registers=keep,
-                       prepared=prepared(first))
+                       prepared=prepared(first), star=first.star)
                  for slots in PRODUCER_SLOTS]
         lowerings[:0] = [r for r in rings if r.ring]
     candidates = [lowerings for lowerings, _ in candidates]
@@ -2721,7 +2969,10 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'LANE_COLUMNS', 'LANE_FEATURES', 'LANE_LITERALS', 'LANE_RANGES',
            'LANE_REGISTERS', 'LANE_VALUES', 'LANE_WARPS', 'LOWERING', 'Lanes',
            'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
-           'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role', 'SHARED_RESERVE',
+           'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
+           'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
+           'star_mixes', 'star_notes', 'star_volume',
+           'SHARED_RESERVE',
            'SMALL_EXTENT', 'Stage', 'Step', 'TARGETS', 'TCGEN05_ROWS',
            'TILE_COSTS', 'TILE_LATENCY', 'TILE_REGISTERS', 'TILE_SLOTS',
            'TILE_SPLIT', 'TILE_UNIT', 'Terms', 'TileUnits', 'WARPGROUP_WARPS',
@@ -2734,7 +2985,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'matrix_shape', 'nonzero_terms', 'operator_nonzeros', 'plan',
            'PRODUCER_SLOTS', 'PRODUCER_WARPS', 'bulk_input', 'bulk_rows',
            'chunk_volume', 'prepared', 'prepared_table',
-           'producer_refusal', 'register_budgets', 'ring_asked',
+           'producer_refusal', 'register_budgets', 'ring_asked', 'star_asked',
            'ring_chunks', 'ring_notes', 'ring_volume',
            'second_stages', 'shared_bytes', 'SM_REGISTERS', 'split',
            'step_refusal', 'streamed', 'table_elements', 'tile_units',

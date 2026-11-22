@@ -265,9 +265,17 @@ def _tcgen05_columns(section, step):
     Apart is this decision, not columns that differ: a step of one product
     has its own columns either way, and with B streamed its pieces are the
     ring's chunks, each its own round."""
-    from tensorforge.generators.element_group import matrix_shape
+    from tensorforge.generators.element_group import (STAR_ROWS, STAR_SLOTS,
+                                                      folded, matrix_shape)
     _, n_, _ = matrix_shape('tcgen05', 100)
     n = -(-(step.rows[1] - step.rows[0]) // n_) * n_
+    if folded(section, step):
+        # D, then the folded star's ring of A (`_tcgen05_star`): a slot a
+        # block of K of every product, both halves.
+        slot = 2 * STAR_ROWS * len(step.products)
+        return (n + STAR_SLOTS['tcgen05'] * slot,
+                tuple(n + 2 * STAR_ROWS * p for p in range(len(step.products))),
+                False)
     depths = [section.stage(p.first.tensor, (p.rows, p.depth)).depth
               for p in step.products]
     streamed = any(section.stage(p.first.tensor, (p.rows, p.depth)).streamed
@@ -752,6 +760,9 @@ class _Trip:
         #: of its trips, once a ring asks for it (`_trip_count`).
         self.rings: Dict[int, object] = {}
         self.trips = None
+        #: The shared memory of wgmma's folded star step's ring of A, by the
+        #: step's `id` (`_wgmma_star`).
+        self.stars: Dict[int, object] = {}
         #: Whom the lowerings' barriers meet: the block, or the element
         #: warps' role where a producer fills the inputs (`_ring`).
         self.meet = Participants.BLOCK
@@ -1085,6 +1096,18 @@ def _mix(trip, steps) -> None:
                 with b.if_(b.op('lt', BOOL, g, blocks, hint='in'),
                            attrs=_lanes_active(blocks, rounds * sets)):
                     block(g)
+
+
+def _step_reads(section, step) -> list:
+    """What a step reads, as the barriers between the steps count it: its
+    operands -- and, where the star step is folded into it, what the star
+    step reads, which it reads now."""
+    from tensorforge.generators.element_group import folded, star_mixes
+    reads = list(step.reads())
+    if folded(section, step):
+        for mix in star_mixes(section, step):
+            reads += mix.reads()
+    return reads
 
 
 def _units(steps) -> list:
@@ -2031,7 +2054,7 @@ def _wgmma(trip, step) -> None:
     from tensorforge.backend.instructions.compute.primitives import nvidia
     from tensorforge.backend.pir.engines import FenceKind
     from tensorforge.generators.element_group import (WARPGROUP_WARPS,
-                                                      matrix_shape)
+                                                      folded, matrix_shape)
     b = trip.builder
     section = trip.section
     fp = trip.fp
@@ -2073,9 +2096,13 @@ def _wgmma(trip, step) -> None:
         accs = [b.declare(fp, hint='c', uniform=Uniformity.LANE)
                 for _ in range(n // 2)]
         ring = trip.rings.get(id(step))
-        pieces, copy = ([], None) if ring is not None else _pieces(trip,
-                                                                  step)
-        if ring is not None:
+        star = folded(section, step)
+        pieces, copy = (([], None) if ring is not None or star
+                        else _pieces(trip, step))
+        if star:
+            _wgmma_star(trip, step, ring, loop.induction, accs, layouts, n,
+                        b.op('mul', INDEX, tile, m_, hint='m'))
+        elif ring is not None:
             _wgmma_ring(trip, step, ring, loop.induction, accs, lm, lcol,
                         layouts, n)
         # The groups committed and not retired, oldest first: the A
@@ -2098,10 +2125,7 @@ def _wgmma(trip, step) -> None:
             for kt in range(0, piece.rows, k_):
                 at = _group_index(b, lm, width, group, cols[0],
                                   _index(b, 'add', lcol, k_lo + kt, 'k'))
-                a = list(b.matrix_load(source, at, count=4, type_=fp,
-                                       origins=A_ORIGINS, hint='a'))
-                split = nvidia.tfconvert(b, a)
-                halves = ([u for u, _ in split], [lo for _, lo in split])
+                halves = _wgmma_a(trip, group, source, at)
                 bs = piece.descriptors(b, kt, 'wgmma')
                 own = accs + halves[0] + halves[1]
                 b.fence(FenceKind.REGISTERS, engine='wgmma', registers=own)
@@ -2152,12 +2176,10 @@ def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
     into it.  Behind the last chunk, the wait for all of them, and its slot
     given back.  A later pass's first chunks are filled at its head, as the
     trip's head filled the first pass's."""
-    from tensorforge.backend.instructions.compute.primitives import nvidia
     from tensorforge.backend.pir.engines import FenceKind
     from tensorforge.generators.element_group import matrix_shape
     b = trip.builder
     section = trip.section
-    fp = trip.fp
     cols = step.cols
     width = cols[1] - cols[0]
     _, _, k_ = matrix_shape('wgmma', 90)
@@ -2175,10 +2197,7 @@ def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
             for kt in range(0, piece.rows, k_):
                 at = _group_index(b, lm, width, group, cols[0],
                                   _index(b, 'add', lcol, k_lo + kt, 'k'))
-                a = list(b.matrix_load(source, at, count=4, type_=fp,
-                                       origins=A_ORIGINS, hint='a'))
-                split = nvidia.tfconvert(b, a)
-                halves = ([u for u, _ in split], [lo for _, lo in split])
+                halves = _wgmma_a(trip, group, source, at)
                 bs = piece.descriptors(b, kt, 'wgmma')
                 b.fence(FenceKind.REGISTERS, engine='wgmma',
                         registers=accs + halves[0] + halves[1])
@@ -2196,6 +2215,416 @@ def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
         ring.ahead(trip, i, base)
     _wgmma_retire(b, flight, 0, accs)
     ring.release(trip, len(ring.chunks) - 1, base)
+
+
+def _wgmma_a(trip, buffer, source, at) -> tuple:
+    """A warp's A of a step of K for wgmma, as the instruction takes it from
+    registers -- its TF32 halves, the upper and the lower ones -- from the
+    group operand's buffer at the lane's row `at`, by ldmatrix
+    (`A_ORIGINS`): split here, or, where the star step wrote both halves
+    (`element_group.Buffer.halves`), the upper ones where the values would
+    be and the lower ones past the group's upper ones, each by an ldmatrix of
+    its own and converted by nothing."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    b = trip.builder
+    a = list(b.matrix_load(source, at, count=4, type_=trip.fp,
+                           origins=A_ORIGINS, hint='a'))
+    if buffer.halves:
+        lower = list(b.matrix_load(source, _index(
+            b, 'add', at, buffer.half_offset(trip.group.elements), 'a'),
+            count=4, type_=trip.fp, origins=A_ORIGINS, hint='a'))
+        return ([nvidia._as_tf32(b, u) for u in a],
+                [nvidia._as_tf32(b, lo) for lo in lower])
+    split = nvidia.tfconvert(b, a)
+    return [u for u, _ in split], [lo for _, lo in split]
+
+
+def _star_numbers(trip, step, element, column) -> list:
+    """The numbers a thread holds of the folded star step (`element_group.
+    GroupSection.star`): for each product of `step`, its star step's small
+    operand's column `column` of the thread's element `element` -- the
+    volume's 27, a star's column for each direction -- read once a trip
+    from the group's buffers."""
+    from tensorforge.generators.element_group import star_mixes
+    b, section = trip.builder, trip.section
+    numbers = []
+    for mix in star_mixes(section, step):
+        m = mix.products[0]
+        small = section.buffer(m.second.tensor)
+        source = trip.buffers[id(small.tensor)]
+        base = b.op('mul', INDEX, element, small.per_element, hint='b')
+        numbers.append([b.load(source, _index(b, 'add', base, _box_index(
+            b, q, column, (small.rows[0], small.cols[0]), small.pitch), 'a'),
+            type_=trip.fp, hint='s') for q in range(*m.depth)])
+    return numbers
+
+
+def _star_block(trip, step, numbers, element, k0, rows, live) -> list:
+    """A thread's row of A of every product of `step` over `rows` rows of K
+    from `k0` (the products' own, from their contraction's start): what
+    the folded star step computes, `sum_q G(e, k, q) S_p(q, c)` -- the
+    group operand `G` of the thread's element `element` read once for every
+    product, 16 bytes of a column at a time where its buffer's pitch and
+    the rows allow -- zero past each product's contraction and on a row
+    past the group (`live` false).  By product, `rows` values."""
+    from tensorforge.generators.element_group import star_mixes
+    b, section, fp = trip.builder, trip.section, trip.fp
+    mixes = star_mixes(section, step)
+    lead = mixes[0].products[0]
+    group = section.buffer(lead.first.tensor)
+    source = trip.buffers[id(group.tensor)]
+    base = b.op('mul', INDEX, element, group.per_element, hint='b')
+    start = step.products[0].depth[0]
+    end = [p.depth[1] for p in step.products]
+    vec = 16 // section.dtype.size()
+    vector = ScalarType(section.dtype, vec)
+    accs = [[None] * rows for _ in step.products]
+    for i, q in enumerate(range(*lead.depth)):
+        xs = []
+        for r0 in range(0, rows, vec):
+            k = start + k0 + r0
+            span = [k + v < group.rows[1] for v in range(vec)]
+            if not any(span):
+                xs += [None] * vec
+                continue
+            at = _index(b, 'add', base, _box_index(
+                b, k, q, (group.rows[0], group.cols[0]), group.pitch), 'a')
+            if (all(span) and group.pitch % vec == 0
+                    and (k - group.rows[0]) % vec == 0):
+                x = b.load(source, at, type_=vector, align=16, hint='x')
+                xs += [b.extract(x, v, hint='x') for v in range(vec)]
+                continue
+            xs += [b.load(source, _index(b, 'add', at, v, 'a'), type_=fp,
+                          hint='x') if span[v] else None
+                   for v in range(vec)]
+        for p in range(len(step.products)):
+            w = numbers[p][i]
+            for r in range(rows):
+                if xs[r] is None or start + k0 + r >= end[p]:
+                    continue
+                accs[p][r] = (b.op('mul', fp, w, xs[r], hint='y')
+                              if accs[p][r] is None else
+                              b.op('fma', fp, w, xs[r], accs[p][r], hint='y'))
+    zero = b.const(0.0, fp)
+    out = []
+    for p in range(len(step.products)):
+        values = []
+        for r in range(rows):
+            value = accs[p][r]
+            if value is None:
+                values.append(zero)
+                continue
+            if live is not None:
+                value = b.op('select', fp, live, value, zero, hint='y')
+            values.append(value)
+        out.append(values)
+    return out
+
+
+def _star_pieces(trip, step, ring, j, base, issue):
+    """The pieces of B a block `j` of K of the folded star's step reads
+    (`_Piece`): the prepared ring's chunk, waited for by the thread `issue`
+    picks (`_OperatorRing.take`); or each product's resident stage whole,
+    the block's steps of K at its rows."""
+    from tensorforge.generators.element_group import STAR_ROWS
+    if ring is not None:
+        return [(piece, 0) for piece in ring.take(trip, j, base, issue)]
+    section = trip.section
+    out = []
+    for p in step.products:
+        stage = section.stage(p.first.tensor, (p.rows, p.depth))
+        if j * STAR_ROWS >= stage.depth:
+            continue
+        out.append((_Piece(p, stage, 0, stage.depth,
+                           trip.operators[(id(stage.tensor), stage.window)],
+                           0), j * STAR_ROWS))
+    return out
+
+
+def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
+    """`_tcgen05`'s products with the star step folded in (`element_group.
+    GroupSection.star`): A computed here, a block of `STAR_ROWS` rows of K
+    of every product at a time, straight into tensor memory, and never in
+    shared memory as values.
+
+    The group's rows are tcgen05's 128 lanes, which the warps reach a
+    quarter each (`w % 4`): the element warps in bands of four, band `j %
+    bands` computing block `j` -- a thread its row, from its element's 27
+    star numbers, held a trip, and the staged group operand -- splitting
+    it into TF32 halves and storing them into the block's slot of A's ring
+    in tensor memory, behind D's columns (`_tcgen05_columns`).  The ring's
+    mbarriers hand the slots over: full counts the band's 128 threads,
+    behind the engine's fence; empty the products' commit.  The issuing
+    thread waits for a block's A and for its B -- the prepared ring's
+    chunk (`_OperatorRing`), or the resident stages -- issues the block's
+    products, commits them onto A's slot and B's, and fills B's ring
+    ahead; the bands run on into the next blocks, `STAR_SLOTS` ahead at
+    most.  Behind the last block the products are committed onto the
+    block's mbarrier, which every thread waits for, ahead of D."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import (STAR_ROWS, STAR_SLOTS,
+                                                      matrix_shape,
+                                                      ring_chunks)
+    b, section = trip.builder, trip.section
+    tmem = trip.tmem
+    _, _, k_ = matrix_shape('tcgen05', 100)
+    width = step.cols[1] - step.cols[0]
+    count = len(step.products)
+    slots = STAR_SLOTS['tcgen05']
+    stages = [section.stage(p.first.tensor, (p.rows, p.depth))
+              for p in step.products]
+    depth = max(st.depth for st in stages)
+    blocks = -(-depth // STAR_ROWS)
+    ring = trip.rings.get(id(step))
+    if ring is not None and len(ring_chunks(section, step)) != blocks:
+        raise InternalError(f'{step.dest.alias}: B\'s ring is not cut into the '
+                            f'folded star\'s blocks of K')
+    _, columns, _ = _tcgen05_columns(section, step)
+    slot_columns = 2 * STAR_ROWS * count
+    # A ring of the step's own, named after its place in the section as B's
+    # prepared ring is (`bk{n}`): a section of several folded steps sets up
+    # one each, which a shared name would declare twice in one scope.
+    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,
+                            full=128, empty=1,
+                            leader='threadIdx.x == 0 && threadIdx.y == 0',
+                            arena=GeneralLexicon.TOTAL_SHR_MEM)
+    if areas is None:
+        raise InternalError('a folded star in a body without an arena for '
+                            'its mbarriers')
+    bands = max(1, trip.group.elements // 4)
+    band = b.op('div', INDEX, trip.slot, 4, hint='band')
+    m = b.op('add', INDEX, b.op('mul', INDEX, b.op(
+        'rem', INDEX, trip.slot, 4, hint='q'), 32, hint='m'), trip.lane,
+        hint='m')
+    live = b.op('lt', BOOL, m, M, hint='in') if M < 128 else None
+    row = b.op('select', INDEX, live, m, 0, hint='m') if live is not None \
+        else m
+    element = b.op('div', INDEX, row, width, hint='e')
+    column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),
+                    step.cols[0], 'p')
+    inband = b.op('lt', BOOL, trip.slot, 4 * bands, hint='inband')
+    # Every thread's, the warps past the bands' a row's they never use:
+    # read where every block's branch sees them.
+    numbers = _star_numbers(trip, step, element, column)
+    # Block `j` takes slot `j % slots` of A's ring in every trip, so that
+    # its columns are numbers the products name; the slot's rounds are
+    # counted over the trips (`_trip_count`), `uses` a trip.
+    trips = _trip_count(trip)
+    every = b.const(True, BOOL)
+    base = ring.base(trip, 0) if ring is not None else None
+    start = True
+    for j in range(blocks):
+        s_ = j % slots
+        uses = -(-(blocks - s_) // slots)
+        parity = b.op('rem', INDEX, _index(b, 'add', _index(
+            b, 'mul', trips, uses, 'ta'), j // slots, 'ta'), 2, hint='tap')
+        slot = b.const(s_, INDEX)
+        at = columns[0] + s_ * slot_columns
+        mine = b.op('and', BOOL, inband, b.op('eq', BOOL, band, j % bands,
+                                              hint='mine'), hint='mine')
+        with b.if_(mine):
+            b.ring_wait(areas, 'empty', slot, b.op('sub', INDEX, 1, parity,
+                                                   hint='free'))
+            values = _star_block(trip, step, numbers, element, j * STAR_ROWS,
+                                 STAR_ROWS, live)
+            for p, xs in enumerate(values):
+                split = nvidia.tfconvert(b, xs)
+                b.tmem_st(tmem, at + 2 * STAR_ROWS * p,
+                          [_as_float(b, u) for u, _ in split])
+                b.tmem_st(tmem, at + 2 * STAR_ROWS * p + STAR_ROWS,
+                          [_as_float(b, lo) for _, lo in split])
+            b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
+            b.ring_arrive(areas, 'full', slot, every)
+        with b.if_(issue):
+            b.ring_wait(areas, 'full', slot, parity)
+            b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+        for piece, k0 in _star_pieces(trip, step, ring, j, base, issue):
+            p = step.products.index(piece.product)
+            rows = min(STAR_ROWS, piece.stage.depth - j * STAR_ROWS)
+            for kt in range(0, rows, k_):
+                bs = piece.descriptors(b, k0 + kt, 'tcgen05')
+                for ia, ib in _terms(piece.stage):
+                    b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
+                              enable_input_d=0 if start else 1,
+                              a_column=at + 2 * STAR_ROWS * p
+                              + STAR_ROWS * ia + kt)
+                    start = False
+        b.commit_group('tcgen05', object=areas, issue=issue, slot=slot)
+        if ring is not None:
+            ring.release(trip, j, base, issue)
+            ring.ahead(trip, j, base)
+    b.commit_group('tcgen05', object=cursor, issue=issue)
+    b.matrix_wait('tcgen05', object=cursor, tmem=[tmem])
+    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+
+
+def _wgmma_star(trip, step, ring, pass_, accs, layouts, n, top) -> None:
+    """`_wgmma`'s products of pass `pass_` with the star step folded in
+    (`element_group.GroupSection.star`): A computed here, a block of
+    `STAR_ROWS` rows of K of every product at a time, its TF32 halves
+    written into shared memory in the canonical K-major layout the
+    instruction reads A through a descriptor in -- no ldmatrix, no split in
+    the loop of K, and A never in shared memory as values.
+
+    Each warpgroup computes the rows of its own tile, two threads a row,
+    each four rows of K of a block (`top`: the tile's first row), into its
+    own ring of `STAR_SLOTS` slots: a block's slot is written once the
+    wait behind the block before retired the products that read it, the
+    stores fenced for the async proxy and met by the element warps' barrier
+    ahead of the block's products, whose B is the prepared ring's chunk
+    (`_OperatorRing`) or the resident stages.  One commit a block; the wait
+    that leaves this block in flight retires the one before, and with it
+    B's slot (`_OperatorRing.release`)."""
+    from tensorforge.backend.pir.engines import FenceKind, MatrixDescType
+    from tensorforge.generators.element_group import (STAR_ROWS, STAR_SLOTS,
+                                                      WARPGROUP_WARPS)
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    b, section = trip.builder, trip.section
+    width = step.cols[1] - step.cols[0]
+    count = len(step.products)
+    slots = STAR_SLOTS['wgmma']
+    stages = [section.stage(p.first.tensor, (p.rows, p.depth))
+              for p in step.products]
+    blocks = -(-max(st.depth for st in stages) // STAR_ROWS)
+    groups = max(1, trip.group.elements // WARPGROUP_WARPS)
+    M = trip.group.elements * width
+    # A warpgroup's slot: each product's upper halves, then its lower ones,
+    # 64 rows of a block each in the canonical layout (core matrices of
+    # eight rows of four of K, 128 bytes apart along K, `STAR_ROWS` x 32
+    # along the rows).
+    half = 64 * STAR_ROWS
+    slot_size = 2 * count * half
+    area = trip.stars.get(id(step))
+    if area is None:
+        area = trip.stars[id(step)] = b.alloc(
+            section.dtype, (groups * slots * slot_size,), MemSpace.SHARED,
+            arena=GeneralLexicon.TOTAL_SHR_MEM, hint='astar', place_align=32)
+    wg = b.op('div', INDEX, trip.slot, WARPGROUP_WARPS, hint='wg')
+    t = b.op('add', INDEX, b.op('mul', INDEX, b.op(
+        'rem', INDEX, trip.slot, WARPGROUP_WARPS, hint='w'), 32, hint='t'),
+        trip.lane, hint='t')
+    r = b.op('rem', INDEX, t, 64, hint='r')
+    h = b.op('div', INDEX, t, 64, hint='h')
+    m = b.op('add', INDEX, top, r, hint='m')
+    live = b.op('lt', BOOL, m, M, hint='in')
+    row = b.op('select', INDEX, live, m, 0, hint='m')
+    element = b.op('div', INDEX, row, width, hint='e')
+    column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),
+                    step.cols[0], 'p')
+    numbers = _star_numbers(trip, step, element, column)
+    # The thread's sixteen bytes of a core matrix's row: row `r` of the
+    # tile, the block's rows of K `4 h` on.
+    mine = b.op('add', INDEX, b.op('add', INDEX, b.op(
+        'mul', INDEX, b.op('div', INDEX, r, 8, hint='c'), STAR_ROWS * 8,
+        hint='c'), b.op('mul', INDEX, h, 32, hint='c'), hint='c'), b.op(
+        'mul', INDEX, b.op('rem', INDEX, r, 8, hint='c'), 4, hint='c'),
+        hint='c')
+    region = b.op('mul', INDEX, wg, slots * slot_size, hint='ar')
+    desc = MatrixDescType(Datatype.TF32, lbo=128, sbo=STAR_ROWS * 32,
+                          form='wgmma')
+    vector = ScalarType(section.dtype, 4)
+    base = ring.base(trip, pass_) if ring is not None else None
+    if ring is not None and ring.passes > 1:
+        ring.head(trip, base, when=b.op('gt', BOOL, pass_, 0, hint='later'))
+    flight, start = [], True
+    for j in range(blocks):
+        at = _index(b, 'add', region, (j % slots) * slot_size, 'as')
+        # Rows `4 h` to `4 h + 4` of the block, of every product.
+        values = _star_quad(trip, step, numbers, element, _index(
+            b, 'add', b.op('mul', INDEX, h, 4, hint='k'), j * STAR_ROWS, 'k'),
+            live)
+        for p, xs in enumerate(values):
+            split = nvidia.tfconvert(b, xs)
+            for part, picked in ((0, [_as_float(b, u) for u, _ in split]),
+                                 (1, [_as_float(b, lo) for _, lo in split])):
+                b.store(area, b.pack(vector, *picked, hint='y'), _index(
+                    b, 'add', _index(b, 'add', at, (2 * p + part) * half,
+                                     'as'), mine, 'as'), align=16)
+        b.fence(FenceKind.PROXY)
+        b.barrier(trip.meet)
+        pieces = _star_pieces(trip, step, ring, j, base, None)
+        reads = []
+        for piece, k0 in pieces:
+            p = step.products.index(piece.product)
+            rows = min(STAR_ROWS, piece.stage.depth - j * STAR_ROWS)
+            for kt in range(0, rows, 8):
+                bs = piece.descriptors(b, k0 + kt, 'wgmma')
+                upper = b.matrix_desc(area, _index(b, 'add', at, (2 * p)
+                                                   * half + kt * 8, 'ad'),
+                                      desc=desc, hint='a')
+                lower = b.matrix_desc(area, _index(b, 'add', at, (2 * p + 1)
+                                                   * half + kt * 8, 'ad'),
+                                      desc=desc, hint='a')
+                b.fence(FenceKind.REGISTERS, engine='wgmma', registers=accs)
+                for ia, ib in _terms(piece.stage):
+                    b.wgmma(n, [(upper, lower)[ia]], bs[ib], accs,
+                            scale_d=0 if start else 1, layouts=layouts)
+                    start = False
+                reads += bs + [upper, lower]
+        b.commit_group('wgmma')
+        flight.append(([], reads))
+        if len(flight) > 1:
+            flight = _wgmma_retire(b, flight, 1, accs)
+            if ring is not None:
+                ring.release(trip, j - 1, base)
+        if ring is not None:
+            ring.ahead(trip, j, base)
+    _wgmma_retire(b, flight, 0, accs)
+    if ring is not None:
+        ring.release(trip, blocks - 1, base)
+
+
+def _star_quad(trip, step, numbers, element, first, live) -> list:
+    """Four rows of K of every product from row `first` of the products'
+    contraction on, `first` a value on four rows: what a thread of wgmma's
+    folded star step computes of its row of A (`_wgmma_star`) -- the group
+    operand's four rows of a column one 16-byte read, from the group's
+    first row where they lie past what the star step writes, and zero
+    there -- as `_star_block` does for a block a number gives."""
+    from tensorforge.generators.element_group import star_mixes
+    b, section, fp = trip.builder, trip.section, trip.fp
+    mixes = star_mixes(section, step)
+    lead = mixes[0].products[0]
+    group = section.buffer(lead.first.tensor)
+    source = trip.buffers[id(group.tensor)]
+    base = b.op('mul', INDEX, element, group.per_element, hint='b')
+    start = step.products[0].depth[0]
+    if group.pitch % 4 or (start - group.rows[0]) % 4:
+        raise InternalError(f'{group.tensor.alias}: rows of K a folded star '
+                            f'step reads four at a time off four floats')
+    k = _index(b, 'add', first, start, 'k')
+    bound = [min(p.depth[1], group.rows[1]) for p in step.products]
+    inside = {e: [b.op('lt', BOOL, _index(b, 'add', k, v, 'k'), e,
+                       hint='in') for v in range(4)] for e in set(bound)}
+    # The read stays inside the group's rows: past them it reads its first.
+    read = b.op('select', INDEX, inside[max(bound)][0], k, group.rows[0],
+                hint='k')
+    vector = ScalarType(section.dtype, 4)
+    accs = [[None] * 4 for _ in step.products]
+    for i, q in enumerate(range(*lead.depth)):
+        at = _index(b, 'add', base, _box_index(
+            b, read, q, (group.rows[0], group.cols[0]), group.pitch), 'a')
+        x = b.load(source, at, type_=vector, align=16, hint='x')
+        xs = [b.extract(x, v, hint='x') for v in range(4)]
+        for p in range(len(step.products)):
+            w = numbers[p][i]
+            for v in range(4):
+                accs[p][v] = (b.op('mul', fp, w, xs[v], hint='y')
+                              if accs[p][v] is None else
+                              b.op('fma', fp, w, xs[v], accs[p][v], hint='y'))
+    zero = b.const(0.0, fp)
+    out = []
+    for p in range(len(step.products)):
+        values = []
+        for v in range(4):
+            keep = inside[bound[p]][v]
+            if live is not None:
+                keep = b.op('and', BOOL, keep, live, hint='in')
+            values.append(b.op('select', fp, keep, accs[p][v], zero,
+                               hint='y'))
+        out.append(values)
+    return out
 
 
 #: Columns a warp loads of tensor memory at once in the epilogue: D's row
@@ -2281,8 +2710,11 @@ def _tcgen05(trip, step) -> None:
              trip.lane, hint='m')
     live = b.op('lt', BOOL, m, M, hint='in') if padded else None
     row = b.op('select', INDEX, live, m, 0, hint='m') if padded else m
+    from tensorforge.generators.element_group import folded
     ring = trip.rings.get(id(step))
-    if ring is not None:
+    if folded(trip.section, step):
+        _tcgen05_star(trip, step, cursor, issue, n, M)
+    elif ring is not None:
         _tcgen05_ring(trip, step, ring, cursor, issue, n, M)
     else:
         _tcgen05_resident(trip, step, cursor, issue, n, M)
@@ -2514,21 +2946,33 @@ def _tcgen05_a(trip, product, stage, tmem, at, M) -> None:
     live = b.op('lt', BOOL, m, M, hint='in') if M < TCGEN05_ROWS else None
     row = b.op('select', INDEX, live, m, 0, hint='m') if live is not None \
         else m
+    lower = group.half_offset(trip.group.elements) if group.halves else None
     for kt in range(0, stage.depth, 8):
         mine = b.op('eq', BOOL, band, (kt // 8) % bands, hint='mine')
         with b.if_(mine):
-            values = []
+            values, lowers = [], []
             for x in range(kt, kt + 8):
                 if k_lo + x >= k_hi:
                     values.append(b.const(0.0, fp))
+                    lowers.append(b.const(0.0, fp))
                     continue
-                value = b.load(source, _group_index(
-                    b, row, width, group, product.cols[0], k_lo + x),
-                    type_=fp, hint='a')
-                if live is not None:
-                    value = b.op('select', fp, live, value, b.const(0.0, fp),
-                                 hint='a')
-                values.append(value)
+                at_ = _group_index(b, row, width, group, product.cols[0],
+                                   k_lo + x)
+                for out, offset in ((values, 0), (lowers, lower)):
+                    if offset is None:
+                        continue
+                    value = b.load(source, _index(b, 'add', at_, offset, 'a'),
+                                   type_=fp, hint='a')
+                    if live is not None:
+                        value = b.op('select', fp, live, value,
+                                     b.const(0.0, fp), hint='a')
+                    out.append(value)
+            if lower is not None:
+                # Both halves as the star step split them
+                # (`element_group.Buffer.halves`): stored as they are.
+                b.tmem_st(tmem, at + kt, values)
+                b.tmem_st(tmem, at + stage.depth + kt, lowers)
+                continue
             split = nvidia.tfconvert(b, values)
             b.tmem_st(tmem, at + kt, [_as_float(b, u) for u, _ in split])
             b.tmem_st(tmem, at + stage.depth + kt,
@@ -3362,6 +3806,9 @@ class MultiElementSection(AbstractInstruction):
             ring.head(trip)
         elements = self._group.elements
         for buffer in section.inputs + section.intermediates:
+            if buffer.held:
+                # The folded star step's: in the engine's operand memory.
+                continue
             trip.buffers[id(buffer.tensor)] = builder.alloc(
                 section.dtype, (elements * buffer.room,),
                 MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
@@ -3393,7 +3840,7 @@ class MultiElementSection(AbstractInstruction):
         for buffer, symbol in zip(section.inputs, self._inputs):
             tokens += self._stage(trip, buffer, symbol)
         for buffer in section.intermediates:
-            if buffer.pitch > buffer.height:
+            if buffer.pitch > buffer.height and not buffer.held:
                 self._pad(trip, buffer)
         if tokens:
             builder.wait(*tokens)
@@ -3405,7 +3852,12 @@ class MultiElementSection(AbstractInstruction):
         written = {id(b.tensor) for b in section.inputs}
         read = set()
         for unit in _units(section.steps):
-            reads = {id(t) for step in unit for t in step.reads()}
+            if unit[0].lowering == 'fused':
+                # Folded into the step that reads it (`_tcgen05_star`,
+                # `_wgmma_star`).
+                continue
+            reads = {id(t) for step in unit
+                     for t in _step_reads(section, step)}
             dests = {id(step.dest) for step in unit}
             if written & reads or dests & (written | read):
                 builder.barrier(Participants.BLOCK)
@@ -3458,6 +3910,8 @@ class MultiElementSection(AbstractInstruction):
                 stage=slot, identity=self._operators.ring_slots[
                     id(buffer.tensor)], handed=True)
         for buffer in section.intermediates:
+            if buffer.held:
+                continue
             trip.buffers[id(buffer.tensor)] = b.alloc(
                 section.dtype, (elements * buffer.per_element,),
                 MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
@@ -3649,7 +4103,7 @@ class MultiElementSection(AbstractInstruction):
         # which no zero of B takes out.  The inputs' slots are zeroed once,
         # ahead of the loop (`MultiElementOperators._ring`).
         padded = [buffer for buffer in section.intermediates
-                  if buffer.pitch > buffer.height]
+                  if buffer.pitch > buffer.height and not buffer.held]
         for buffer in padded:
             self._pad(trip, buffer)
         for tensor in section.pointer_tables:
@@ -3663,7 +4117,10 @@ class MultiElementSection(AbstractInstruction):
         # element's window up to its 16 bytes.
         written, read = {id(buffer.tensor) for buffer in padded}, set()
         for unit in _units(section.steps):
-            reads = {id(t) for step in unit for t in step.reads()}
+            if unit[0].lowering == 'fused':
+                continue
+            reads = {id(t) for step in unit
+                     for t in _step_reads(section, step)}
             dests = {id(step.dest) for step in unit}
             if written & reads or dests & (written | read):
                 b.barrier(trip.meet)

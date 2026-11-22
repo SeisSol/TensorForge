@@ -4760,8 +4760,8 @@ GROUPS = {
          sub(ME_SECTION, "    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n    b.barrier(trip.meet)\n    threads = trip.group.threads * trip.group.elements\n",
              "    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n    threads = trip.group.threads * trip.group.elements\n", 1)),
         ('a band of warps the group does not hold whole storing A',
-         sub(ME_SECTION, '    bands = max(1, trip.group.elements // 4)\n',
-             '    bands = trip.group.elements // 4 + 1\n', 1)),
+         sub(ME_SECTION, '    k_lo, k_hi = product.depth\n    bands = max(1, trip.group.elements // 4)\n',
+             '    k_lo, k_hi = product.depth\n    bands = trip.group.elements // 4 + 1\n', 1)),
         ('every product\'s A at D\'s end in one round',
          sub(ME_SECTION, '            at.append(column)\n            column += 2 * depth\n',
              '            at.append(n)\n            column += 2 * depth\n', 1)),
@@ -4821,7 +4821,7 @@ GROUPS = {
          sub(Path('src/tensorforge/generators/element_group.py'), '                       if s.terms is not None)\n                 + ring_volume(section))\n',
              '                       if s.terms is not None))\n', 1)),
         ('B whole tried before its stream',
-         sub(Path('src/tensorforge/generators/element_group.py'), '            tilings.append(lower(section, context, split=True,\n                                 streamed=True, prepared=asked))\n',
+         sub(Path('src/tensorforge/generators/element_group.py'), '            tilings.append(lower(section, context, split=True,\n                                 streamed=True, prepared=asked, star=star))\n',
              '', 1)),
         ('a streamed stage staged whole besides',
          sub(Path('src/tensorforge/generators/element_group.py'), '        if self.streamed:\n            return 0\n',
@@ -5146,7 +5146,7 @@ GROUPS = {
              "                                      origins=[a_cells[slot] for slot\n"
              "                                               in (0, 2, 1, 3)],\n", 1)),
         ('the padding left as it was',
-         sub(ME_SECTION, '            if buffer.pitch > buffer.height:\n',
+         sub(ME_SECTION, '            if buffer.pitch > buffer.height and not buffer.held:\n',
              '            if False:\n', 1)),
         ('a pitch not of 16-byte rows',
          sub(ME_GROUP, '            buffer, stride=n + (unit if (n // unit) % 2 == 0 else 0))\n',
@@ -5495,13 +5495,13 @@ GROUPS = {
              '            if False:\n'
              '                b.store(target, zero, _index(\n', 1)),
         ('A\'s halves taken where they cost the group',
-         sub(ME_GROUP, '                for n in range(most, -1, -1)\n',
-             '                for n in [most]\n', 1)),
+         sub(ME_GROUP, '                out.extend(_halved(t, n) for n in range(most, -1, -1)\n',
+             '                out.extend(_halved(t, n) for n in [most]\n', 1)),
         ('B\'s halves preferred to A\'s',
-         sub(ME_GROUP, '                for n in range(most, -1, -1)\n'
-                       '                for t in lowerings if t.doubled == doubled]\n',
-             '                for t in lowerings if t.doubled == doubled\n'
-             '                for n in range(most, -1, -1)]\n', 1)),
+         sub(ME_GROUP, '                out.extend(_halved(t, n) for n in range(most, -1, -1)\n'
+                       '                           for t in part)\n',
+             '                out.extend(_halved(t, n) for t in part\n'
+             '                           for n in range(most, -1, -1))\n', 1)),
         ('the room without the lower halves',
          sub(ME_GROUP, '    per_element = sum(b.room for b in section.inputs\n',
              '    per_element = sum(b.per_element for b in section.inputs\n', 1)),
@@ -5521,8 +5521,8 @@ GROUPS = {
         ('A\'s halves on by default',
          sub(ME_GROUP, 'HALVES = False\n', 'HALVES = True\n', 1)),
         ('A\'s halves taken with the switch off',
-         sub(ME_GROUP, '        if (HALVES and tiled(lowerings[0])\n',
-             '        if (tiled(lowerings[0])\n', 1)),
+         sub(ME_GROUP, '                if asynchronous(lowerings[0]) else HALVES):\n',
+             '                if asynchronous(lowerings[0]) else True):\n', 1)),
     ]),
     # The consolidation of the engines layer (`pir/engines.py`).  Matrix
     # transfers: ldmatrix and stmatrix as transfer engines (`Op.MATRIX_LOAD`,
@@ -6135,6 +6135,90 @@ GROUPS = {
         ('the oracle taking a table copy past its end',
          sub(ORACLE, "    if isinstance(src, list) and not (0 <= at and at + count <= len(src)):\n",
              '    if False:\n', 1)),
+    ]),
+    # A for the asynchronous engines written once by the star step
+    # (`Options.matrix_star`): the halves read unsplit, and the star step
+    # folded into the engine's operand memory (`element_group.fuse`,
+    # `multi_element._tcgen05_star`, `_wgmma_star`).
+    'opstar': ('tests/test_folded_star.py::test_the_folded_star_frees_the_buffers_of_a '
+               'tests/test_folded_star.py::test_the_folded_star_needs_b_resident_or_prepared '
+               'tests/test_folded_star.py::test_b_keeps_its_halves_ahead_of_a '
+               'tests/test_folded_star.py::test_the_folded_kernel_stores_a_where_the_engine_reads_it '
+               'tests/test_folded_star.py::test_the_folded_star_over_two_trips_on_the_oracle '
+               'tests/test_folded_star.py::test_the_folded_star_reads_only_what_was_written '
+               'tests/test_folded_star.py::test_the_halves_over_two_trips_on_the_oracle '
+               'tests/test_folded_star.py::test_the_halves_give_d_bit_for_bit '
+               'tests/test_folded_star.py::test_several_folded_steps_build', [
+        ("every folded step's A ring under one name",
+         sub(ME_SECTION, "    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,\n",
+             "    areas = b.mbarrier_ring('ta', slots,\n", 1)),
+        ("a band's A handed over short",
+         sub(ME_SECTION, "    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,\n"
+                         "                            full=128, empty=1,\n",
+             "    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,\n"
+             "                            full=96, empty=1,\n", 1)),
+        ('a band writing a slot the products still read',
+         sub(ME_SECTION, "            b.ring_wait(areas, 'empty', slot, b.op('sub', INDEX, 1, parity,\n"
+                         "                                                   hint='free'))\n", '', 1)),
+        # measync's mutations of `_tcgen05_a` and `_tcgen05`, on the fold's
+        # own copies of their lines.
+        ('a band of warps the group does not hold whole storing the folded A',
+         sub(ME_SECTION, "                            'its mbarriers')\n"
+                         '    bands = max(1, trip.group.elements // 4)\n',
+             "                            'its mbarriers')\n"
+             '    bands = trip.group.elements // 4 + 1\n', 1)),
+        ('the tensor memory allocated again by a folded trip',
+         sub(ME_SECTION, '    b, section = trip.builder, trip.section\n'
+                         '    tmem = trip.tmem\n',
+             '    b, section = trip.builder, trip.section\n'
+             '    tmem = b.tmem_alloc(256, arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
+        ("a block's lower halves over its upper ones",
+         sub(ME_SECTION, '                b.tmem_st(tmem, at + 2 * STAR_ROWS * p + STAR_ROWS,\n',
+             '                b.tmem_st(tmem, at + 2 * STAR_ROWS * p,\n', 1)),
+        ("every block's products reading the first slot's A",
+         sub(ME_SECTION, '                              a_column=at + 2 * STAR_ROWS * p\n',
+             '                              a_column=columns[0] + 2 * STAR_ROWS * p\n', 1)),
+        ("wgmma's slot of A written while its products are in flight",
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, 1, accs)\n'
+                         '            if ring is not None:\n'
+                         '                ring.release(trip, j - 1, base)\n',
+             '            flight = _wgmma_retire(b, flight, 2, accs)\n'
+             '            if ring is not None:\n'
+             '                ring.release(trip, j - 1, base)\n', 1)),
+        ("wgmma's stores of A not fenced for the async proxy",
+         sub(ME_SECTION, '                                     \'as\'), mine, \'as\'), align=16)\n'
+                         '        b.fence(FenceKind.PROXY)\n',
+             '                                     \'as\'), mine, \'as\'), align=16)\n', 1)),
+        ('the held intermediates counted in the room',
+         sub(ME_GROUP, '        if self.held:\n            return 0\n', '', 1)),
+        ('the folded star taking B through the converting ring',
+         sub(ME_GROUP, '    if any(st.streamed and not st.prepared for st in stages):\n',
+             '    if False:\n', 1)),
+        ("tcgen05's A halves split again",
+         sub(ME_SECTION, '            if lower is not None:\n'
+                         '                # Both halves as the star step split them\n',
+             '            if False:\n'
+             '                # Both halves as the star step split them\n', 1)),
+        ("wgmma's lower halves read where the upper ones are",
+         sub(ME_SECTION, "            b, 'add', at, buffer.half_offset(trip.group.elements), 'a'),\n",
+             "            b, 'add', at, 0, 'a'),\n", 1)),
+        ("A's halves ahead of B's on the asynchronous engines",
+         sub(ME_GROUP, '                     if run and asynchronous(run[0]) else [list(run)])\n',
+             '                     if False else [list(run)])\n', 1)),
+        ('the folded star over B read whole',
+         sub(ME_GROUP, "    if not all(st.split for st in stages):\n        return ('B is read whole",
+             "    if False:\n        return ('B is read whole", 1)),
+        ('no unfolded tiling behind the fold',
+         sub(ME_GROUP, '            tilings += [lower(section, context, split=True,\n'
+                       '                              streamed=streamed(t), prepared=asked)\n'
+                       '                        for t in list(tilings) if t.star]\n', '', 1)),
+        ("the star's numbers of the next column",
+         sub(ME_SECTION, "    column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),\n"
+                         "                    step.cols[0], 'p')\n"
+                         "    inband = ",
+             "    column = _index(b, 'add', b.op('rem', INDEX, _index(b, 'add', row, 1, 'p'), width, hint='p'),\n"
+             "                    step.cols[0], 'p')\n"
+             "    inband = ", 1)),
     ]),
 }
 
