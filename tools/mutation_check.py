@@ -6423,6 +6423,75 @@ GROUPS = {
              '            if running and self.steps == before:\n'
              '                break\n', 1)),
     ]),
+    # --- warp roles (tensorforge-roles) ------------------------------------- #
+    # A block in N roles (`pir.roles`, `IRBuilder.split_roles`): the chain of
+    # links, each role's barrier id, the verifier's and the placement's
+    # reading of the chain, and the roles' register budgets.
+    'roles': ('tests/test_roles.py '
+              'tests/test_element_producer.py::test_the_producers_registers_go_to_the_element_warps '
+              'tests/test_element_producer.py::test_the_moves_stay_in_the_blocks_registers '
+              'tests/test_element_producer.py::test_the_kernel_moves_the_registers_once '
+              'tests/test_mbarrier_ring.py -n 6', [
+        ("a role's id stepping past its range's first warp",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "        steps = ''.join(f' + ({self.warp} >= {lo})' for lo in self.starts)\n",
+             "        steps = ''.join(f' + ({self.warp} > {lo})' for lo in self.starts)\n", 1)),
+        ("a middle role's condition its range's start alone",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "        return b.op('and', BOOL, b.op('ge', BOOL, warp, lo, hint=role.name),\n",
+             "        return b.op('ge', BOOL, warp, lo, hint=role.name)\n"
+             "        return b.op('and', BOOL, b.op('ge', BOOL, warp, lo, hint=role.name),\n", 1)),
+        ("every link of the chain carrying the whole split",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "                    movable=False, attrs=(('roles', tuple(roles[k:])),))\n",
+             "                    movable=False, attrs=(('roles', tuple(roles)),))\n", 1)),
+        ("a chain a statement broke let through",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    if (len(rest) != 1 or not is_split(rest[0])\n',
+             '    if False and (len(rest) != 1 or not is_split(rest[0])\n', 1)),
+        ("a region built with the next role current",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '        b._roles.append(split.roles[i])\n',
+             '        b._roles.append(split.roles[(i + 1) % len(split.roles)])\n', 1)),
+        ("the moves past the block's pool let through",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    if held > entry * split.warps * wave:\n',
+             '    if False:\n', 1)),
+        ("a moving role of no whole warpgroups let through",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '        if count != entry and (lo % WARPGROUP_WARPS\n',
+             '        if False and (lo % WARPGROUP_WARPS\n', 1)),
+        ("the takers' share of the SM's registers, not the block's",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    gained = (entry * total - given) // sum(t for _, t in takers) // 8 * 8\n',
+             '    gained = (registers - given) // sum(t for _, t in takers) // 8 * 8\n', 1)),
+        ("the registers raised before the block met",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    b.barrier(Participants.BLOCK)\n    for role in split.roles:\n',
+             '    for role in split.roles:\n', 1)),
+        ("the conditions of every role but the first",
+         sub(BUILD, '                 for role in split.roles[:-1]]\n',
+             '                 for role in split.roles[1:]]\n', 1)),
+        ("another role's barrier in a role let through",
+         sub(PASSES, '            elif (obj.ident, obj.threads) != (role.ident, role.threads):\n',
+             '            elif False:\n', 1)),
+        ("the verifier reading no chain's shape",
+         sub(PASSES, '                why = role_split.chain_refusal(s)\n',
+             '                why = None\n', 1)),
+        ("a later link's roles reached at its condition's level",
+         sub(PASSES, '                inner_role = reachable_at if role_level is None \\\n'
+                     '                    else role_level\n',
+             '                inner_role = reachable_at\n', 1)),
+        ("every role's hazards met on the first role's barrier",
+         sub(BARRIERS, '            def make(handoff, block, role=role):\n',
+             '            def make(handoff, block, role=s.attr(\'roles\')[0]):\n', 1)),
+        ("the accesses across the roles of the first role's writes alone",
+         sub(BARRIERS, '        for i, (_, writes_a) in enumerate(roles):\n',
+             '        for i, (_, writes_a) in enumerate(roles[:1]):\n', 1)),
+        ("the state past a split of its first two roles' ends",
+         sub(BARRIERS, '        for end in ends[1:]:\n',
+             '        for end in ends[1:2]:\n', 1)),
+    ]),
 }
 
 

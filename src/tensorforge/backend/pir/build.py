@@ -33,6 +33,7 @@ from .core import (BOOL, INDEX, SCALAR_LAYOUT, Access, BufferType,
                    TokenType, Value, XorSwizzle, dump, walk_stmts, join_layout,
                    base_elem, base_space, Uniformity, SIZE, StackedAddress)
 from . import engines
+from .roles import Role, RoleSplit, SplitHandle
 from .transfers import tagged
 
 
@@ -233,16 +234,6 @@ class Ring(NamedTuple):
     slots: int
     full: int
     empty: int
-
-
-class Role(NamedTuple):
-    """A role of the block (`IRBuilder.roles`): `threads` of its threads,
-    meeting on a named barrier of their own, whose id `ident` is text every
-    thread of the block evaluates to its own role's -- one id a role, so
-    that a thread of one role is no member of the other's barrier."""
-    name: str
-    threads: int
-    ident: str
 
 
 class RingSlot(NamedTuple):
@@ -2857,6 +2848,21 @@ class IRBuilder:
         meet on a ring's barriers alone (`mbarrier_ring`), which no barrier
         placement stands in for (`barriers`)."""
         return _RolesHandle(self, cond, (first, second))
+
+    def split_roles(self, split: RoleSplit) -> SplitHandle:
+        """The block split into the N roles of `split` (`pir.roles`), each
+        on its range of the block's warps: `with handle.role(name):` a
+        role, in the split's order.  Each role's condition is made here,
+        ahead of the regions -- whether the thread's warp is in the role's
+        range -- and the regions go into the chain of two-region IFs that
+        N roles are (`roles.chain`), emitted where the last closes; two
+        roles are the statement `roles` builds.  Inside a role's region
+        the role is the block, as there: its barriers are its own
+        (`Participants.ROLE`), and the roles meet on rings alone."""
+        warp = self.thread_id(split.axis)
+        conds = [split.member(self, role.name, warp)
+                 for role in split.roles[:-1]]
+        return SplitHandle(self, split, conds)
 
     def _wave(self) -> int:
         """The target's wave, or 1 for a body built without one."""

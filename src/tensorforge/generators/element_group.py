@@ -1751,18 +1751,20 @@ def register_budgets(group: 'ElementGroup') -> Optional[Tuple[int, int,
     registers a thread of it, and not the SM's: the pool `setmaxnreg`
     moves registers within is the block's and zero-sum, and an `inc` past
     it waits forever.  So the element warps share what the block holds at
-    its entry less what the producer keeps."""
+    its entry less what the producer keeps -- the roles' rule
+    (`pir.roles.register_budgets`), the producer and the element warps
+    two roles of the block."""
+    from tensorforge.backend.pir.roles import register_budgets as moves
     keep = group.section.registers
     if not keep or not group.section.ring:
         return None
-    threads = 32 * group.warps
-    entry = min(255, SM_REGISTERS // threads // 8 * 8)
-    gained = (entry * threads - 32 * group.producers * keep) // (
-        32 * group.elements) // 8 * 8
-    elements = min(256, gained)
-    if keep >= entry or elements <= entry or entry < 24:
+    found = moves((('producer', 32 * group.producers),
+                   ('elements', 32 * group.elements)), {'producer': keep},
+                  registers=SM_REGISTERS)
+    if found is None:
         return None
-    return entry, keep, elements
+    entry, budgets = found
+    return entry, budgets['producer'], budgets['elements']
 
 
 def producer_refusal(section: GroupSection, context) -> Optional[str]:

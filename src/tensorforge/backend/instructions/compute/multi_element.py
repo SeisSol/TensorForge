@@ -136,26 +136,19 @@ def _as_float(builder, half):
                            pure=True, movable=True)
 
 
-#: The first of the two named barriers of a block's roles (`IRBuilder.roles`):
-#: the last two of the sixteen, apart from the ids the multiplications take
-#: from 1 on.
-ROLE_BARRIER = 14
-
-
-def _role_split(builder, context, group):
-    """The block in its two roles (`IRBuilder.roles`): the producer's
-    warps behind the element warps, and theirs, each meeting on a named
-    barrier of its own -- one id a role, which every thread computes as its
-    role's."""
-    from tensorforge.backend.pir.build import Role
-    lexic = context.target.lexic
+def _roles(context, group):
+    """The block's two roles where a producer fills the inputs
+    (`pir.roles.RoleSplit`): the producer's warps behind the element warps,
+    and theirs, each meeting on a named barrier of its own -- the last two
+    of the sixteen (`roles.first_id`), one id a role, which every thread
+    computes as its role's."""
+    from tensorforge.backend.pir.roles import Role, RoleSplit, first_id
     elements = group.elements
-    ident = f'({ROLE_BARRIER} + ({lexic.thread_idx_y} >= {elements}))'
-    return builder.roles(
-        builder.op('ge', BOOL, builder.thread_id('y'), elements,
-                   hint='producer'),
-        Role('producer', group.threads * group.producers, ident),
-        Role('elements', group.threads * elements, ident))
+    return RoleSplit((Role('producer', group.threads * group.producers,
+                           warps=(elements, group.producers)),
+                      Role('elements', group.threads * elements,
+                           warps=(0, elements))),
+                     warp=context.target.lexic.thread_idx_y, first=first_id(2))
 
 
 def _element_pointer(builder, context, symbol, element, dtype):
@@ -367,22 +360,15 @@ class MultiElementOperators(AbstractInstruction):
         (`element_group.register_budgets`): lowered first, behind the
         block's barrier raised -- a raise waits until the pool holds what it
         asks for -- each by the warpgroups of its role, whole, as the
-        collective is (`engines.register_budget`)."""
-        from tensorforge.backend.pir import engines
+        collective is (`pir.roles.emit_budgets`)."""
+        from tensorforge.backend.pir.roles import emit_budgets
         from tensorforge.generators.element_group import register_budgets
         budgets = register_budgets(self._group)
         if budgets is None:
             return
-        _, mine, theirs = budgets
-        warp = builder.thread_id('y')
-        elements = self._group.elements
-        with builder.if_(builder.op('ge', BOOL, warp, elements,
-                                    hint='producer')):
-            builder.emit(engines.register_budget(mine, 'dec'))
-        builder.barrier(Participants.BLOCK)
-        with builder.if_(builder.op('lt', BOOL, warp, elements,
-                                    hint='elements')):
-            builder.emit(engines.register_budget(theirs, 'inc'))
+        entry, mine, theirs = budgets
+        emit_budgets(builder, _roles(self._context, self._group),
+                     {'producer': mine, 'elements': theirs}, entry)
 
     def _ring(self, builder, tid, threads) -> None:
         """The producer's ring, its slots' windows of every input zeroed:
@@ -4092,10 +4078,10 @@ class MultiElementSection(AbstractInstruction):
                 arena=GeneralLexicon.TOTAL_SHR_MEM, hint=_hint('p', tensor),
                 place_align=unit if unit > 1 else None)
         trip.meet = Participants.ROLE
-        roles = _role_split(b, self._context, self._group)
-        with roles.then():
+        roles = b.split_roles(_roles(self._context, self._group))
+        with roles.role('producer'):
             self._produce(trip, ring, slot, parity, group, bound[MASK_KEY])
-        with roles.otherwise():
+        with roles.role('elements'):
             self._consume(trip, ring, slot, parity)
 
     def _produce(self, trip, ring, slot, parity, group, active_of) -> None:

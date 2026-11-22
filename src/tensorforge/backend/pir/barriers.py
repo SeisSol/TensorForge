@@ -538,21 +538,24 @@ class _Pass:
 
     def _place_roles(self, s: Stmt, state: _State, level: Uniformity
                      ) -> Tuple[Stmt, _State, FrozenSet[int]]:
-        """The roles of a block (`IRBuilder.roles`): each region placed as
-        a block of its own, at the level the split is reached at -- a
-        barrier a role needs is the role's (`Participants.ROLE`), since a
-        block's would wait for the other role, which never comes.  The
-        roles hand over through a ring's barriers alone, which this pass
-        leaves to the ring (`completes_on_barrier`); what one role left
-        outstanding, the other's barriers do not settle, and a region whose
-        shared accesses meet the other role's is reported unfenced."""
+        """The roles of a block (`IRBuilder.roles`, `split_roles`), every
+        one of the N its chain of links holds (`pir.roles.regions`): each
+        region placed as a block of its own, at the level the split is
+        reached at -- a barrier a role needs is the role's
+        (`Participants.ROLE`), since a block's would wait for the other
+        roles, which never come.  The roles hand over through a ring's
+        barriers alone, which this pass leaves to the ring
+        (`completes_on_barrier`); what one role left outstanding, the
+        others' barriers do not settle, and a region whose shared accesses
+        meet another role's is reported unfenced."""
         from .engines import barrier as barrier_of, object_of, sync_object
         from .core import Participants
+        from .roles import rebuild, regions as role_regions
         wave = object_of(self.make_barrier(False, True)).wave
         outer = self.make_barrier
         regions, ends = [], []
         unfenced: FrozenSet[int] = frozenset()
-        for r, role in zip(s.regions, s.attr('roles')):
+        for role, r in role_regions(s):
             # Every hazard met on the role's barrier: a multiplication's
             # may span the roles, and only the role's is sure to reach its
             # threads alone.
@@ -569,15 +572,17 @@ class _Pass:
             ends.append(end)
             unfenced |= missed
         unfenced |= self._across_roles(regions)
-        merged = ends[0].merge(ends[1])
-        return replace(s, regions=tuple(regions)), merged, unfenced
+        merged = ends[0]
+        for end in ends[1:]:
+            merged = merged.merge(end)
+        return rebuild(s, regions), merged, unfenced
 
     def _across_roles(self, regions) -> FrozenSet[int]:
-        """The accesses of one role that meet the other's: the roles run
-        side by side, and no barrier of either orders the other -- only a
+        """The accesses of one role that meet another's: the roles run
+        side by side, and no barrier of one orders another -- only a
         ring's, which this pass leaves out (`completes_on_barrier`,
-        `handed_buffers`).  Every write of one role against every access of
-        the other, wherever in its region it stands."""
+        `handed_buffers`).  Every write of a role against every access of
+        each other role, wherever in its region it stands."""
         def touched(body):
             reads, writes = [], []
             for inner in walk_stmts(body):
@@ -588,15 +593,17 @@ class _Pass:
                 writes += [(id(inner), key, ext) for key, ext, _ in w]
             return reads, writes
 
-        first, second = (touched(r.body) for r in regions)
+        roles = [touched(r.body) for r in regions]
         found = set()
-        for (reads_a, writes_a), (reads_b, writes_b) in ((first, second),
-                                                         (second, first)):
-            for at, key, ext in writes_a:
-                for other, key_b, ext_b in reads_b + writes_b:
-                    if ((key == key_b or _OPAQUE in (key, key_b))
-                            and _overlap(ext, ext_b)):
-                        found |= {at, other}
+        for i, (_, writes_a) in enumerate(roles):
+            for j, (reads_b, writes_b) in enumerate(roles):
+                if i == j:
+                    continue
+                for at, key, ext in writes_a:
+                    for other, key_b, ext_b in reads_b + writes_b:
+                        if ((key == key_b or _OPAQUE in (key, key_b))
+                                and _overlap(ext, ext_b)):
+                            found |= {at, other}
         return frozenset(found)
 
     def place_region(self, s: Stmt, state: _State, level: Uniformity
