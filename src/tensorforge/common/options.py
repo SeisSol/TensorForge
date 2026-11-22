@@ -252,6 +252,23 @@ def parse_matrix_ring_slots(text: str) -> int:
   return value
 
 
+#: The holds `Options.matrix_ring_hold` takes, besides None.
+MATRIX_RING_HOLD = tuple(range(1, 9))
+
+
+def parse_matrix_ring_hold(text: str) -> Optional[int]:
+  """None (`none`, `auto` or nothing) or 1 to 8
+  (`Options.matrix_ring_hold`)."""
+  low = str(text).strip().lower()
+  if low in ('', 'none', 'auto'):
+    return None
+  value = int(low)
+  if value not in MATRIX_RING_HOLD:
+    raise ValueError(f'matrix_ring_hold is one of {MATRIX_RING_HOLD} or '
+                     f'auto, not {value}')
+  return value
+
+
 #: What `Options.matrix_star` takes.
 MATRIX_STAR = ('buffer', 'halves', 'engine')
 
@@ -2730,6 +2747,29 @@ declare('matrix_ring_slots',
             'Four of `matrix_ring_rows`\' sixteen rows take the room of the '
             'converting ring\'s two of thirty-two, so that the group keeps '
             'its size.')
+
+declare('matrix_ring_hold',
+        default=None,
+        env='TF_MATRIX_RING_HOLD',
+        parse=parse_matrix_ring_hold,
+        doc='How many chunks of the prepared operator ring (`matrix_ring` '
+            '`prepared`) the products hold a slot for '
+            '(`engines.RingSpec.hold`): its chunk\'s and the ones after it, '
+            'the slot given back behind the work of that many.  None, the '
+            'default, takes each engine\'s own: wgmma 2, the wait behind a '
+            'chunk retiring the one before, whose slot the warps give back; '
+            'tcgen05 1, the commit of a chunk\'s products onto its slot\'s '
+            'empty side.  1 on wgmma waits for each chunk\'s products '
+            'before the next chunk loads its A, and the block\'s first '
+            'thread fills a slot a chunk earlier (the slot just given '
+            'back, `multi_element._OperatorRing.lead`): a prototype of the '
+            'o12 volume measured 36.5 ns an element so against 52.7 with 2 '
+            'on a GH200, the operator stream\'s exposed time 1.2 against '
+            '13.5 ns; not measured here yet.  At most '
+            'the slots, and 2 on the folded star of wgmma, whose A has two '
+            'slots; tcgen05 takes 1 alone.  Where a ring cannot hold its '
+            'slots so, every ring keeps its engine\'s own and the kernel\'s '
+            'comment says why (`element_group.hold_refusal`).')
 
 declare('matrix_tf32_operands',
         default=False,

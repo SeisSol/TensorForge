@@ -221,19 +221,35 @@ def _names_in(code: str, name: str) -> bool:
 class Ring(NamedTuple):
     """A ring of mbarrier pairs a body set up (`IRBuilder.mbarrier_ring`):
     the object its statements name, `slots` slots, each full barrier
-    counting `full` arrivals a phase and each empty one `empty`.
+    counting `full` arrivals a phase and each empty one `empty` -- as its
+    description says, who fills and who drains it (`spec`,
+    `engines.RingSpec`).
 
-    A producer waits on a slot's empty side for its round (`ring_wait`),
-    announces the slot's bytes on its full side (`ring_arrive`) and copies
-    into the slot (`copy_bulk`, `copy_tma` with a `RingSlot`); its
-    consumers wait on the full side and arrive at the empty one once done.
-    Every role counts its rounds of the ring from its trips (`ring_round`).
+    A producer waits on a slot's empty side for its round (`ring_acquire`),
+    copies into the slot (`copy_bulk`, `copy_tma` with a `RingSlot`) and
+    announces the slot's bytes on its full side (`ring_publish`); its
+    consumers wait on the full side (`ring_take`) and arrive at the empty
+    one once done (`ring_release`).  Every role counts its rounds of the
+    ring from its trips (`ring_round`).
     """
     name: str
     object: Value
     slots: int
     full: int
     empty: int
+
+    @property
+    def spec(self) -> Optional['engines.RingSpec']:
+        """The ring's description (`engines.RingSpec`)."""
+        return engines.ring_spec(self.object)
+
+    @property
+    def hold(self) -> int:
+        """How many of their groups the consumers hold a slot for
+        (`engines.RingSpec.hold`): they give the slot of a group back
+        behind the work of `hold` groups, its own the first."""
+        spec = self.spec
+        return 1 if spec is None else spec.hold
 
 
 class RingSlot(NamedTuple):
@@ -2246,7 +2262,11 @@ class IRBuilder:
 
     def mbarrier_ring(self, name: str, slots: int, *, full: int,
                       empty: int, leader: str,
-                      arena: Optional[str] = None) -> Optional[Ring]:
+                      arena: Optional[str] = None,
+                      producer: Optional[str] = None,
+                      consumers: Sequence[str] = (), tx: int = 0,
+                      scope: 'engines.SyncScope' = engines.SyncScope.BLOCK,
+                      hold: int = 1) -> Optional[Ring]:
         """A ring of `slots` slots for a producer and its consumers, set up
         ahead of everything else in the body, as `bulk_channel`'s barrier is
         -- or None in a body without an arena.
@@ -2257,16 +2277,26 @@ class IRBuilder:
         slot's full barrier up for `full` arrivals a phase -- the producer's,
         announcing the slot's bytes -- and its empty one for `empty`, its
         consumers' (`engines.ring_init`); a block barrier behind shows them
-        to every thread."""
+        to every thread.
+
+        Its description (`engines.RingSpec`) names the roles that fill and
+        drain it, `producer` and `consumers` -- none where it stays inside
+        one role -- the bytes a round's copies complete, `tx`, where they
+        are every round's, the `scope` its statements order, and how many
+        of their groups the consumers hold a slot for, `hold` -- where they
+        give it back (`Ring.hold`)."""
         if self._arena is None:
             return None
+        spec = engines.RingSpec(int(slots), int(full), int(empty),
+                                producer, tuple(consumers), int(tx),
+                                engines.SyncKind.MBARRIER, scope, int(hold))
         start = len(self._prologue)
         b = self.scratch()
         per = max(1, 8 // self._fptype.size())
         storage = b.alloc(self._fptype, (2 * int(slots) * per,),
                           MemSpace.SHARED, hint=f'{name}Ring',
                           place_align=per, lifetime='body', arena=arena)
-        obj = self.new_object(engines.mbarrier_ring(slots),
+        obj = self.new_object(engines.mbarrier_ring(slots, spec),
                               hint=f'{name}_ring')
         b.emit(engines.ring_init(obj, storage, full=full, empty=empty,
                                  leader=leader, extern=f'{name}_ring'))
@@ -2309,6 +2339,46 @@ class IRBuilder:
                                    self.alias_root(x)) for x in reads))
         return self.emit(engines.ring_wait(ring.object, side, slot, parity,
                                            accesses))
+
+    def ring_acquire(self, ring: Ring, slot: Operand, parity: Operand, *,
+                     writes: Sequence[Any] = (),
+                     reads: Sequence[Any] = ()) -> Stmt:
+        """The producer's wait for its round of `ring`'s slot `slot`, on the
+        slot's empty side: for the phase of the other parity than its
+        consumers' round, `parity` -- its first round finds the slots free,
+        the barriers' phase before their first (`ring_round`) -- ahead of its
+        next copies into the slot's buffers `writes`."""
+        return self.ring_wait(ring, 'empty', slot, self.op(
+            'sub', INDEX, 1, parity, hint='free'), writes=writes, reads=reads)
+
+    def ring_publish(self, ring: Ring, slot: Operand, issue: Operand, *,
+                     tx: int = 0, tokens: Sequence[Value] = ()) -> Stmt:
+        """The producer's arrival on the full side of `ring`'s slot `slot`,
+        by the thread `issue` picks: announcing the `tx` bytes of its copies
+        into the slot, whose `tokens` it takes -- the consumers' wait is
+        theirs (`ring_arrive`)."""
+        return self.ring_arrive(ring, 'full', slot, issue, tx=tx,
+                                tokens=tokens)
+
+    def ring_take(self, ring: Ring, slot: Operand, parity: Operand, *,
+                  writes: Sequence[Any] = (),
+                  reads: Sequence[Any] = ()) -> Stmt:
+        """A consumer's wait for its round of `ring`'s slot `slot` on the
+        slot's full side, the phase of parity `parity`: behind it the slot's
+        buffers `writes` hold what the producer put there (`ring_wait`)."""
+        return self.ring_wait(ring, 'full', slot, parity, writes=writes,
+                              reads=reads)
+
+    def ring_release(self, ring: Ring, slot: Operand, issue: Operand, *,
+                     engine: Optional[str] = None) -> Stmt:
+        """A consumer done with `ring`'s slot `slot`: its arrival on the
+        slot's empty side by the thread `issue` picks -- or, where an
+        asynchronous `engine`'s products read the slot, their commit onto
+        that side, which they arrive at once complete (`commit_group`)."""
+        if engine is not None:
+            return self.commit_group(engine, object=ring, issue=issue,
+                                     slot=slot)
+        return self.ring_arrive(ring, 'empty', slot, issue)
 
     def ring_arrive(self, ring: Ring, side: str, slot: Operand,
                     issue: Operand, *, tx: int = 0,

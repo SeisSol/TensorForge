@@ -382,7 +382,8 @@ class MultiElementOperators(AbstractInstruction):
         self.ring = builder.mbarrier_ring(
             'me', section.ring, full=1, empty=elements,
             leader='threadIdx.x == 0 && threadIdx.y == 0',
-            arena=GeneralLexicon.TOTAL_SHR_MEM)
+            arena=GeneralLexicon.TOTAL_SHR_MEM, producer='producer',
+            consumers=('elements',))
         if self.ring is None:
             raise InternalError('a producer\'s ring in a body without an '
                                 'arena for its mbarriers')
@@ -491,12 +492,13 @@ class MultiElementOperators(AbstractInstruction):
         (`_OperatorRing`): its slots in the block's shared memory, each the
         largest chunk, on 128 bytes, for the whole body, handed over by the
         ring's barriers alone; full counting the block's first thread, empty
-        the consumers -- tcgen05's commit, or each element warp on wgmma."""
+        the consumers -- tcgen05's commit, or each element warp on wgmma --
+        who hold a slot for the chunks `element_group.ring_hold` says."""
         from tensorforge.backend.instructions.compute.primitives import \
             nvidia
         from tensorforge.generators.element_group import (
             ASYNC_LOWERINGS, WARPGROUP_WARPS, chunk_volume, prepared_table,
-            ring_chunks)
+            ring_chunks, ring_hold)
         section = self._group.section
         sm = nvidia.sm_of(self._context)
         for n, step in enumerate(section.steps):
@@ -544,7 +546,8 @@ class MultiElementOperators(AbstractInstruction):
             ring = builder.mbarrier_ring(
                 f'bk{n}', slots, full=1, empty=consumers,
                 leader='threadIdx.x == 0 && threadIdx.y == 0',
-                arena=GeneralLexicon.TOTAL_SHR_MEM)
+                arena=GeneralLexicon.TOTAL_SHR_MEM,
+                hold=ring_hold(section, step))
             if ring is None:
                 raise InternalError('a prepared ring in a body without an '
                                     'arena for its mbarriers')
@@ -1859,9 +1862,13 @@ class _OperatorRing:
     chunk's products, or each element warp's arrival behind its wait for
     them on wgmma.
 
-    The first thread fills the first `slots - 1` chunks of a trip at the
-    trip's head (`head`), and every later chunk into the slot the chunk
-    `slots` before it read, as soon as the products of that one let it go
+    The products hold a slot for the ring's `hold` chunks
+    (`engines.RingSpec.hold`), its own and the ones after it: tcgen05's
+    commit gives it back as soon as they complete, wgmma's warps behind the
+    wait that retires them -- by default the wait behind the next chunk.
+    The first thread fills the first `lead` chunks of a trip at the trip's
+    head (`head`), and every later chunk into the slot the chunk `slots`
+    before it read, as soon as the products of that one let it go
     (`ahead`): never past the trip's last chunk, so that no copy is in
     flight where a trip ends.  The chunks are counted across the block's
     trips (`_trip_count`) -- chunk `i` of a pass `p` of the step in trip `t`
@@ -1885,6 +1892,24 @@ class _OperatorRing:
     @property
     def slots(self) -> int:
         return self.ring.slots
+
+    @property
+    def hold(self) -> int:
+        """How many chunks the products hold a slot for (`Ring.hold`)."""
+        return self.ring.hold
+
+    @property
+    def lead(self) -> int:
+        """How many chunks past the one in hand the first thread fills
+        (`head`, `ahead`): into the slot the products gave back last.  On
+        wgmma, `slots - hold + 1` -- the warps give a chunk's slot back
+        behind the wait that retired its products, and the chunk `slots`
+        past it may go in at once (`slots - 1` at the default hold of 2).
+        On tcgen05 one fewer: the commit of a chunk's products arrives once
+        they complete, and the issuing thread, which fills the ring, takes
+        the slot of the chunk before, so as never to wait for the products
+        it has just committed."""
+        return self.slots - self.hold + (self.step.lowering != 'tcgen05')
 
     def round(self, trip, i, base=None):
         """The ring's round of chunk `i` of the trip's step, its slot and
@@ -1929,19 +1954,17 @@ class _OperatorRing:
         from tensorforge.backend.pir.build import RingSlot
         b = trip.builder
         slot, parity, at = self.round(trip, j, base)
-        b.ring_wait(self.ring, 'empty', slot, b.op('sub', INDEX, 1, parity,
-                                                   hint='free'),
-                    writes=[self.storage])
+        b.ring_acquire(self.ring, slot, parity, writes=[self.storage])
         token = b.copy_bulk(self.storage, self.table_value(trip),
                             barrier=RingSlot(self.ring, slot),
                             dst_index=(at,), src_index=(self.offsets[j],),
                             elems=self.volumes[j], predicate=issue)
-        b.ring_arrive(self.ring, 'full', slot, issue,
-                      tx=self.volumes[j] * Datatype.F32.size(),
-                      tokens=[token])
+        b.ring_publish(self.ring, slot, issue,
+                       tx=self.volumes[j] * Datatype.F32.size(),
+                       tokens=[token])
 
     def head(self, trip, base=None, when=None) -> None:
-        """The first `slots - 1` chunks of the trip's step -- of its pass at
+        """The first `lead` chunks of the trip's step -- of its pass at
         `base` -- by the block's first thread, where `when` holds too: at
         the trip's head, behind which the trip stages and mixes while they
         land."""
@@ -1952,13 +1975,14 @@ class _OperatorRing:
         cond = issue if when is None else b.op('and', BOOL, issue, when,
                                                hint='issue')
         with b.if_(cond):
-            for j in range(min(self.slots - 1, len(self.chunks))):
+            for j in range(min(self.lead, len(self.chunks))):
                 self.fill(trip, j, base, issue)
 
     def ahead(self, trip, i, base) -> None:
-        """Behind the consumers' release of chunk `i - 1`: the chunk
-        `slots - 1` past `i` into that slot, where the trip has it."""
-        j = i + self.slots - 1
+        """Behind chunk `i`'s products and the release they let go: the
+        chunk `lead` past `i` into the slot given back last, where the trip
+        has it."""
+        j = i + self.lead
         if j >= len(self.chunks):
             return
         b = trip.builder
@@ -1973,12 +1997,10 @@ class _OperatorRing:
         b = trip.builder
         slot, parity, at = self.round(trip, i, base)
         if issue is None:
-            b.ring_wait(self.ring, 'full', slot, parity,
-                        writes=[self.storage])
+            b.ring_take(self.ring, slot, parity, writes=[self.storage])
         else:
             with b.if_(issue):
-                b.ring_wait(self.ring, 'full', slot, parity,
-                            writes=[self.storage])
+                b.ring_take(self.ring, slot, parity, writes=[self.storage])
         pieces, offset = [], 0
         for p, k0, rows in self.chunks[i]:
             stage = self.stages[p]
@@ -1997,12 +2019,11 @@ class _OperatorRing:
         b = trip.builder
         slot, _, _ = self.round(trip, i, base)
         if issue is not None:
-            b.commit_group('tcgen05', object=self.ring, issue=issue,
-                           slot=slot)
+            b.ring_release(self.ring, slot, issue, engine='tcgen05')
             return
         b.barrier(Participants.WAVE)
-        b.ring_arrive(self.ring, 'empty', slot,
-                      b.op('eq', BOOL, trip.lane, 0, hint='first'))
+        b.ring_release(self.ring, slot,
+                       b.op('eq', BOOL, trip.lane, 0, hint='first'))
 
     def flat_pieces(self):
         """Every piece of the step, chunk after chunk: `(chunk, piece)`."""
@@ -2188,12 +2209,14 @@ def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
     for the chunk's bytes; its steps of K load and split A as without the
     ring, each into registers of its own, and issue the products through
     descriptors into the slot; one commit closes the chunk.  Then the wait
-    that leaves only this chunk in flight retires the one before, which each
-    warp's first lane gives back to the ring -- ahead of the block's first
-    thread's wait for that slot, which fills the chunk `slots - 1` ahead
-    into it.  Behind the last chunk, the wait for all of them, and its slot
-    given back.  A later pass's first chunks are filled at its head, as the
-    trip's head filled the first pass's."""
+    that leaves the ring's `hold - 1` latest chunks in flight -- by default
+    this one, retiring the one before -- retires the chunk `hold - 1`
+    back, which each warp's first lane gives back to the ring -- ahead of
+    the block's first thread's wait for that slot, which fills the chunk
+    `lead` ahead into it (`_OperatorRing.lead`).  Behind the last chunk,
+    the wait for all of them, and the slots still held given back.  A later
+    pass's first chunks are filled at its head, as the trip's head filled
+    the first pass's."""
     from tensorforge.backend.pir.engines import FenceKind
     from tensorforge.generators.element_group import matrix_shape
     b = trip.builder
@@ -2229,12 +2252,15 @@ def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
                 reads += bs
         b.commit_group('wgmma')
         flight.append((registers, reads))
-        if len(flight) > 1:
-            flight = _wgmma_retire(b, flight, 1, accs)
-            ring.release(trip, i - 1, base)
+        if len(flight) >= ring.hold:
+            flight = _wgmma_retire(b, flight, ring.hold - 1, accs)
+            ring.release(trip, i - ring.hold + 1, base)
         ring.ahead(trip, i, base)
-    _wgmma_retire(b, flight, 0, accs)
-    ring.release(trip, len(ring.chunks) - 1, base)
+    if flight:
+        _wgmma_retire(b, flight, 0, accs)
+    for i in range(max(0, len(ring.chunks) - ring.hold + 1),
+                   len(ring.chunks)):
+        ring.release(trip, i, base)
 
 
 def _wgmma_a(trip, buffer, source, at) -> tuple:
@@ -2444,8 +2470,7 @@ def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
         mine = b.op('and', BOOL, inband, b.op('eq', BOOL, band, j % bands,
                                               hint='mine'), hint='mine')
         with b.if_(mine):
-            b.ring_wait(areas, 'empty', slot, b.op('sub', INDEX, 1, parity,
-                                                   hint='free'))
+            b.ring_acquire(areas, slot, parity)
             values = _star_block(trip, step, numbers, element, j * STAR_ROWS,
                                  STAR_ROWS, live)
             for p, xs in enumerate(values):
@@ -2455,9 +2480,9 @@ def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
                 b.tmem_st(tmem, at + 2 * STAR_ROWS * p + STAR_ROWS,
                           [_as_float(b, lo) for _, lo in split])
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
-            b.ring_arrive(areas, 'full', slot, every)
+            b.ring_publish(areas, slot, every)
         with b.if_(issue):
-            b.ring_wait(areas, 'full', slot, parity)
+            b.ring_take(areas, slot, parity)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
         for piece, k0 in _star_pieces(trip, step, ring, j, base, issue):
             p = step.products.index(piece.product)
@@ -2472,7 +2497,7 @@ def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
                               + STAR_ROWS * ia + kt, term=(ia, ib),
                               plan=plan)
                     start = False
-        b.commit_group('tcgen05', object=areas, issue=issue, slot=slot)
+        b.ring_release(areas, slot, issue, engine='tcgen05')
         if ring is not None:
             ring.release(trip, j, base, issue)
             ring.ahead(trip, j, base)
@@ -2497,7 +2522,9 @@ def _wgmma_star(trip, step, ring, pass_, accs, layouts, n, top) -> None:
     ahead of the block's products, whose B is the prepared ring's chunk
     (`_OperatorRing`) or the resident stages.  One commit a block; the wait
     that leaves this block in flight retires the one before, and with it
-    B's slot (`_OperatorRing.release`)."""
+    B's slot (`_OperatorRing.release`) -- or, where the ring holds a slot
+    for its own chunk alone (`hold` 1), the wait for this block retires it
+    and its slot."""
     from tensorforge.backend.pir.engines import FenceKind, MatrixDescType
     from tensorforge.generators.element_group import (STAR_ROWS, STAR_SLOTS,
                                                       WARPGROUP_WARPS)
@@ -2549,6 +2576,9 @@ def _wgmma_star(trip, step, ring, pass_, accs, layouts, n, top) -> None:
     base = ring.base(trip, pass_) if ring is not None else None
     if ring is not None and ring.passes > 1:
         ring.head(trip, base, when=b.op('gt', BOOL, pass_, 0, hint='later'))
+    # The blocks a slot of A, and of B's ring, is held for: the wait
+    # behind a block leaves `hold - 1` in flight, which A's slots bound.
+    hold = slots if ring is None else ring.hold
     flight, start = [], True
     for j in range(blocks):
         at = _index(b, 'add', region, (j % slots) * slot_size, 'as')
@@ -2588,15 +2618,17 @@ def _wgmma_star(trip, step, ring, pass_, accs, layouts, n, top) -> None:
                 reads += bs + [upper, lower]
         b.commit_group('wgmma')
         flight.append(([], reads))
-        if len(flight) > 1:
-            flight = _wgmma_retire(b, flight, 1, accs)
+        if len(flight) >= hold:
+            flight = _wgmma_retire(b, flight, hold - 1, accs)
             if ring is not None:
-                ring.release(trip, j - 1, base)
+                ring.release(trip, j - hold + 1, base)
         if ring is not None:
             ring.ahead(trip, j, base)
-    _wgmma_retire(b, flight, 0, accs)
+    if flight:
+        _wgmma_retire(b, flight, 0, accs)
     if ring is not None:
-        ring.release(trip, blocks - 1, base)
+        for j in range(max(0, blocks - hold + 1), blocks):
+            ring.release(trip, j, base)
 
 
 def _star_quad(trip, step, numbers, element, first, live) -> list:
@@ -2751,8 +2783,9 @@ def _tcgen05_ring(trip, step, ring, cursor, issue, n, M) -> None:
     of all, where tensor memory holds them, else a product's at a time --
     and a chunk at a time the issuing thread waits for the chunk's bytes,
     issues its products and commits them onto the slot's empty side, which
-    they arrive at once complete, and fills the chunk `slots - 1` ahead
-    into the slot the chunk before read.  No barrier and no wait of the
+    they arrive at once complete, and fills the chunk `lead` ahead
+    (`_OperatorRing.lead`, `slots - 1`) into the slot the chunk before
+    read.  No barrier and no wait of the
     block a chunk: only where a product's A columns are written again, and
     behind the step's last chunk, every thread waits for the products
     committed onto the block's mbarrier -- a commit tracks every product its
@@ -4103,8 +4136,7 @@ class MultiElementSection(AbstractInstruction):
         elements = self._group.elements
         lane = trip.lane
         windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
-        b.ring_wait(ring, 'empty', slot, b.op('sub', INDEX, 1, parity,
-                                              hint='free'), writes=windows)
+        b.ring_acquire(ring, slot, parity, writes=windows)
         # The producer's first warp: where the producer is a warpgroup
         # (`element_group.register_budgets`), the others keep its trips and
         # do nothing else.
@@ -4142,10 +4174,10 @@ class MultiElementSection(AbstractInstruction):
         # The lanes' copies, each lane's waited for, ahead of the first
         # lane's arrival, which hands them over with the bulk copies' bytes.
         b.barrier(Participants.WAVE)
-        b.ring_arrive(ring, 'full', slot, b.op('and', BOOL, first_warp,
-                                               b.op('eq', BOOL, lane, 0),
-                                               hint='first'),
-                      tx=nbytes, tokens=tokens)
+        b.ring_publish(ring, slot, b.op('and', BOOL, first_warp,
+                                        b.op('eq', BOOL, lane, 0),
+                                        hint='first'),
+                       tx=nbytes, tokens=tokens)
 
     def _produce_copies(self, trip, buffers, group, active_of) -> None:
         """The inputs no bulk copy takes, by the producer's first warp, each
@@ -4246,7 +4278,7 @@ class MultiElementSection(AbstractInstruction):
         for found in trip.rings.values():
             found.head(trip)
         windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
-        b.ring_wait(ring, 'full', slot, parity, writes=windows)
+        b.ring_take(ring, slot, parity, writes=windows)
         if not self._context.get_user_options().enable_sync_block_opt:
             # Nothing places the role's barriers: the last trip's reads of
             # the intermediates and the pointer tables are met here, as the
@@ -4287,8 +4319,8 @@ class MultiElementSection(AbstractInstruction):
             written |= dests
             read |= reads
         b.barrier(Participants.WAVE)
-        b.ring_arrive(ring, 'empty', slot, b.op('eq', BOOL, trip.lane, 0,
-                                                hint='first'))
+        b.ring_release(ring, slot, b.op('eq', BOOL, trip.lane, 0,
+                                        hint='first'))
 
     def _stage(self, trip, buffer, symbol) -> list:
         """The warp's element's box of an operand, from its own memory into

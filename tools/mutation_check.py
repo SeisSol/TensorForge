@@ -5953,17 +5953,17 @@ GROUPS = {
     # oracle's numbers, races and waits.
     'producer': ('tests/test_element_producer.py', [
         ('the producer waiting for its consumers\' parity',
-         sub(ME_SECTION, "        b.ring_wait(ring, 'empty', slot, b.op('sub', INDEX, 1, parity,\n",
-             "        b.ring_wait(ring, 'empty', slot, b.op('add', INDEX, 0, parity,\n", 1)),
+         sub(BUILD, "            'sub', INDEX, 1, parity, hint='free'), writes=writes, reads=reads)\n",
+             "            'add', INDEX, 0, parity, hint='free'), writes=writes, reads=reads)\n", 1)),
         ('the slot\'s bytes announced short',
          sub(ME_SECTION, '            nbytes += elements * width * rows * section.dtype.size()\n',
              '            nbytes += elements * width * (rows - 4) * section.dtype.size()\n', 1)),
         ('a slot given back by the first lane alone',
-         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_arrive(ring, 'empty', slot,",
-             "        b.ring_arrive(ring, 'empty', slot,", 1)),
+         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_release(ring, slot,",
+             "        b.ring_release(ring, slot,", 1)),
         ('the bytes announced ahead of the lanes\' stores',
-         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_arrive(ring, 'full', slot,",
-             "        b.ring_arrive(ring, 'full', slot,", 1)),
+         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_publish(ring, slot,",
+             "        b.ring_publish(ring, slot,", 1)),
         ('a slot free once one element warp is done',
          sub(ME_SECTION, "            'me', section.ring, full=1, empty=elements,\n",
              "            'me', section.ring, full=1, empty=1,\n", 1)),
@@ -6060,12 +6060,9 @@ GROUPS = {
                'tests/test_operator_ring.py::test_the_kernel_copies_b_and_converts_none_of_it '
                'tests/test_operator_ring.py::test_the_commit_onto_a_rings_slot_is_its_empty_side', [
         ('the producer copying into a slot it did not wait for',
-         sub(ME_SECTION, "        b.ring_wait(self.ring, 'empty', slot, b.op('sub', INDEX, 1, parity,\n"
-                 "                                                   hint='free'),\n"
-                 "                    writes=[self.storage])\n", '', 1)),
+         sub(ME_SECTION, "        b.ring_acquire(self.ring, slot, parity, writes=[self.storage])\n", '', 1)),
         ("tcgen05's products never giving their slot back",
-         sub(ME_SECTION, "            b.commit_group('tcgen05', object=self.ring, issue=issue,\n"
-                 "                           slot=slot)\n", '', 1)),
+         sub(ME_SECTION, "            b.ring_release(self.ring, slot, issue, engine='tcgen05')\n", '', 1)),
         # measync's mutations of the converting ring's issue, on the
         # prepared ring's own copies of its lines.
         ("the prepared ring's A lower half at the upper's columns",
@@ -6110,17 +6107,17 @@ GROUPS = {
         ("the table's numbers past the window's contraction",
          sub(ME_GROUP, '            if col >= d1:\n                continue\n', '', 1)),
         ("wgmma's slot given back ahead of the wait for its products",
-         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, 1, accs)\n'
-                 '            ring.release(trip, i - 1, base)\n',
-             '            ring.release(trip, i - 1, base)\n'
-             '            flight = _wgmma_retire(b, flight, 1, accs)\n', 1)),
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, ring.hold - 1, accs)\n'
+                 '            ring.release(trip, i - ring.hold + 1, base)\n',
+             '            ring.release(trip, i - ring.hold + 1, base)\n'
+             '            flight = _wgmma_retire(b, flight, ring.hold - 1, accs)\n', 1)),
         ("wgmma's slot given back by its first lane alone",
          sub(ME_SECTION, '        b.barrier(Participants.WAVE)\n'
-                 "        b.ring_arrive(self.ring, 'empty', slot,\n",
-             "        b.ring_arrive(self.ring, 'empty', slot,\n", 1)),
+                 "        b.ring_release(self.ring, slot,\n",
+             "        b.ring_release(self.ring, slot,\n", 1)),
         ("the trip's head filling every slot",
-         sub(ME_SECTION, '            for j in range(min(self.slots - 1, len(self.chunks))):\n',
-             '            for j in range(min(self.slots, len(self.chunks))):\n', 1)),
+         sub(ME_SECTION, '            for j in range(min(self.lead, len(self.chunks))):\n',
+             '            for j in range(min(self.lead + 1, len(self.chunks))):\n', 1)),
         ("the trip's first chunks never filled",
          sub(ME_SECTION, '        for ring in trip.rings.values():\n            ring.head(trip)\n', '', 1)),
         ("a product's A written over its products in flight",
@@ -6162,8 +6159,7 @@ GROUPS = {
              "    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,\n"
              "                            full=96, empty=1,\n", 1)),
         ('a band writing a slot the products still read',
-         sub(ME_SECTION, "            b.ring_wait(areas, 'empty', slot, b.op('sub', INDEX, 1, parity,\n"
-                         "                                                   hint='free'))\n", '', 1)),
+         sub(ME_SECTION, "            b.ring_acquire(areas, slot, parity)\n", '', 1)),
         # measync's mutations of `_tcgen05_a` and `_tcgen05`, on the fold's
         # own copies of their lines.
         ('a band of warps the group does not hold whole storing the folded A',
@@ -6183,12 +6179,12 @@ GROUPS = {
          sub(ME_SECTION, '                              a_column=at + 2 * STAR_ROWS * p\n',
              '                              a_column=columns[0] + 2 * STAR_ROWS * p\n', 1)),
         ("wgmma's slot of A written while its products are in flight",
-         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, 1, accs)\n'
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, hold - 1, accs)\n'
                          '            if ring is not None:\n'
-                         '                ring.release(trip, j - 1, base)\n',
-             '            flight = _wgmma_retire(b, flight, 2, accs)\n'
+                         '                ring.release(trip, j - hold + 1, base)\n',
+             '            flight = _wgmma_retire(b, flight, hold, accs)\n'
              '            if ring is not None:\n'
-             '                ring.release(trip, j - 1, base)\n', 1)),
+             '                ring.release(trip, j - hold + 1, base)\n', 1)),
         ("wgmma's stores of A not fenced for the async proxy",
          sub(ME_SECTION, '                                     \'as\'), mine, \'as\'), align=16)\n'
                          '        b.fence(FenceKind.PROXY)\n',
@@ -6491,6 +6487,91 @@ GROUPS = {
         ("the state past a split of its first two roles' ends",
          sub(BARRIERS, '        for end in ends[1:]:\n',
              '        for end in ends[1:2]:\n', 1)),
+    ]),
+    # The ring as one object (`engines.RingSpec`, `IRBuilder.ring_acquire`
+    # and its kin, `pir.rings`): its description, the scope every statement
+    # on it states, its acts held to its roles, and the hand-offs a pass
+    # reads.
+    'ringobj': ('tests/test_ring_object.py tests/test_mbarrier_ring.py -n 6', [
+        ("a ring's description not carried by its object",
+         sub(ENGINES, "    return SyncObjectType(scope, kind, Participants.BLOCK, slots=int(slots),\n"
+                      "                          ring=spec)\n",
+             "    return SyncObjectType(scope, kind, Participants.BLOCK, slots=int(slots))\n", 1)),
+        ("a ring's waits stating no scope",
+         sub(ENGINES, "    return _stmt(Op.WAIT_PHASE, (('object', ring), ('side', side),\n"
+                      "                                 ('scope', _ring_scope(ring))),\n",
+             "    return _stmt(Op.WAIT_PHASE, (('object', ring), ('side', side)),\n", 1)),
+        ("a cluster's scope spelled as the block's",
+         sub(ENGINES, '    if scope is not None and scope is not SyncScope.BLOCK:\n',
+             '    if False:\n', 1)),
+        ("a role's acts read the other way round",
+         sub(ENGINES, "        producer = (side == 'empty') == waits\n",
+             "        producer = (side == 'full') == waits\n", 1)),
+        ('a producer among its own consumers let through',
+         sub(ENGINES, '        if self.producer is not None and self.producer in consumers:\n',
+             '        if False:\n', 1)),
+        ("a commit onto a slot read as a publish",
+         sub(Path('src/tensorforge/backend/pir/rings.py'), "        return 'release', 'empty'\n",
+             "        return 'publish', 'full'\n", 1)),
+        ("a split's later roles' hand-offs given to its first",
+         sub(Path('src/tensorforge/backend/pir/rings.py'),
+             '                    for r, region in regions:\n'
+             '                        visit(region.body, r.name)\n',
+             '                    for r, region in regions:\n'
+             '                        visit(region.body, regions[0][0].name)\n', 1)),
+        ("a publish's bytes read as none",
+         sub(Path('src/tensorforge/backend/pir/rings.py'), "        return int(s.attr('tx') or 0)\n",
+             '        return 0\n', 1)),
+        ("a publish of other bytes than its round's let through",
+         sub(Path('src/tensorforge/backend/pir/rings.py'),
+             "    if act == 'publish' and spec.tx and int(s.attr('tx') or 0) != spec.tx:\n",
+             '    if False:\n', 1)),
+        ("the verifier asking no ring's roles",
+         sub(PASSES, '        why = ring_acts.refusal(s, None if role is None else role.name)\n',
+             '        why = None\n', 1)),
+        ('a ring set up without the roles it names',
+         sub(BUILD, '                                producer, tuple(consumers), int(tx),\n',
+             '                                None, (), int(tx),\n', 1)),
+        ("an engine's release written as an arrival",
+         sub(BUILD, '        if engine is not None:\n'
+                    '            return self.commit_group(engine, object=ring, issue=issue,\n',
+             '        if False:\n'
+             '            return self.commit_group(engine, object=ring, issue=issue,\n', 1)),
+        ("the producer's ring naming no roles",
+         sub(ME_SECTION, "            arena=GeneralLexicon.TOTAL_SHR_MEM, producer='producer',\n"
+                         "            consumers=('elements',))\n",
+             '            arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
+        # The release point (`RingSpec.hold`, `Options.matrix_ring_hold`).
+        ("a ring held past its slots",
+         sub(ENGINES, '        if not 1 <= int(self.hold) <= int(self.slots):\n',
+             '        if not 1 <= int(self.hold):\n', 1)),
+        ("a ring's hold not carried to its description",
+         sub(BUILD, '                                engines.SyncKind.MBARRIER, scope, int(hold))\n',
+             '                                engines.SyncKind.MBARRIER, scope)\n', 1)),
+        ("wgmma's slot given back a chunk past the one its wait retired",
+         sub(ME_SECTION, '            ring.release(trip, i - ring.hold + 1, base)\n',
+             '            ring.release(trip, i - ring.hold + 2, base)\n', 1)),
+        ("the wait behind a wgmma chunk leaving its hold in flight",
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, ring.hold - 1, accs)\n',
+             '            flight = _wgmma_retire(b, flight, ring.hold, accs)\n', 1)),
+        ("the slots still held behind the last chunk never given back",
+         sub(ME_SECTION, '    for i in range(max(0, len(ring.chunks) - ring.hold + 1),\n',
+             '    for i in range(max(0, len(ring.chunks) - 1),\n', 1)),
+        ("the first thread filling past the slot given back",
+         sub(ME_SECTION, "        return self.slots - self.hold + (self.step.lowering != 'tcgen05')\n",
+             "        return self.slots - self.hold + 1 + (self.step.lowering != 'tcgen05')\n", 1)),
+        ("the first thread's lead blind to the hold",
+         sub(ME_SECTION, "        return self.slots - self.hold + (self.step.lowering != 'tcgen05')\n",
+             "        return self.slots - 2 + (self.step.lowering != 'tcgen05')\n", 1)),
+        ("wgmma's folded star waiting as before whatever the hold",
+         sub(ME_SECTION, '    hold = slots if ring is None else ring.hold\n',
+             '    hold = slots\n', 1)),
+        ("a hold its rings refuse taken by the plan",
+         sub(ME_GROUP, '        if hold is not None and hold_refusal(staged, int(hold)) is None:\n',
+             '        if hold is not None:\n', 1)),
+        ("wgmma's folded star holding B past A's slots",
+         sub(ME_GROUP, '        if folded(section, step) and hold > STAR_SLOTS[step.lowering]:\n',
+             '        if False:\n', 1)),
     ]),
 }
 

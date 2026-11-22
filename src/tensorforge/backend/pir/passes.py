@@ -27,6 +27,7 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
 from .asyncmem import check_commits, check_tokens
 from . import engines
 from . import roles as role_split
+from . import rings as ring_acts
 from .buffers import verify_buffer
 from .tensors import verify_tensor
 from .transfers import tagged
@@ -373,9 +374,15 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # multiplication-wide barrier inside a multiplication-wide loop -- a
         # rendezvous of exactly the threads that agree on the trip count, and
         # therefore fine.
+        # A role's rendezvous: on its named object, every thread of the
+        # role arriving -- not the setup of an object, which the block
+        # does ahead of the roles, nor an mbarrier the role waits on.
         role_barrier = (s.effect & Effect.BARRIER and s.op in engines.REGISTRY
+                        and s.op != Op.SYNC_INIT
                         and getattr(engines.object_of(s), 'participants',
-                                    None) is Participants.ROLE)
+                                    None) is Participants.ROLE
+                        and engines.object_of(s).kind
+                        is engines.SyncKind.NAMED)
         if role_barrier:
             # Every thread of its role arrives: legal where the role is
             # entered as a block is, inside the roles of a block alone.
@@ -410,6 +417,15 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                     f'only reached uniformly at {reachable_at.name.lower()} '
                     f'level; the threads that took another path never arrive '
                     f'(deadlock, not a wrong answer)')
+
+        # -- a ring's acts in the roles it names ---------------------------- #
+        #
+        # Its producer acquires, copies into and publishes a slot, its
+        # consumers take and release it (`rings.refusal`): a wait on the
+        # other side waits for a phase its own role completes.
+        why = ring_acts.refusal(s, None if role is None else role.name)
+        if why is not None:
+            diag.append(why)
 
         # -- a transfer goes through an engine of its op ------------------ #
         why = engines.transfer_engine_refusal(s)

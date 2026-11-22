@@ -292,7 +292,7 @@ STAGE_WARPS = 2
 
 
 def _pipeline(stages=3, trips=5, slots=2, looped=True, release=True,
-              warp_sync=True, exchange=True, cross=False):
+              warp_sync=True, exchange=True, cross=False, named=False):
     """A producer warp and `stages - 1` stages of two warps each, one ring
     between each two: the producer copies a trip's `WIDTH` floats of `m1`
     into ring 0's slot by one bulk copy and announces their bytes; each
@@ -305,7 +305,9 @@ def _pipeline(stages=3, trips=5, slots=2, looped=True, release=True,
     the trips; otherwise the split inside the trip loop.  The switches
     leave a step out: `release` (the first mixer never gives ring 0's slot
     back), `warp_sync` (the first mixer announces without the warp's
-    barrier), `cross` (the consumer reads the first mixer's buffer)."""
+    barrier), `cross` (the consumer reads the first mixer's buffer).
+    `named`: each ring's description names the roles on its two sides
+    (`engines.RingSpec`)."""
     b = IRBuilder(fptype=F32, arena='shrMem', context=tmr._ctx())
     names = ['producer'] + [f'mixer{i}' for i in range(1, stages - 1)] + [
         'consumer']
@@ -319,7 +321,10 @@ def _pipeline(stages=3, trips=5, slots=2, looped=True, release=True,
     rings = [b.mbarrier_ring(f'p{i}', slots, full=1 if i == 0 else
                              STAGE_WARPS, empty=STAGE_WARPS,
                              leader='threadIdx.x == 0 && threadIdx.y == 0',
-                             arena='block')
+                             arena='block',
+                             **(dict(producer=names[i],
+                                     consumers=(names[i + 1],))
+                                if named else {}))
              for i in range(stages - 1)]
     # The slots' windows, handed from one role to the next by the rings'
     # barriers (`handed`), which the placement leaves to them.

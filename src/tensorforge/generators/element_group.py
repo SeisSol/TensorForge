@@ -553,6 +553,10 @@ class GroupSection:
     #: stage streams prepared.
     ring_slots: int = 0
     ring_rows: int = 0
+    #: How many chunks the products hold a slot of the prepared ring for
+    #: (`Options.matrix_ring_hold`, `ring_hold`); 0 where each engine
+    #: holds its own (`RING_HOLDS`).
+    ring_hold: int = 0
     #: `engine` where the star step is folded into the asynchronous steps
     #: that read its intermediates as A (`Options.matrix_star`, `fuse`):
     #: those steps compute A themselves, a block of K of every product at a
@@ -1702,6 +1706,9 @@ def lower(section: GroupSection, context, matrix: bool = True,
         staged = dataclasses.replace(
             staged, ring_slots=int(options.matrix_ring_slots),
             ring_rows=int(options.matrix_ring_rows))
+        hold = options.matrix_ring_hold
+        if hold is not None and hold_refusal(staged, int(hold)) is None:
+            staged = dataclasses.replace(staged, ring_hold=int(hold))
     pitched = _pitched(staged)
     if ring and not lanes:
         ringed = _bulk_pitched(pitched)
@@ -2246,6 +2253,52 @@ def ring_volume(section: GroupSection) -> int:
     return total
 
 
+#: How many chunks of the prepared ring an engine's products hold a slot
+#: for where the options leave it to them (`Options.matrix_ring_hold`,
+#: `engines.RingSpec.hold`): wgmma's warps give a chunk's slot back behind
+#: the wait that leaves the next chunk's products in flight and retires its
+#: own (`multi_element._wgmma_ring`, `wait_group 1`); tcgen05 commits a
+#: chunk's products onto its slot's empty side, which they arrive at once
+#: complete.
+RING_HOLDS = {'wgmma': 2, 'tcgen05': 1}
+
+
+def ring_hold(section: GroupSection, step: Step) -> int:
+    """How many chunks the products of `step` hold a slot of its prepared
+    ring for (`engines.RingSpec.hold`): the section's, where the options
+    asked and every ring takes it (`hold_refusal`), else the engine's
+    own."""
+    return section.ring_hold or RING_HOLDS[step.lowering]
+
+
+def hold_refusal(section: GroupSection, hold: int) -> Optional[str]:
+    """Why the prepared rings of the section's streamed steps cannot hold
+    their slots for `hold` chunks (`Options.matrix_ring_hold`), or None:
+    tcgen05 gives a slot back by the commit of its chunk's products, which
+    arrive at once complete -- 1 alone; wgmma at most the ring's slots, a
+    hold past them waiting for a round no slot is free for -- and 2 where
+    the star step is folded, whose A has two slots a warpgroup that the
+    same wait gives back (`STAR_SLOTS`)."""
+    for step in section.steps:
+        if step.lowering not in ASYNC_LOWERINGS:
+            continue
+        stages = _step_stages(section, step)
+        if not (stages[0].prepared and stages[0].streamed):
+            continue
+        if step.lowering == 'tcgen05' and hold != 1:
+            return ('tcgen05 commits a chunk\'s products onto its slot\'s '
+                    'empty side, which they arrive at once complete: a '
+                    'hold of 1 alone')
+        if hold > section.ring_slots:
+            return (f'a hold of {hold} chunks is past the ring\'s '
+                    f'{section.ring_slots} slots')
+        if folded(section, step) and hold > STAR_SLOTS[step.lowering]:
+            return (f'the folded star\'s A has {STAR_SLOTS[step.lowering]} '
+                    f'slots a warpgroup, which the products\' wait gives '
+                    f'back with B\'s')
+    return None
+
+
 def ring_chunks(section: GroupSection, step: Step) -> Tuple[
         Tuple[Tuple[int, int, int], ...], ...]:
     """The chunks a step streams its prepared B through the ring in, in the
@@ -2320,10 +2373,20 @@ def ring_notes(section: GroupSection, context) -> List[str]:
         where = (f'streamed through a ring of {section.ring_slots} slots, '
                  f'{len(ring_chunks(section, step))} chunks a trip'
                  if stages[0].streamed else 'copied once a block')
+        if stages[0].streamed and section.ring_hold:
+            where += (f', a slot held for {section.ring_hold} '
+                      f'chunk{"s" if section.ring_hold > 1 else ""}')
         notes.append(f'B of {operators} into {step.dest.alias} prepared from '
                      f'the description\'s numbers in {name} ({len(numbers)} '
                      f'floats), {where}; the operators\' pointers are not '
                      f'read for it')
+    hold = context.get_user_options().matrix_ring_hold
+    why = (hold_refusal(section, int(hold))
+           if hold is not None and section.ring_slots else None)
+    if why is not None:
+        notes.append(f'matrix_ring_hold={hold} declined: {why}; each ring '
+                     f'holds its engine\'s own (wgmma {RING_HOLDS["wgmma"]}, '
+                     f'tcgen05 {RING_HOLDS["tcgen05"]})')
     return notes
 
 
