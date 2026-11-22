@@ -190,20 +190,21 @@ def d_fragment_bits() -> BitLayout:
                        Bit(Place.LANE, 4), Bit(Place.LANE, 8))))
 
 
-def mac(writer, type_, a, b, c, term):
+def mac(writer, type_, a, b, c, term, plan=None):
     """One DPAS, D = A * B + C: the matrix op of engine `dpas_spmd`
     (`IRBuilder.matrix_mac`), written as `tensorforge::dpasTF32`
     (`tensorforge_device/sycl_spmd.h`) over the sub-group the target spells;
     A, B and C a vector a work-item, D a new value
     of `type_` -- a link of the accumulator chain, in a variable of its own,
     its layout one nobody wrote down -- with the layouts measured above and
-    `term`, the halves of A and B the product multiplies."""
+    `term`, the halves of A and B the product multiplies, of the emulated
+    product `plan` (`terms.TermPlan`)."""
     return writer.matrix_mac(
         'dpas_spmd', (COLUMNS, SUB_GROUP, DEPTH),
         (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
         (a,), (b,), (c,), result=type_, hint='dacc',
         layouts=(a_fragment_bits(), b_fragment_bits(), d_fragment_bits()),
-        term=term)
+        term=term, plan=plan)
 
 
 def tile_cells():

@@ -113,6 +113,7 @@ from tensorforge.common.basic_types import RUNTIME, Addressing, Datatype
 from .core import (Access, BufferType, Effect, IRError, MemSpace, Op,
                    Operand, Participants, Stmt, Uniformity, Value,
                    XorSwizzle, walk_stmts)
+from .terms import TermPlan
 
 
 # --------------------------------------------------------------------------- #
@@ -3913,8 +3914,9 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     # counts of the fragments, the instruction where the engine has several
     # of a shape (an MFMA's builtin), the fragment layouts where the vendor
     # states them (`BitLayout`s of A, B and D, None where it does not), the
-    # term of a split product (which halves of A and B), the vendor's
-    # modifiers, and the collective that executes it.
+    # term of a split product (which halves of A and B) and the emulated
+    # product it is a term of (`terms.TermPlan`), the vendor's modifiers,
+    # and the collective that executes it.
     OpSpec(Op.MATRIX_MAC, operands=(Slot('engine', (str,)),
                                     Slot('shape', (tuple,)),
                                     Slot('types', (tuple,)),
@@ -3923,6 +3925,7 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
                                     Slot('in_place', (bool,), False),
                                     Slot('layouts', (tuple,), False),
                                     Slot('term', (tuple,), False),
+                                    Slot('plan', (TermPlan,), False),
                                     Slot('modifiers', (tuple,), False),
                                     Slot('collective', (Participants,),
                                          False),

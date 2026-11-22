@@ -4227,8 +4227,8 @@ GROUPS = {
              '        if False:\n'
              "            attrs += (('instruction', instruction),)\n", 1)),
         ('the vendor\'s layouts left off',
-         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '            layouts=vendor_layouts(self))\n',
-             '            layouts=None)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '                layouts=vendor_layouts(self), term=term, plan=plan)\n',
+             '                layouts=None, term=term, plan=plan)\n', 1)),
         ('a derived layout taken for the vendor\'s',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/amd/catalog.py'), '    stated = (Provenance.MEASURED, Provenance.DOCUMENTED)\n',
              '    stated = (Provenance.MEASURED, Provenance.DOCUMENTED,\n'
@@ -4285,7 +4285,7 @@ GROUPS = {
              "    MatrixEngine('dpas_esimd', Participants.WAVE, False, _other,\n"
              '                 _lower_dpas_esimd,\n', 1)),
         ('the SPMD product\'s term left off',
-         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel_spmd.py'), '        term=term)\n', '        term=None)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel_spmd.py'), '        term=term, plan=plan)\n', '        term=None, plan=plan)\n', 1)),
         ('the measured layouts left off',
          sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel_spmd.py'), '        layouts=(a_fragment_bits(), b_fragment_bits(), d_fragment_bits()),\n',
              '        layouts=None,\n', 1)),
@@ -5785,8 +5785,8 @@ GROUPS = {
          sub(PKG / 'catalog.py', "            if unknown:\n                raise ValueError(f'{self.builtin} has no modifier",
              "            if False:\n                raise ValueError(f'{self.builtin} has no modifier", 1)),
         ("a WMMA's layouts left behind",
-         sub(PKG / 'catalog.py', "            modifiers=modifiers, layouts=vendor_layouts(self))\n",
-             "            modifiers=modifiers, layouts=None)\n", 1)),
+         sub(PKG / 'catalog.py', "            modifiers=modifiers, layouts=vendor_layouts(self), term=term,\n",
+             "            modifiers=modifiers, layouts=None, term=term,\n", 1)),
         ("gfx1250's modifiers out of their places among the operands",
          sub(ENGINES, "        args = [flag('a_neg'), a, flag('b_neg'), b,\n",
              "        args = [a, flag('a_neg'), flag('b_neg'), b,\n", 1)),

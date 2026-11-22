@@ -113,7 +113,7 @@ class MMAInstr:
                              d_fragment_bits(self))
         return self._layouts
 
-    def asmcall(self, writer, D, A, B, C, uses=(), term=None):
+    def asmcall(self, writer, D, A, B, C, uses=(), term=None, plan=None):
         """The `mma.sync` itself: one matrix op (`IRBuilder.matrix_mac`),
         written as inline PTX (`engines._lower_mma_sync`).
 
@@ -122,12 +122,14 @@ class MMAInstr:
         form there is -- listed as an output and again as an input, the
         accumulator would be two operands the compiler need not give one
         register.  `term` is which halves of A and B a 3xTF32 product
-        multiplies (`TF32_TERMS`), None for a product in full.
+        multiplies (`TF32_TERMS`), None for a product in full; `plan` the
+        emulated product it is a term of (`terms.TermPlan`).
         """
         if not (D is C or list(D) == list(C)):
             raise InternalError('mma.sync accumulates in place: D has to be C')
         writer.matrix_mac(self.engine, (self.m, self.n, self.k), self.types,
-                          A, B, C, layouts=self.layouts(), term=term)
+                          A, B, C, layouts=self.layouts(), term=term,
+                          plan=plan)
 
     def epilogue(self):
         pass

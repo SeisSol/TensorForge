@@ -212,7 +212,7 @@ class MatrixOp:
         return threads == self.wave
 
     def mac(self, writer, type_, a, b, c, cbsz: int = 0, abid: int = 0,
-            blgp: int = 0, **wmma):
+            blgp: int = 0, term=None, plan=None, **wmma):
         """D = A * B + C as this instruction: the matrix op of its engine
         (`IRBuilder.matrix_mac`), A, B and C one register vector each -- the
         builtin's operands, in its order -- and D a new value of `type_`,
@@ -225,7 +225,9 @@ class MatrixOp:
         and 4) and `wmma_gfx1250` where it takes its modifiers among them
         (`Call.WMMA_MODS`), those of `wmma` stated by name
         (`engines.WMMA_MODIFIERS`) and zero where not.  The layouts the
-        vendor has for A, B and D go along (`vendor_layouts`)."""
+        vendor has for A, B and D go along (`vendor_layouts`), and where the
+        product is a term of an emulated one, its `term` and `plan`
+        (`terms.TermPlan`)."""
         types = (self.a.dtype, self.b.dtype, self.d.dtype, self.d.dtype)
         if self.call is Call.MFMA:
             if wmma:
@@ -236,7 +238,7 @@ class MatrixOp:
                 (a,), (b,), (c,), result=type_, hint='acc',
                 instruction=self.builtin,
                 modifiers=(('cbsz', cbsz), ('abid', abid), ('blgp', blgp)),
-                layouts=vendor_layouts(self))
+                layouts=vendor_layouts(self), term=term, plan=plan)
         if cbsz or abid or blgp:
             raise ValueError(f'{self.builtin} broadcasts nothing: no cbsz, '
                              f'abid or blgp')
@@ -256,7 +258,8 @@ class MatrixOp:
         return writer.matrix_mac(
             engine, (self.m, self.n, self.k), types, (a,), (b,), (c,),
             result=type_, hint='acc', instruction=self.builtin,
-            modifiers=modifiers, layouts=vendor_layouts(self))
+            modifiers=modifiers, layouts=vendor_layouts(self), term=term,
+            plan=plan)
 
     def cbsz(self, threads: int) -> int:
         """How many blocks share one A operand: the instruction's `cbsz`.

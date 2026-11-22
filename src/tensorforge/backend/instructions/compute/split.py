@@ -60,7 +60,18 @@ def covered(significand: int, count: int) -> int:
     return significand * count
 
 
-def products(count: int, keep: Optional[int] = None
+#: The orders a list of term products is issued in (`products`): the
+#: smallest contribution first, or the largest.
+ORDERS = ('smallest', 'largest')
+
+#: Which side's term breaks a tie between two products of one contribution
+#: (`products`): A's -- `(0, 1)` before `(1, 0)` -- or B's.
+MAJORS = ('a', 'b')
+
+
+def products(count: int, keep: Optional[int] = None, *,
+             counts: Optional[Tuple[int, int]] = None,
+             order: str = 'smallest', major: str = 'a'
              ) -> Tuple[Tuple[int, int], ...]:
     """Which `(i, j)` term products to accumulate, smallest contribution first.
 
@@ -74,8 +85,29 @@ def products(count: int, keep: Optional[int] = None
     rounds them off.  The order is free and never worse; how much it buys
     depends on how much the accumulator already carries from earlier k, which
     is a measurement rather than a derivation.
+
+    The paths that issue the products do not all take that order, and say
+    which they take here rather than in a literal of their own (`terms.plan`):
+    `order='largest'` puts the largest contribution first -- NVIDIA's
+    `mma.sync`, wgmma and tcgen05 issue 3xTF32 so, the upper halves first --
+    and `major='b'` breaks a tie between two products of one contribution by
+    B's term rather than A's -- the Intel paths iterate this function's pairs
+    as `(B's term, A's term)`, which is that order once the pair is named
+    `(A's, B's)`.  `counts` takes the sides apart where they have different
+    numbers of terms -- A in two TF32 halves against B whole, `(2, 1)` --
+    `keep` then defaulting to the larger; `count` is the number for both
+    where it is not given.
     """
-    keep = count if keep is None else keep
-    pairs = [(i, j) for i in range(count) for j in range(count)
-             if i + j < keep]
-    return tuple(sorted(pairs, key=lambda p: (-(p[0] + p[1]), p)))
+    if order not in ORDERS:
+        raise ValueError(f'an order of {ORDERS}, not {order!r}')
+    if major not in MAJORS:
+        raise ValueError(f'a major side of {MAJORS}, not {major!r}')
+    a, b = (count, count) if counts is None else (int(c) for c in counts)
+    keep = max(a, b) if keep is None else keep
+    pairs = [(i, j) for i in range(a) for j in range(b) if i + j < keep]
+    sign = -1 if order == 'smallest' else 1
+
+    def key(p):
+        tie = p if major == 'a' else (p[1], p[0])
+        return (sign * (p[0] + p[1]), tie)
+    return tuple(sorted(pairs, key=key))

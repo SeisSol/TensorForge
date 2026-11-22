@@ -894,7 +894,8 @@ class IRBuilder:
                    modifiers: Tuple = (),
                    sources: Optional[Tuple] = None,
                    scalars: Sequence[Tuple[str, Operand]] = (),
-                   extra: Tuple = ()):
+                   extra: Tuple = (),
+                   plan: Optional['TermPlan'] = None):
         """D = A * B + C on the matrix engine `engine`
         (`engines.MATRIX_ENGINES`): the registers of the fragments as
         values, A's, B's and C's in the order the instruction takes them,
@@ -921,7 +922,10 @@ class IRBuilder:
         layouts of A, B and D where the vendor states them (`BitLayout`,
         None where not), `term` the halves of A and B a split product
         multiplies (0 the upper, 1 the lower), `modifiers` the vendor's own,
-        as `(name, value)` pairs.
+        as `(name, value)` pairs.  `plan` is the emulated product the
+        statement is a term of (`terms.TermPlan`), `term` then its `(A's
+        term, B's term)` -- what `terms.check_plans` reads the products of
+        an accumulator against.
 
         `sources` says where A, B and C are (`engines.Source`), where an
         engine takes an operand from anywhere but registers: an operand in
@@ -951,6 +955,8 @@ class IRBuilder:
             attrs += (('layouts', tuple(layouts)),)
         if term is not None:
             attrs += (('term', tuple(term)),)
+        if plan is not None:
+            attrs += (('plan', plan),)
         if modifiers:
             attrs += (('modifiers', tuple(modifiers)),)
         if found.collective is not None:
@@ -1065,7 +1071,9 @@ class IRBuilder:
 
     def wgmma(self, n: int, a: Sequence[Operand], b: Operand,
               d: Sequence[Value], *, scale_d: Operand = 1,
-              layouts: Optional[Tuple] = None) -> Stmt:
+              layouts: Optional[Tuple] = None,
+              term: Optional[Tuple[int, int]] = None,
+              plan: Optional['TermPlan'] = None) -> Stmt:
         """One `wgmma.mma_async` of m64nNk8, TF32 into FP32
         (`engines.wgmma_refusal`): `d`, the N / 2 accumulator registers a
         lane holds, written in place; `a` one descriptor (`matrix_desc`) or
@@ -1074,7 +1082,8 @@ class IRBuilder:
         into a group and a `matrix_wait` retires it, and the registers are
         the warpgroup's to touch only behind that wait.  What the lowering
         would refuse is refused here (`engines.wgmma_refusal`): D's
-        registers are the lanes' own, declared so."""
+        registers are the lanes' own, declared so.  `term` and `plan` as
+        `matrix_mac` takes them: the product of an emulated one it is."""
         a = tuple(a)
         shared_a = len(a) == 1 and isinstance(a[0], Value) and isinstance(
             a[0].type, engines.MatrixDescType)
@@ -1085,7 +1094,7 @@ class IRBuilder:
             'wgmma', (64, int(n), 8),
             (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
             a, (b,), d, layouts=layouts, sources=sources,
-            scalars=(('scale_d', scale_d),))
+            scalars=(('scale_d', scale_d),), term=term, plan=plan)
         why = engines.wgmma_refusal(s)
         if why is not None:
             raise IRError(why)
@@ -1093,7 +1102,9 @@ class IRBuilder:
 
     def tcgen05(self, n: int, a: Operand, b: Operand, d: Value, *,
                 issue: Value, enable_input_d: Operand = 1,
-                a_column: int = 0, d_column: int = 0) -> Stmt:
+                a_column: int = 0, d_column: int = 0,
+                term: Optional[Tuple[int, int]] = None,
+                plan: Optional['TermPlan'] = None) -> Stmt:
         """One `tcgen05.mma` of m128nNk8, TF32 into FP32
         (`engines.tcgen05_refusal`): D the columns `d_column` on of the
         tensor memory buffer `d`; `a` a descriptor of tcgen05's format
@@ -1101,7 +1112,8 @@ class IRBuilder:
         on; `b` a descriptor.  Issued by the one thread `issue` picks,
         which commits it too (`commit_group`); `enable_input_d` 0 writes D
         = A * B, 1 adds to D.  Complete once the mbarrier it is committed to
-        has moved on (`matrix_wait`)."""
+        has moved on (`matrix_wait`).  `term` and `plan` as `matrix_mac`
+        takes them."""
         tmem_a = isinstance(a, Value) and isinstance(a.type, BufferType) \
             and a.type.space == MemSpace.TMEM
         sources = (engines.Source.TMEM if tmem_a else engines.Source.SHARED,
@@ -1113,7 +1125,7 @@ class IRBuilder:
             (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
             (a,), (b,), (d,), sources=sources,
             scalars=(('enable_input_d', enable_input_d), ('issue', issue)),
-            extra=extra)
+            extra=extra, term=term, plan=plan)
         why = engines.tcgen05_refusal(s)
         if why is not None:
             raise IRError(why)
