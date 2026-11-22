@@ -96,6 +96,7 @@ import enum
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from tensorforge.backend.pir import terms
 from tensorforge.common.basic_types import Addressing, Datatype
 
 #: The largest extent of a `SMALL` operand along either axis: an element's
@@ -1460,15 +1461,29 @@ def _halves_order(lowerings: Sequence[GroupSection]) -> List[GroupSection]:
     return out
 
 
-def async_terms(stage) -> Tuple[Tuple[int, int], ...]:
-    """The products a step of K of an asynchronous engine (wgmma, tcgen05)
-    issues for an F32 product, as `(A's half, B's half)`: 3xTF32's three
-    (`nvidia.TF32_TERMS`) where B is staged in its halves; A's two halves
-    by B's one where B is staged whole -- B read in TF32 alone, which only
-    `Options.matrix_tf32_operands` lets a plan do (`tf32_refusal`).  A is
-    always in both halves: split where it is read, or written so."""
+#: A's two halves by B whole, B read in TF32 alone: what an asynchronous
+#: engine multiplies where B is staged unsplit (`async_plan`), which only
+#: `Options.matrix_tf32_operands` lets a plan do (`tf32_refusal`).
+TF32_HALVES_BY_WHOLE = terms.plan('2xtf32', terms.Form(Datatype.TF32, 2),
+                                  terms.Form(Datatype.TF32, 1),
+                                  order='largest')
+
+
+def async_plan(stage):
+    """The emulated product a step of K of an asynchronous engine (wgmma,
+    tcgen05) issues for an F32 product (`terms.TermPlan`): 3xTF32
+    (`nvidia.TF32_PLAN`) where B is staged in its halves; A's two halves by
+    B's one where B is staged whole (`TF32_HALVES_BY_WHOLE`) -- B read in
+    TF32 alone, which only `Options.matrix_tf32_operands` lets a plan do
+    (`tf32_refusal`).  A is always in both halves: split where it is read,
+    or written so.  One accumulator, D."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
-    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))
+    return nvidia.TF32_PLAN if stage.split else TF32_HALVES_BY_WHOLE
+
+
+def async_terms(stage) -> Tuple[Tuple[int, int], ...]:
+    """The products of `async_plan`, as `(A's half, B's half)`."""
+    return async_plan(stage).products
 
 
 def tf32_operands(context) -> bool:
@@ -3269,7 +3284,9 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
            'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
            'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
-           'async_terms', 'precision_notes', 'prefer_mma_sync',
+           'TF32_HALVES_BY_WHOLE', 'async_plan', 'async_terms',
+           'precision_notes',
+           'prefer_mma_sync',
            'tf32_operands', 'tf32_refusal',
            'output_asked', 'output_geometry', 'output_notes', 'output_of',
            'output_refusal', 'output_volume',

@@ -10,6 +10,7 @@ from .. import ranking
 from ..bitlayout import Bit, BitLayout, Place, packed
 from ..routes import lead_route as routes_lead_route
 from ..strategy import Strategy, whole
+from tensorforge.backend.pir import terms
 from tensorforge.backend.pir.core import (BOOL, INDEX, MemSpace, Uniformity,
                                           XorSwizzle, ScalarType)
 from tensorforge.backend.writer import Writer
@@ -66,11 +67,23 @@ class MMAMode:
     BF16 = 2
     I8 = 3
 
-#: The products of 3xTF32, in the order they are issued: which halves of A
-#: and B each multiplies, 0 the upper and 1 the lower -- the upper by the
-#: upper, the upper by B's lower, A's lower by the upper.  The fourth, the
-#: lower by the lower, is not issued.
-TF32_TERMS = ((0, 0), (0, 1), (1, 0))
+#: An F32 operand as `mma.sync ... .tf32` and the asynchronous engines
+#: multiply it: its two TF32 halves (`splitFloatTF32`).
+TF32_FORM = terms.Form(Datatype.TF32, 2)
+
+#: 3xTF32 (`terms.TermPlan`): the products of the halves of A and B in the
+#: order they are issued, 0 the upper half and 1 the lower -- the upper by
+#: the upper, the upper by B's lower, A's lower by the upper, the largest
+#: contribution first (`split.products`' `order='largest'`).  The fourth,
+#: the lower by the lower, is not issued.  One accumulator; where a step
+#: has too few chains each product takes one of its own (`MMAInstr.
+#: plan_for`, `CHAINS_MIN`).
+TF32_PLAN = terms.plan('3xtf32', TF32_FORM, TF32_FORM, order='largest')
+
+#: The products of `TF32_PLAN`, `(A's half, B's half)`: what an atom
+#: issues a step (`MMAInstr.products`, `term`) and the paths that name the
+#: products by pair read (`element_group.tf32_refusal`).
+TF32_TERMS = TF32_PLAN.products
 
 #: The matrix engine, and the elements of A, B, C and D, an instruction of
 #: each mode is (`engines.MATRIX_ENGINES`).
@@ -135,9 +148,25 @@ class MMAInstr:
         pass
 
     @property
+    def plan(self):
+        """The emulated product one accumulator takes a step
+        (`terms.TermPlan`): `TF32_PLAN` in TF32, None for a product in
+        full."""
+        return TF32_PLAN if self.mode == MMAMode.TF32 else None
+
+    def plan_for(self, chains: int):
+        """`plan` where a step issues `chains` independent accumulator
+        chains: below `CHAINS_MIN` each product takes an accumulator of its
+        own (`TermPlan.each`), summed behind the products, so that the next
+        does not wait for it; None for a product in full."""
+        if self.plan is None:
+            return None
+        return self.plan.each() if chains < CHAINS_MIN else self.plan
+
+    @property
     def terms(self):
         """How many products one accumulator takes per step (`products`)."""
-        return 3 if self.mode == MMAMode.TF32 else 1
+        return len(self.plan.products) if self.plan is not None else 1
 
     def products(self, writer, A, B, a_split=None, b_split=None):
         """The products one accumulator takes, as `(A, B)` operand lists in
@@ -162,14 +191,15 @@ class MMAInstr:
 
     def term(self, index):
         """The halves product `index` of `products` multiplies, or None for
-        a product in full (`TF32_TERMS`)."""
+        a product in full (`TF32_TERMS`, `TF32_PLAN`'s products)."""
         return TF32_TERMS[index] if self.mode == MMAMode.TF32 else None
 
     def generate(self, writer, context, A, B, C, uses=(), a_split=None):
         """Every product of one accumulator, issued in order (`products`)."""
         with writer.Scope():
             for i, (a, b) in enumerate(self.products(writer, A, B, a_split)):
-                self.asmcall(writer, C, a, b, C, uses, term=self.term(i))
+                self.asmcall(writer, C, a, b, C, uses, term=self.term(i),
+                             plan=self.plan)
 
 INSTRS = [
     MMAInstr(16,8,4,1,Datatype.F32,'mma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32', MMAMode.TF32, 80), # SM_80
@@ -1302,7 +1332,8 @@ def _open_chain(writer, chain, atom, jstops, tail_of, N, wave):
     for j in jstops:
         for i in range(0, hi, wave):
             tiles = list(range(0, min(wave, hi - i), atom.m))
-            naccs = atom.terms if len(tiles) < CHAINS_MIN else 1
+            plan = atom.plan_for(len(tiles))
+            naccs = plan.count if plan is not None else 1
             naccs_of[j, i] = naccs
             for ii in tiles:
                 for slot, (row0, col0) in cells.items():
@@ -1378,11 +1409,11 @@ def _close_chain(writer, ctx, chain, atom, jstops, tail_of, N, wave):
                             for a in range(naccs)]
                     value = part[0]
                     if naccs > 1:
-                        # The corrections first, as `matmul` sums them.
-                        corr = part[1]
-                        for more in part[2:]:
-                            corr = writer.op('add', fp, corr, more, hint='c')
-                        value = writer.op('add', fp, part[0], corr, hint='c')
+                        # The corrections first, as `matmul` sums them
+                        # (`TermPlan.close`).
+                        value = atom.plan.each().close(
+                            lambda x, y: writer.op('add', fp, x, y,
+                                                   hint='c'), part)
                     cond = _both(writer, rows[1], cols[1])
                     value = plus_old(value, rows[0], cols[0], cond)
                     with _guarded(writer, cond):
@@ -1461,7 +1492,8 @@ def _stacked(writer, ops, ctx, span, atom, M, N, K, kx, threads, mults,
     for i in range(0, M, wave):
         with writer.AnonymousScope():
             tiles = list(range(0, min(wave, M - i), atom.m))
-            naccs = atom.terms if len(tiles) * ntiles < CHAINS_MIN else 1
+            plan = atom.plan_for(len(tiles) * ntiles)
+            naccs = plan.count if plan is not None else 1
             accs = [[[[writer.declare(ScalarType(atom.d), hint='c',
                                       uniform=_PER_LANE)
                        for _ in range(wave // atom.m)]
@@ -1534,24 +1566,22 @@ def _stacked(writer, ops, ctx, span, atom, M, N, K, kx, threads, mults,
                         prods[ii, jt] = atom.products(writer, parts_[0][:aregs],
                                                       bfr[jt], a_split=split)
                 for term in range(len(prods[live[0], 0]) if live else 0):
+                    partial = plan.partial(term) if plan is not None else 0
                     for ii in live:
                         for jt in range(ntiles):
                             a_op, b_op = prods[ii, jt][term]
-                            acc = [accs[term % naccs][jt][cc][ii // atom.m]
+                            acc = [accs[partial][jt][cc][ii // atom.m]
                                    for cc in range(cregs)]
                             atom.asmcall(writer, acc, a_op, b_op, acc,
-                                         term=atom.term(term))
+                                         term=atom.term(term), plan=plan)
 
             for ii in (tiles if naccs > 1 else ()):
                 for jt in range(ntiles):
                     for cc in range(cregs):
                         part = [accs[a][jt][cc][ii // atom.m] for a in range(naccs)]
-                        corr = part[1]
-                        for more in part[2:]:
-                            corr = writer.op('add', ScalarType(atom.d), corr, more,
-                                             hint='c')
-                        Cvals[jt][cc][ii // atom.m] = writer.op(
-                            'add', ScalarType(atom.d), part[0], corr, hint='c')
+                        Cvals[jt][cc][ii // atom.m] = plan.close(
+                            lambda x, y: writer.op('add', ScalarType(atom.d),
+                                                   x, y, hint='c'), part)
 
             Cout = {(q, jj): writer.declare(ScalarType(atom.d), hint='c',
                                             uniform=_PER_LANE)
@@ -2075,9 +2105,11 @@ def matmul(writer, ops, ctx, span):
                     if chain is not None:
                         naccs, accs = _chain_accumulators(chain, atom, j, i,
                                                           cregs, wave)
+                        plan = (atom.plan.each() if naccs > 1
+                                else atom.plan)
                     else:
-                        naccs = (atom.terms if len(tiles) * mults < CHAINS_MIN
-                                 else 1)
+                        plan = atom.plan_for(len(tiles) * mults)
+                        naccs = plan.count if plan is not None else 1
                         accs = [[[[writer.declare(ScalarType(atom.d), hint='c',
                                                   uniform=_PER_LANE)
                                    for _ in range(wave // atom.m)]
@@ -2396,13 +2428,16 @@ def matmul(writer, ops, ctx, span):
                         # 25 % at one warp per scheduler, eight cost nothing
                         # -- and a shared warp has `2 * mults`.
                         for term in range(len(prods[live[0], 0]) if live else 0):
+                            partial = (plan.partial(term) if plan is not None
+                                       else 0)
                             for ii in live:
                                 for p in range(mults):
                                     a_op, b_op = prods[ii, p][term]
-                                    acc = [accs[term % naccs][p][c][ii // atom.m]
+                                    acc = [accs[partial][p][c][ii // atom.m]
                                            for c in range(cregs)]
                                     atom.asmcall(writer, acc, a_op, b_op, acc,
-                                                 term=atom.term(term))
+                                                 term=atom.term(term),
+                                                 plan=plan)
 
                         # The remainder on the fragments already in hand: a
                         # lane's A fragment `iii + kf * mregs` is row `g + 8
@@ -2465,12 +2500,10 @@ def matmul(writer, ops, ctx, span):
                             for c in range(cregs):
                                 part = [accs[a][p][c][ii // atom.m]
                                         for a in range(naccs)]
-                                corr = part[1]
-                                for more in part[2:]:
-                                    corr = writer.op('add', ScalarType(atom.d), corr,
-                                                     more, hint='c')
-                                Cvals[p][c][ii // atom.m] = writer.op(
-                                    'add', ScalarType(atom.d), part[0], corr, hint='c')
+                                Cvals[p][c][ii // atom.m] = plan.close(
+                                    lambda x, y: writer.op(
+                                        'add', ScalarType(atom.d), x, y,
+                                        hint='c'), part)
 
                     # The epilogue's staging registers.  Assigned inside a
                     # thread guard and read outside it, so they are declared

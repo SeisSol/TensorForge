@@ -43,7 +43,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import (Any, Callable, Dict, Iterator, List, Optional, Sequence,
+from typing import (Callable, Dict, Iterator, List, Optional, Sequence,
                     Tuple)
 
 from tensorforge.common.basic_types import Datatype

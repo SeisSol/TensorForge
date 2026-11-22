@@ -329,3 +329,229 @@ def test_the_asynchronous_engines_carry_it_through():
     b.wgmma(8, a, desc, d, term=(1, 0), plan=PLAN)
     s = next(s for s, _ in walk(b.finish()) if s.op == Op.MATRIX_MAC)
     assert s.attr('plan') is PLAN and s.attr('term') == (1, 0)
+
+
+# -- the paths' plans ------------------------------------------------------------ #
+
+def test_the_paths_state_their_products_as_plans():
+    """Each path's products are one plan's (`pir.terms`), in the order it
+    issued them before: NVIDIA's largest first, the AMD paths' smallest
+    first, Intel's smallest first with B's half breaking a tie."""
+    from tensorforge.backend.instructions.compute.primitives import (
+        intel, intel_spmd)
+    from tensorforge.backend.instructions.compute.primitives.amd import \
+        stacked
+    from tensorforge.generators import element_group
+    assert nvidia.TF32_PLAN.products == ((0, 0), (0, 1), (1, 0))
+    assert nvidia.TF32_TERMS == nvidia.TF32_PLAN.products
+    assert element_group.TF32_HALVES_BY_WHOLE.products == ((0, 0), (1, 0))
+    assert stacked.BF16X6.products == split.products(3)
+    assert intel.TF32_PLAN.products == ((1, 0), (0, 1), (0, 0))
+    assert intel_spmd.PLAN == intel.TF32_PLAN
+    assert [(q, p) for p, q in intel_spmd.PRODUCTS] == list(
+        intel_spmd.PLAN.products)
+    for plan in (nvidia.TF32_PLAN, element_group.TF32_HALVES_BY_WHOLE,
+                 stacked.BF16X6, intel.TF32_PLAN):
+        assert plan.count == 1 and plan.epilogue is terms.Epilogue.NONE
+
+    class _Stage:
+        def __init__(self, split):
+            self.split = split
+    assert element_group.async_plan(_Stage(True)) is nvidia.TF32_PLAN
+    assert element_group.async_plan(_Stage(False)) is \
+        element_group.TF32_HALVES_BY_WHOLE
+    assert element_group.async_terms(_Stage(False)) == ((0, 0), (1, 0))
+
+
+def test_nvidia_gives_each_product_its_accumulator_below_chains_min():
+    """`MMAInstr.plan_for`: below `CHAINS_MIN` independent chains a step's
+    products each take an accumulator of their own, summed behind them --
+    corrections first (`TermPlan.close`)."""
+    assert ATOM.plan is nvidia.TF32_PLAN and ATOM.terms == 3
+    assert ATOM.plan_for(nvidia.CHAINS_MIN - 1) == nvidia.TF32_PLAN.each()
+    assert ATOM.plan_for(nvidia.CHAINS_MIN) is nvidia.TF32_PLAN
+    dmma = next(i for i in nvidia.INSTRS if i.mode == nvidia.MMAMode.DIRECT)
+    assert dmma.plan is None and dmma.plan_for(1) is None and dmma.terms == 1
+
+
+# -- the generated kernels, read back -------------------------------------------- #
+
+def _case(name):
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).parent / 'cases' / name
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.descr_list(), getattr(mod, 'OPTIONS', {})
+
+
+def _seissol(kernel, order=6, precision='s'):
+    import seissol_suite as suite
+    from tensorforge.frontend.yateto import DescriptionReader
+    system = 'elastic-linearck'
+    return DescriptionReader(None, {}).read(suite.description(
+        system, f'{system}-o{order}-{precision}', kernel))[0], {}
+
+
+def _me(shape, order=6):
+    import test_multi_element as me
+    return me._descrs(shape, order, 's'), {}
+
+
+def _stacked_gemm(rows=16, depth=16, columns=4):
+    """`C = A B` with `A` batch-constant and its numbers known, `B` and `C`
+    an element's: at sixteen lanes a multiplication and with
+    `Options.mma_stack_mults`, NVIDIA's `mma.sync` stacks the warp's two
+    multiplications along N (`nvidia._stacked`) -- one tile of rows, eight
+    columns, one chain: each product into an accumulator of its own
+    (`MMAInstr.plan_for`)."""
+    import numpy as np
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GemmDescr
+    f32 = Datatype.F32
+    numbers = np.random.default_rng(1).uniform(-1, 1, (rows, depth))
+    a = SubTensor(Tensor([rows, depth], Addressing.NONE,
+                         BoundingBox([0, 0], [rows, depth]), alias='A',
+                         datatype=f32, data=numbers))
+    b = SubTensor(Tensor([depth, columns], Addressing.STRIDED,
+                         BoundingBox([0, 0], [depth, columns]), alias='B',
+                         datatype=f32))
+    c = SubTensor(Tensor([rows, columns], Addressing.STRIDED,
+                         BoundingBox([0, 0], [rows, columns]), alias='C',
+                         datatype=f32))
+    return [GemmDescr(trans_a=False, trans_b=False, a=a, b=b, c=c,
+                      alpha=1.0, beta=0.0)], {}
+
+
+#: The multiplications of a warp stacked along N (`nvidia._stacked`).
+STACKED = {'tensor_cores': True, 'mma_stack_mults': True,
+           'lanes_per_mult': 16}
+
+
+def _generated(descrs, arch, backend, options, emulation=False):
+    import contextlib
+    import io
+    import warnings
+    from tensorforge.common.context import Context, Options
+    from tensorforge.generators.generator import Generator
+    from tensorforge.backend.instructions.compute.primitives.amd import \
+        tiling
+    ctx = Context(arch=arch, backend=backend, fp_type=Datatype.F32,
+                  options=Options(**options))
+    before = tiling.EMULATION
+    tiling.EMULATION = emulation or before
+    try:
+        gen = Generator(descrs, ctx)
+        with warnings.catch_warnings(), \
+                contextlib.redirect_stdout(io.StringIO()):
+            warnings.simplefilter('ignore')
+            gen.generate()
+    finally:
+        tiling.EMULATION = before
+    return [section.body for section in gen.built._sections]
+
+
+#: A configuration of every path that issues an emulated product: what it
+#: generates, where, and the plan its products carry.
+PATHS = {
+    'mma.sync': (lambda: _seissol('gpu_volume'), 'sm_86', 'cuda',
+                 {'tensor_cores': True}, '3xtf32'),
+    'mma.sync, a chain': (lambda: _seissol('gpu_localFluxAll'), 'sm_86',
+                          'cuda', {'tensor_cores': True,
+                                   'mma_d_layout': True}, '3xtf32'),
+    'mma.sync, a product an accumulator': (
+        lambda: _case('accumulate_then_read.py'), 'sm_86', 'cuda',
+        {'tensor_cores': True}, '3xtf32/each'),
+    'mma.sync, both': (lambda: _case('chain_five.py'), 'sm_90a', 'cuda',
+                       {'tensor_cores': True}, '3xtf32'),
+    'mma.sync, multiplications stacked along N': (
+        _stacked_gemm, 'sm_86', 'cuda', STACKED, '3xtf32/each'),
+    'multi-element mma_sync': (lambda: _me('volume'), 'sm_120', 'cuda',
+                               {'multi_element': 'force'}, '3xtf32'),
+    'wgmma': (lambda: _me('volume'), 'sm_90a', 'cuda',
+              {'multi_element': 'force', 'matrix_engine': 'auto'},
+              '3xtf32'),
+    'tcgen05': (lambda: _me('volume'), 'sm_100a', 'cuda',
+                {'multi_element': 'force', 'matrix_engine': 'auto'},
+                '3xtf32'),
+    'tcgen05, prepared ring': (lambda: _me('volume', 8), 'sm_100a', 'cuda',
+                               {'multi_element': 'force',
+                                'matrix_engine': 'auto',
+                                'matrix_ring': 'prepared'}, '3xtf32'),
+    'tcgen05, folded star': (lambda: _me('volume', 8), 'sm_100a', 'cuda',
+                             {'multi_element': 'force',
+                              'matrix_engine': 'auto',
+                              'matrix_ring': 'prepared',
+                              'matrix_star': 'engine'}, '3xtf32'),
+    'wgmma, B whole': (lambda: _me('volume'), 'sm_90a', 'cuda',
+                       {'multi_element': 'force', 'matrix_engine': 'auto',
+                        'matrix_tf32_operands': True}, None),
+    'AMD stacked, emulated': (lambda: _case('stacked_volume_f32.py'),
+                              'gfx942', 'hip',
+                              {'amd_matrix_k4_emulate': True}, 'bf16x6'),
+    'AMD stacked, emulated, chained': (
+        lambda: _seissol('gpu_volume'), 'gfx942', 'hip',
+        {'amd_matrix_k4': True, 'amd_matrix_k4_emulate': True,
+         'mma_d_layout': True, 'lanes_per_mult': 16}, 'bf16x6'),
+    'AMD lane-batched, emulated': (lambda: _case('local_flux.py'), 'gfx942',
+                                   'hip', {}, 'bf16x6'),
+    'Intel SPMD DPAS': (lambda: _seissol('gpu_volume'), 'pvc', 'oneapi',
+                        {'sycl_dpas': True}, '3xtf32/b'),
+    'Intel ESIMD DPAS': (lambda: _case('local_flux.py'), 'pvc', 'esimd',
+                         {'tensor_cores': True, 'lanes_per_mult': 16,
+                          'prepare_operands': False}, '3xtf32/b'),
+    'Intel ESIMD DPAS, prepared': (lambda: _case('local_flux.py'), 'pvc',
+                                   'esimd', {'tensor_cores': True,
+                                             'lanes_per_mult': 16},
+                                   '3xtf32/b'),
+}
+
+
+@pytest.mark.parametrize('path', sorted(PATHS))
+def test_every_emulated_product_a_kernel_issues_is_its_plans(path):
+    """Generated over the path, every matrix op of an emulated product
+    carries its plan, and every accumulator takes the plan's products whole
+    and in order (`check_plans`)."""
+    make, arch, backend, options, name = PATHS[path]
+    descrs, case_options = make()
+    bodies = _generated(descrs, arch, backend,
+                        dict(case_options, **options),
+                        emulation=path == 'AMD lane-batched, emulated')
+    from tensorforge.backend.pir.core import walk_stmts
+    planned = [s for body in bodies for s in walk_stmts(body)
+               if s.op == Op.MATRIX_MAC and s.attr('plan') is not None]
+    assert planned, f'{path}: no emulated product generated'
+    if name is not None:
+        assert name in {s.attr('plan').name for s in planned}
+    assert [f for body in bodies for f in terms.check_plans(body)] == []
+
+
+@pytest.mark.parametrize('arch', ['sm_86', 'sm_90a'])
+def test_each_product_of_a_lone_chain_takes_its_own_accumulator(arch):
+    """Where a step has a single chain -- the warp's two multiplications
+    stacked along N into one tile (`nvidia._stacked`) -- each of 3xTF32's
+    products adds into an accumulator of its own (`TermPlan.each`): the
+    registers of C a product writes are its term's, no other term's, and
+    every term has a set.  Summed behind the products, accumulators shared
+    give the same numbers within the tolerance, so it is the registers that
+    tell."""
+    descrs, _ = _stacked_gemm()
+    bodies = _generated(descrs, arch, 'cuda', STACKED)
+    from tensorforge.backend.pir.core import walk_stmts
+    from tensorforge.backend.pir.engines import fragments
+    written = {}
+    for body in bodies:
+        for s in walk_stmts(body):
+            if s.op != Op.MATRIX_MAC or s.attr('plan') is None:
+                continue
+            assert s.attr('plan') == nvidia.TF32_PLAN.each()
+            regs = frozenset(v.id for v in fragments(s)[2])
+            written.setdefault(s.attr('term'), set()).add(regs)
+    assert set(written) == set(nvidia.TF32_PLAN.products)
+    for term, regs in written.items():
+        for other, theirs in written.items():
+            if other != term:
+                assert not (regs & theirs), (term, other)

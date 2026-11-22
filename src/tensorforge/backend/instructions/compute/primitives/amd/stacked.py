@@ -78,6 +78,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
 
+from tensorforge.backend.pir import terms
 from tensorforge.common.basic_types import Datatype
 
 from ... import bitlayout
@@ -101,6 +102,13 @@ EMULATED = {Datatype.F32: 'mfma_f32_16x16x16bf16_1k'}
 
 #: The BF16 terms an F32 operand is split into, which cover its significand.
 BF16_TERMS = 3
+
+#: BF16x6 (`terms.TermPlan`): both operands in three BF16 terms, the six
+#: products whose contribution reaches F32's, smallest first
+#: (`split.products`), into the F32 accumulator -- what the emulated tile
+#: issues a step (`_emit_emulated`).
+BF16X6 = terms.plan('bf16x6', terms.Form(Datatype.BF16, BF16_TERMS),
+                    terms.Form(Datatype.BF16, BF16_TERMS))
 
 #: The two orders in which an instruction lays M out over the quarters of the
 #: wave and the slots of a lane in D (`stacking`): the quarter minor, ``m = q
@@ -682,7 +690,6 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
     steps are one read each at the tile's rows (`MatmulOperands.A_lanes`).
     Sixteen lanes a multiplication."""
     from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
-    from ...split import products
     from .codegen import SPLIT_BF16
     C, chain = ops.C, ops.chain
     threads, M, K, kx = ops.threads, ops.lead_slots, ops.k, ops.kx
@@ -702,7 +709,7 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
     lanes = _lanes(writer, t, p, 1, op.n)
     q = lanes.q
     tiles = list(range(span.start, span.stop, width))
-    pairs = products(BF16_TERMS)
+    plan = BF16X6
     # The lane's steps of an issue: `4 q + i`.
     offsets = [writer.op('add', INDEX,
                          writer.op('mul', INDEX, q, vector, hint='ko'), i,
@@ -785,10 +792,11 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
                 if b is None:
                     return False
                 for c0 in tiles:
-                    for i, j in pairs:
+                    for i, j in plan.products:
                         acc[(rt, c0)] = op.mac(writer, acctype,
                                                frags[c0][i], b[j],
-                                               acc[(rt, c0)])
+                                               acc[(rt, c0)], term=(i, j),
+                                               plan=plan)
         if chain is not None:
             chain.state['accs'] = acc
             if chain.closes and chain.phase == 'all':

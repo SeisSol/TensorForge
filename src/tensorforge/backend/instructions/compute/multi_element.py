@@ -1566,7 +1566,8 @@ def _matrix(trip, step) -> None:
                                 for term, (fa, fb) in enumerate(products):
                                     atom.asmcall(b, accs[(q, s)], fa, fb,
                                                  accs[(q, s)],
-                                                 term=atom.term(term))
+                                                 term=atom.term(term),
+                                                 plan=atom.plan)
             for q in range(together):
                 mq = _index(b, 'add', g, q, 'g')
                 for s in range(slots):
@@ -1654,12 +1655,13 @@ def _round_up(value: int, step: int) -> int:
     return -(-value // step) * step
 
 
-def _terms(stage):
-    """The products of a step of K on an asynchronous engine, as `(A's
-    half, B's half)` (`element_group.async_terms`, which the plan's check
-    of F32's accuracy reads too, `tf32_refusal`)."""
-    from tensorforge.generators.element_group import async_terms
-    return async_terms(stage)
+def _plan(stage):
+    """The emulated product a step of K takes on an asynchronous engine
+    (`element_group.async_plan`, which the plan's check of F32's accuracy
+    reads too, `tf32_refusal`): its products, `(A's half, B's half)`, in
+    their order."""
+    from tensorforge.generators.element_group import async_plan
+    return async_plan(stage)
 
 
 def _ring(trip, step, stages):
@@ -2137,7 +2139,7 @@ def _wgmma(trip, step) -> None:
             product, stage = piece.product, piece.stage
             group = section.buffer(product.second.tensor)
             source = trip.buffers[id(product.second.tensor)]
-            terms = _terms(stage)
+            plan = _plan(stage)
             k_lo = product.depth[0] + piece.k0
             registers, reads = list(accs), []
             for kt in range(0, piece.rows, k_):
@@ -2147,9 +2149,10 @@ def _wgmma(trip, step) -> None:
                 bs = piece.descriptors(b, kt, 'wgmma')
                 own = accs + halves[0] + halves[1]
                 b.fence(FenceKind.REGISTERS, engine='wgmma', registers=own)
-                for ia, ib in terms:
+                for ia, ib in plan.products:
                     b.wgmma(n, halves[ia], bs[ib], accs,
-                            scale_d=0 if first else 1, layouts=layouts)
+                            scale_d=0 if first else 1, layouts=layouts,
+                            term=(ia, ib), plan=plan)
                     first = False
                 if copy is None:
                     b.commit_group('wgmma')
@@ -2230,9 +2233,11 @@ def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
                 bs = piece.descriptors(b, kt, 'wgmma')
                 b.fence(FenceKind.REGISTERS, engine='wgmma',
                         registers=accs + halves[0] + halves[1])
-                for ia, ib in _terms(stage):
+                plan = _plan(stage)
+                for ia, ib in plan.products:
                     b.wgmma(n, halves[ia], bs[ib], accs,
-                            scale_d=0 if first else 1, layouts=layouts)
+                            scale_d=0 if first else 1, layouts=layouts,
+                            term=(ia, ib), plan=plan)
                     first = False
                 registers += halves[0] + halves[1]
                 reads += bs
@@ -2471,13 +2476,15 @@ def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
         for piece, k0 in _star_pieces(trip, step, ring, j, base, issue):
             p = step.products.index(piece.product)
             rows = min(STAR_ROWS, piece.stage.depth - j * STAR_ROWS)
+            plan = _plan(piece.stage)
             for kt in range(0, rows, k_):
                 bs = piece.descriptors(b, k0 + kt, 'tcgen05')
-                for ia, ib in _terms(piece.stage):
+                for ia, ib in plan.products:
                     b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
                               enable_input_d=0 if start else 1,
                               a_column=at + 2 * STAR_ROWS * p
-                              + STAR_ROWS * ia + kt)
+                              + STAR_ROWS * ia + kt, term=(ia, ib),
+                              plan=plan)
                     start = False
         b.commit_group('tcgen05', object=areas, issue=issue, slot=slot)
         if ring is not None:
@@ -2586,9 +2593,11 @@ def _wgmma_star(trip, step, ring, pass_, accs, layouts, n, top) -> None:
                                                    * half + kt * 8, 'ad'),
                                       desc=desc, hint='a')
                 b.fence(FenceKind.REGISTERS, engine='wgmma', registers=accs)
-                for ia, ib in _terms(piece.stage):
+                plan = _plan(piece.stage)
+                for ia, ib in plan.products:
                     b.wgmma(n, [(upper, lower)[ia]], bs[ib], accs,
-                            scale_d=0 if start else 1, layouts=layouts)
+                            scale_d=0 if start else 1, layouts=layouts,
+                            term=(ia, ib), plan=plan)
                     start = False
                 reads += bs + [upper, lower]
         b.commit_group('wgmma')
@@ -2796,13 +2805,14 @@ def _tcgen05_ring(trip, step, ring, cursor, issue, n, M) -> None:
             stage = piece.stage
             upper_at = columns[step.products.index(piece.product)]
             lower_at = upper_at + stage.depth
+            plan = _plan(stage)
             for kt in range(0, piece.rows, k_):
                 bs = piece.descriptors(b, kt, 'tcgen05')
-                for ia, ib in _terms(stage):
+                for ia, ib in plan.products:
                     b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
                               enable_input_d=0 if first else 1,
                               a_column=(upper_at, lower_at)[ia]
-                              + piece.k0 + kt)
+                              + piece.k0 + kt, term=(ia, ib), plan=plan)
                     first = False
                 reads += bs
         ring.release(trip, i, base, issue)
@@ -2858,12 +2868,14 @@ def _tcgen05_resident(trip, step, cursor, issue, n, M) -> None:
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
         if not apart:
             reads = []
+        plan = _plan(stage)
         for kt in range(0, piece.rows, k_):
             bs = piece.descriptors(b, kt, 'tcgen05')
-            for ia, ib in _terms(stage):
+            for ia, ib in plan.products:
                 b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
                           enable_input_d=0 if first else 1,
-                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)
+                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt,
+                          term=(ia, ib), plan=plan)
                 first = False
             reads += bs
         if apart and i + 1 < len(pieces):

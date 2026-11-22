@@ -78,7 +78,7 @@ contraction stays on the FMA path (`Options.sycl_dpas_min_depth`), as does a
 product of fewer than `MIN_COLUMNS` columns.  F64 has no DPAS on this part.
 """
 
-from tensorforge.backend.pir import engines
+from tensorforge.backend.pir import engines, terms
 from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
@@ -119,6 +119,12 @@ MIN_COLUMNS = 3
 #: smallest first (`split.products`): three, `lo*lo` dropped.
 SPLIT_TERMS = 2
 PRODUCTS = split.products(SPLIT_TERMS)
+
+#: The same three as a term plan (`terms.TermPlan`), `(A's half, B's half)`
+#: named, in the order they are issued: `PRODUCTS` iterated as `(B's, A's)`
+#: -- smallest first, a tie broken by B's half.
+PLAN = terms.plan('3xtf32/b', terms.Form(Datatype.TF32, SPLIT_TERMS),
+                  terms.Form(Datatype.TF32, SPLIT_TERMS), major='b')
 
 #: What a chain's members issue, as `multilinear._d_atom` names it.
 CHAIN_MODE = 'tf32'
@@ -964,9 +970,9 @@ class _Product:
             hi, lo, parts = (read.pop(i) if i in read
                              else self.operator(s, c))
             bterms = (hi, lo)
-            for p, q in PRODUCTS:
+            for q, p in PLAN.products:
                 acc[s] = mac(w, self.v8, aterms[q], bterms[p], acc[s],
-                             (q, p))
+                             (q, p), plan=PLAN)
             for t in carried:
                 products = []
                 for k in range(DEPTH):

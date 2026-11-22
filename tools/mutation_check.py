@@ -4729,11 +4729,12 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "                   b.op('mul', INDEX, warp, 16, hint='m'), hint='m')\n",
              "                   b.op('mul', INDEX, warp, 0, hint='m'), hint='m')\n", 1)),
         ('D written over by every wgmma',
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                for ia, ib in terms:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0 if first else 1, layouts=layouts)\n',
-             '                for ia, ib in terms:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0, layouts=layouts)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "                b.fence(FenceKind.REGISTERS, engine='wgmma', registers=own)\n                for ia, ib in plan.products:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0 if first else 1, layouts=layouts,\n",
+             "                b.fence(FenceKind.REGISTERS, engine='wgmma', registers=own)\n                for ia, ib in plan.products:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0, layouts=layouts,\n", 1)),
         ("the products without A's lower half",
-         sub(Path('src/tensorforge/generators/element_group.py'), '    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))\n',
-             '    return ((0, 0), (0, 1)) if stage.split else ((0, 0),)\n', 1)),
+         sub(Path('src/tensorforge/generators/element_group.py'), '    return nvidia.TF32_PLAN if stage.split else TF32_HALVES_BY_WHOLE\n',
+             "    return (nvidia.terms.TermPlan('3xtf32', nvidia.TF32_FORM, nvidia.TF32_FORM, ((0, 0), (0, 1)), (0, 0))\n"
+             '            if stage.split else TF32_HALVES_BY_WHOLE)\n', 1)),
         ('no wait for the products',
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "    b.matrix_wait('wgmma', keep, registers=registers,\n                  reads=[x for _, reads in done for x in reads])\n",
              '', 1)),
@@ -4754,8 +4755,8 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '        upper_at = columns[step.products.index(product)]\n        lower_at = upper_at + stage.depth\n',
              '        upper_at = columns[step.products.index(product)]\n        lower_at = upper_at\n', 1)),
         ('D written over by every tcgen05',
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          enable_input_d=0 if first else 1,\n                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n',
-             '                          enable_input_d=0,\n                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          enable_input_d=0 if first else 1,\n                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt,\n',
+             '                          enable_input_d=0,\n                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt,\n', 1)),
         ('the products committed by nobody',
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "            continue\n        b.commit_group('tcgen05', object=cursor, issue=issue)\n        if copy is not None and i + 1 < len(pieces):\n",
              "            continue\n        if copy is not None and i + 1 < len(pieces):\n", 1)),
@@ -4845,11 +4846,11 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            at = (len(pieces) % RING_SLOTS) * slot\n',
              '            at = 0\n', 1)),
         ("wgmma's A at the product's first rows a chunk",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            terms = _terms(stage)\n            k_lo = product.depth[0] + piece.k0\n',
-             '            terms = _terms(stage)\n            k_lo = product.depth[0]\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            plan = _plan(stage)\n            k_lo = product.depth[0] + piece.k0\n',
+             '            plan = _plan(stage)\n            k_lo = product.depth[0]\n', 1)),
         ("tcgen05's A at the product's first columns a chunk",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt)\n',
-             '                          a_column=(upper_at, lower_at)[ia] + kt)\n', 1)),
+         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                          a_column=(upper_at, lower_at)[ia] + piece.k0 + kt,\n',
+             '                          a_column=(upper_at, lower_at)[ia] + kt,\n', 1)),
         ("no barrier behind wgmma's chunk",
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '            b.fence(FenceKind.PROXY)\n            b.barrier(trip.meet)\n        if flight:',
              '            b.fence(FenceKind.PROXY)\n        if flight:', 1)),
@@ -6084,12 +6085,14 @@ GROUPS = {
              '            continue\n'
              "        b.matrix_wait('tcgen05', object=cursor, reads=reads, tmem=[tmem])\n", 1)),
         ('D written over by every wgmma of the prepared ring',
-         sub(ME_SECTION, '                for ia, ib in _terms(stage):\n'
+         sub(ME_SECTION, '                plan = _plan(stage)\n'
+                         '                for ia, ib in plan.products:\n'
                          '                    b.wgmma(n, halves[ia], bs[ib], accs,\n'
-                         '                            scale_d=0 if first else 1, layouts=layouts)\n',
-             '                for ia, ib in _terms(stage):\n'
+                         '                            scale_d=0 if first else 1, layouts=layouts,\n',
+             '                plan = _plan(stage)\n'
+             '                for ia, ib in plan.products:\n'
              '                    b.wgmma(n, halves[ia], bs[ib], accs,\n'
-             '                            scale_d=0, layouts=layouts)\n', 1)),
+             '                            scale_d=0, layouts=layouts,\n', 1)),
         ("wgmma's A at the product's first rows of a prepared chunk",
          sub(ME_SECTION, '            source = trip.buffers[id(product.second.tensor)]\n'
                          '            k_lo = product.depth[0] + piece.k0\n',
@@ -6305,8 +6308,8 @@ GROUPS = {
          sub(ME_GROUP, '    full = set(nvidia.TF32_TERMS)\n    for step in section.steps:\n',
              '    return None\n    full = set(nvidia.TF32_TERMS)\n    for step in section.steps:\n', 1)),
         ("a whole B's two terms taken for 3xTF32's three",
-         sub(ME_GROUP, '    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))\n',
-             '    return nvidia.TF32_TERMS\n', 1)),
+         sub(ME_GROUP, '    return nvidia.TF32_PLAN if stage.split else TF32_HALVES_BY_WHOLE\n',
+             '    return nvidia.TF32_PLAN\n', 1)),
         ('the option ignored',
          sub(ME_GROUP, "    return bool(getattr(context.get_user_options(), 'matrix_tf32_operands',\n",
              "    return False and bool(getattr(context.get_user_options(), 'matrix_tf32_operands',\n", 1)),
@@ -6322,6 +6325,49 @@ GROUPS = {
         ("the kernel's comment silent on the engine declined",
          sub(ME_GROUP, '    notes = [section.engine_note] if section.engine_note else []\n',
              '    notes = []\n', 1)),
+    ]),
+    # The term plan (`pir.terms`): an emulated product's products, their
+    # order, partials and epilogue stated once, the paths issuing a plan's
+    # products and `check_plans` reading them back off the kernels; the
+    # derived forms the tables are made in (`common.matrix.forms`).
+    'terms': ('tests/test_term_plan.py tests/test_derived_forms.py', [
+        ('a plan short of its last product',
+         sub(Path('src/tensorforge/backend/pir/terms.py'),
+             '    return TermPlan(name, a, b, pairs, (0,) * len(pairs), Epilogue.NONE,\n',
+             '    pairs = pairs[:-1]\n'
+             '    return TermPlan(name, a, b, pairs, (0,) * len(pairs), Epilogue.NONE,\n', 1)),
+        ('the epilogue without the leading partial',
+         sub(Path('src/tensorforge/backend/pir/terms.py'),
+             '        return add(partials[0], correction)\n',
+             '        return correction\n', 1)),
+        ('check_plans silent on a run out of its order',
+         sub(Path('src/tensorforge/backend/pir/terms.py'),
+             '            if (len(terms) % len(want) or tuple(terms) != want * whole):\n',
+             '            if False:\n', 1)),
+        ('the order split.products is asked for ignored',
+         sub(Path('src/tensorforge/backend/instructions/compute/split.py'),
+             "    sign = -1 if order == 'smallest' else 1\n",
+             '    sign = -1\n', 1)),
+        ('the stacked tile issuing its products backwards',
+         sub(PKG / 'stacked.py',
+             '                    for i, j in plan.products:\n',
+             '                    for i, j in reversed(plan.products):\n', 1)),
+        ("Intel's halves named the other way round",
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/intel.py'),
+             '                for q, p in TF32_PLAN.products:\n',
+             '                for p, q in TF32_PLAN.products:\n', 1)),
+        ("NVIDIA's products into the leading partial whatever the plan",
+         sub(Path('src/tensorforge/backend/instructions/compute/primitives/nvidia.py'),
+             '                    partial = plan.partial(term) if plan is not None else 0\n',
+             '                    partial = 0\n', 1)),
+        ("the device pair's upper half rounded away on sm_90",
+         sub(Path('src/tensorforge/common/matrix/forms.py'),
+             '        make=lambda x: np.stack(tf32_halves(x, ties)))\n',
+             "        make=lambda x: np.stack(tf32_halves(x, 'away')))\n", 1)),
+        ('three parts taken for the TF32 pair',
+         sub(Path('src/tensorforge/common/matrix/forms.py'),
+             '            BF16_TRIPLE.parts: BF16_TRIPLE}.get(int(parts))\n',
+             '            BF16_TRIPLE.parts: TF32_STORED}.get(int(parts))\n', 1)),
     ]),
     # The host oracle's arms of an `if` as coroutines that hand over at a
     # pending ring wait (`kernel_eval.Lockstep._arms`, `COROUTINE_ARMS`).

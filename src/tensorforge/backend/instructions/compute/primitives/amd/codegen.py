@@ -7,6 +7,7 @@
 from tensorforge.common.basic_types import Datatype
 from tensorforge.backend.writer import Writer
 from tensorforge.backend.pir import engines
+from tensorforge.backend.pir import terms as term_plans
 from tensorforge.backend.pir.core import ScalarType
 from .arch import cdna2, gfx1251, rdna
 from .catalog import mfma_tile_for
@@ -787,8 +788,11 @@ def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
     (`lead_zero`, as `matmul32` asks it a step at a time) is left out with
     its reads.
     """
-    products = split.products(terms)
     op = tile.op
+    # The term plan of `terms` terms a side, smallest first (`pir.terms`).
+    side = term_plans.Form(op.a.dtype, terms)
+    plan = term_plans.plan(f'{op.a.dtype.name.lower()}x{len(split.products(terms))}',
+                           side, side)
     width = op.k
     if kx % width:
         return False
@@ -858,11 +862,12 @@ def matmulemu(writer: Writer, C, B, A, M, N, K, kx, threads, dtype, sparse,
                             bterms = split4(tB, 'bt')
                         kkm = kk // width
                         for j in blocks:
-                            for ti, tj in products:
+                            for ti, tj in plan.products:
                                 accs[j] = op.mac(
                                     writer, vtype,
                                     aterms[(j, k // threads)][ti], bterms[tj],
-                                    accs[j], scale, kkm, 0)
+                                    accs[j], scale, kkm, 0, term=(ti, tj),
+                                    plan=plan)
 
                 for j in blocks:
                     for jj in range(min(block, N - j)):

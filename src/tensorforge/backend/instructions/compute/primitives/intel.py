@@ -44,6 +44,7 @@ products.  Emulation is for FP32, where three products against 52 TF is a
 gain.
 """
 
+from tensorforge.backend.pir import terms
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType, join_layout
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import InternalError
@@ -144,6 +145,14 @@ TF32_SPLIT_TERMS = 2
 #: another order: smallest first here, as `split.products` lists them, and
 #: the upper halves first there, which states its own.
 TF32_TERMS = len(split.products(TF32_SPLIT_TERMS))
+
+#: 3xTF32 as this path issues it (`terms.TermPlan`): the products of
+#: `split.products`, smallest first, a tie broken by B's half -- the pairs
+#: iterated as `(B's half, A's half)`, `(A's, B's)` named -- into the
+#: accumulator.
+TF32_PLAN = terms.plan('3xtf32/b', terms.Form(Datatype.TF32, TF32_SPLIT_TERMS),
+                       terms.Form(Datatype.TF32, TF32_SPLIT_TERMS),
+                       major='b')
 
 #: Whether the path is deployed, as opposed to whether it *can* emit for a
 #: given shape -- that second question is `supports()`.  Two different facts,
@@ -550,7 +559,7 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                                 v, writes=(frag,))
 
                 bterms, aterms = (bhi, blo), (ahi, alo)
-                for p, q in split.products(TF32_SPLIT_TERMS):
+                for q, p in TF32_PLAN.products:
                     bf, af = bterms[p], aterms[q]
                     # The matrix op of engine `dpas_esimd`, D written into
                     # the assignment to the accumulator: `af` is A, M by K
@@ -560,7 +569,8 @@ def dpas_matmul(writer, C, A, B, M, N, K, kx, threads, dtype, ctx,
                         (Datatype.TF32, Datatype.TF32, dtype, dtype),
                         (af,), (bf,), (acc,), result=acc.type, hint='dp',
                         layout=join_layout((acc, bf, af)), materialize=False,
-                        term=(q, p), modifiers=(('depth', atom.depth),)))
+                        term=(q, p), modifiers=(('depth', atom.depth),),
+                        plan=TF32_PLAN))
 
         # Read-out is a run too: `c_offset(m, n) = m*N + n`, so one output
         # column is `acc.select<N, 1>(m * N)` -- already the shape the store
