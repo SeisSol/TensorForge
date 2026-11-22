@@ -3657,16 +3657,18 @@ def _column(trip) -> None:
     _write(trip, tensor, write, trip.acc, held)
 
 
-def _write(trip, tensor, write, values, held=None) -> None:
+def _write(trip, tensor, write, values, held=None, masked=True) -> None:
     """`values` -- `(row, slot)` -> a value, None for zero -- at rows
     `write` of the pass's columns of `tensor`, through the lane's pointers
-    under its mask: a whole tile one access where it is one (`claim`).
-    `held` hands a value through what keeps it where it is computed."""
+    under its mask -- not `masked` where the caller writes under it: a whole
+    tile one access where it is one (`claim`).  `held` hands a value
+    through what keeps it where it is computed."""
     b, fp = trip.builder, trip.fp
     target = _bound(b, trip.symbols[id(tensor)])
     width = trip.width
     lower = int(tensor.bbox.lower()[0])
     held = held or (lambda value, type_: value)
+    predicate = trip.mask if masked else None
     for j in range(len(trip.cols)):
         col = trip.cols[j]
         done = set()
@@ -3684,13 +3686,13 @@ def _write(trip, tensor, write, values, held=None) -> None:
                 b.store(target, held(b.pack(vector, *parts, hint='q'),
                                      vector),
                         _address(b, tensor, first, col),
-                        predicate=trip.mask, align=claim)
+                        predicate=predicate, align=claim)
                 done.update(tile)
                 continue
             value = (values[(i, j)] if values[(i, j)] is not None
                      else b.const(0.0, fp))
             b.store(target, held(value, fp), _address(b, tensor, i, col),
-                    predicate=trip.mask)
+                    predicate=predicate)
             done.add(i)
 
 
@@ -4003,13 +4005,25 @@ class _SlotTrip(_LaneTrip):
 
 def _slot_column(trip) -> None:
     """The slot form's output column at the plan's rows: its steps added in
-    turn into sums from zero, and only then the output read, the sums added
-    and written back under the lane's mask -- a tile of sixteen bytes the
-    column writes in part read and written whole, its other rows as they
-    were read, one access each way (the lanes prototype's read-modify-write
-    of a column).  The lanes form's `_column` starts its sums at the
-    output's rows instead, read ahead of the walk: held through it, they
-    cost the o6 volume 152 B of spill in F64 on sm_90a."""
+    turn into sums from zero, the sums added to the output's tiles and
+    written back under the lane's mask -- a tile of sixteen bytes the column
+    writes in part read and written whole, its other rows as they were
+    read, one access each way (the lanes prototype's read-modify-write of a
+    column).  The tiles are read ahead of the walk, or behind it in one
+    block with the adds and the stores under the lane's mask
+    (`Options.slot_output_read`).
+
+    Not behind the walk with nothing around them: the tiles then fed only
+    the masked stores, and ptxas (sm_90a, CUDA 13.3 and 13.4) took the
+    reads and their adds into the stores' branch -- the first tile read and
+    added ahead of the lane's branch, the other four read behind it, two
+    round trips one after the other at the end of every trip.  On GH200 the
+    volume at o4 in F32 ran at 3.40 ns an element so, every load of the trip
+    waiting about three times as long and DRAM at 28 % of its peak; ahead,
+    1.14 ns and 85 %, the lanes prototype's 1.18; masked, 1.13 (Vista
+    1161114).  Ahead ptxas still places the reads, in the walk rather than
+    at its start, and holds them: 168 registers become 244 at o6 in F32 on
+    sm_90a, and the o6 volume's spill in F64 grows from 104 B to 624 B."""
     b, fp = trip.builder, trip.fp
     cones = trip.cones
     steps = cones.outputs
@@ -4035,22 +4049,39 @@ def _slot_column(trip) -> None:
         if trip.claim(tensor, first) is not None:
             kept |= {r for r in range(first, first + trip.width)
                      if r not in write}
+    rows = sorted(set(write) | kept)
+    reads = [i for i in rows if not (steps[0].assigns and i in write)]
+    # Masked only where nothing reads the column as written behind it (a
+    # phase's scaled copies, `_scaled`): the block's values stay in it.
+    masked = (trip.context.get_user_options().slot_output_read == 'masked'
+              and trip.mask is not None and not trip.fused)
+
+    def read():
+        trip.tiles, trip.slot = {}, 0
+        old = {i: trip.own(tensor, i, trip.col) for i in reads}
+        trip.tiles = {}
+        return old
+
+    def added(old):
+        values = {}
+        for i in rows:
+            part = trip.acc.get((i, 0))
+            values[(i, 0)] = (part if i not in old else old[i] if part is None
+                              else b.op('add', fp, old[i], part, hint='q'))
+        return values
+
+    old = {} if masked else read()
     trip.tiles, trip.slot = {}, 0
     trip.acc = {(i, 0): None for i in write}
     for step in steps:
         LOWERINGS[step.lowering](trip, step)
     trip.tiles = {}
-    values = {}
-    rows = sorted(set(write) | kept)
-    for i in rows:
-        if steps[0].assigns and i in write:
-            values[(i, 0)] = trip.acc.get((i, 0))
-            continue
-        old = trip.own(tensor, i, trip.col)
-        part = trip.acc.get((i, 0))
-        values[(i, 0)] = (old if part is None
-                          else b.op('add', fp, old, part, hint='q'))
-    trip.tiles = {}
+    if masked:
+        with b.if_(trip.mask):
+            _write(trip, tensor, rows, added(read()), masked=False)
+        trip.acc = {}
+        return
+    values = added(old)
     _write(trip, tensor, rows, values)
     # What a scaled copy of the output then reads where the pass holds it
     # (`_scaled`): the column as written.

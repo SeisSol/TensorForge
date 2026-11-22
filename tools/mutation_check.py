@@ -5041,7 +5041,7 @@ GROUPS = {
              '            if claim is not None:\n', 1)),
         ('a lane\'s write without its mask',
          sub(ME_SECTION, '            b.store(target, held(value, fp), _address(b, tensor, i, col),\n'
-                         '                    predicate=trip.mask)\n',
+                         '                    predicate=predicate)\n',
              '            b.store(target, held(value, fp), _address(b, tensor, i, col))\n', 1)),
         # Not 'a walk sharing the last walk's reads' (`begin_operation`'s
         # `force` dropped, both of a walk's boundaries -- at its start, and
@@ -6428,7 +6428,7 @@ GROUPS = {
     # `multi_element._SlotTrip`, the loop's lane map): its plan, its
     # exchange, the lane's coefficients, the column's write-back, the
     # binding of a lane's element.
-    'slots': ('tests/test_slot_mapping.py -n 8', [
+    'slots': ('tests/test_slot_mapping.py tests/test_batch_parts.py -n 8', [
         ('the exchange taking its needs unrotated',
          sub(ME_GROUP, '                       key=lambda x: ((x - quantity) % quantities, x))\n',
              '                       key=lambda x: x)\n', 1)),
@@ -6532,6 +6532,31 @@ GROUPS = {
         ('a broadcast read from a table of source lanes',
          sub(ME_SECTION, '        if shuffle not in self.sources and self.exchange.broadcast:\n',
              '        if False:\n', 1)),
+        # Where the output is read (`Options.slot_output_read`) and the grid
+        # that covers the batch in one round (`Options.one_round_grid`).
+        ('the output read behind the walk with nothing around it',
+         subs(ME_SECTION, ('    old = {} if masked else read()\n', '    old = {}\n'),
+              ('    values = added(old)\n', '    values = added(read())\n'))),
+        ('the masked block never taken',
+         sub(ME_SECTION, "    masked = (trip.context.get_user_options().slot_output_read == 'masked'\n",
+             "    masked = (False and trip.context.get_user_options().slot_output_read == 'masked'\n", 1)),
+        ("the masked block's stores guarded again",
+         sub(ME_SECTION, '            _write(trip, tensor, rows, added(read()), masked=False)\n',
+             '            _write(trip, tensor, rows, added(read()))\n', 1)),
+        ("a phase whose copies read its column masked",
+         sub(ME_SECTION, '              and trip.mask is not None and not trip.fused)\n',
+             '              and trip.mask is not None)\n', 1)),
+        ('the masked block reading the output twice',
+         sub(ME_SECTION, '            _write(trip, tensor, rows, added(read()), masked=False)\n',
+             '            _write(trip, tensor, rows, added({i: b.op(\'add\', fp, v, v) for i, v in read().items()}), masked=False)\n', 1)),
+        ('one round asked and the occupancy grid taken',
+         sub(GEN, '                    and not options.one_round_grid))\n', '                    ))\n', 1)),
+        ('one round asked together with a resident grid',
+         sub(GEN, '    if options.one_round_grid and options.resident_grid > 0:\n',
+             '    if False:\n', 1)),
+        ("one round's launch said to loop",
+         sub(GEN, '            self._context.get_user_options().one_round_grid\n',
+             '            False\n', 1)),
     ]),
 }
 

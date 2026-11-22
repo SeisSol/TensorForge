@@ -189,6 +189,18 @@ def parse_multi_element_fma(text: str) -> str:
   return value
 
 
+#: What `Options.slot_output_read` takes.
+SLOT_OUTPUT_READ = ('ahead', 'masked')
+
+
+def parse_slot_output_read(text: str) -> str:
+  """`ahead` or `masked` (`Options.slot_output_read`)."""
+  value = str(text).strip().lower()
+  if value not in SLOT_OUTPUT_READ:
+    raise ValueError(f'expected one of {SLOT_OUTPUT_READ}, got {text!r}')
+  return value
+
+
 #: What `Options.multi_element_values` takes.
 MULTI_ELEMENT_VALUES = ('auto', 'literal', 'memory', 'table')
 
@@ -2035,6 +2047,19 @@ declare('resident_grid',
             'the elements are visited in, which on a two-stack GPU decides '
             'whether looping costs anything at all.')
 
+declare('one_round_grid',
+        default=False,
+        parse=parse_bool,
+        env='TF_ONE_ROUND_GRID',
+        doc='Size the grid-stride traversal\'s grid to cover the batch in '
+            'one round -- a block for each group of elements a block takes, '
+            'each running its loop once -- where the target would size it by '
+            'occupancy (`Target.bounds_grid`; SYCL does so already).  Not '
+            'together with `resident_grid`, and not for a cooperative launch, '
+            'whose grid has to be resident.  The slot form\'s volume at o4 in '
+            'F32 on GH200 (Vista 1161114): 1.14 ns an element under the '
+            'occupancy grid, 1.09 in one round.')
+
 declare('programmatic_launch',
         default=False,
         parse=parse_bool,
@@ -2632,6 +2657,21 @@ declare('multi_element_fma',
             'otherwise.  Under '
             '`multi_element` `auto` the form is that rule\'s, the lanes '
             'form, and `warp` declines it.')
+
+declare('slot_output_read',
+        default='ahead',
+        env='TF_SLOT_OUTPUT_READ',
+        parse=parse_slot_output_read,
+        doc='Where the slot form (`multi_element_fma` `slots`) reads the '
+            'output it adds into.  `ahead`: before the walk, its tiles held '
+            'through it, where ptxas places the reads.  `masked`: behind the '
+            'walk, the reads, the adds and the stores one block under the '
+            'lane\'s mask -- the registers of a read behind the walk without '
+            'the read ptxas split around the stores\' branch where it was '
+            'neither ahead nor masked: the volume at o4 in F32 on GH200 then '
+            'ran at 3.40 ns an element, ahead at 1.14 and masked at 1.13 '
+            '(Vista 1161114).  A chained section\'s phase whose scaled copies '
+            'read the column as written reads ahead.')
 
 declare('element_producer',
         default=False,

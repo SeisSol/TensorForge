@@ -2180,12 +2180,18 @@ class Generator:
   def _one_round(self, cooperative: bool) -> bool:
     """Whether the grid-stride launch covers the batch in one round -- every
     row one trip -- rather than looping over what the device holds: where
-    the target runs a looping block slowly (`Target.bounds_grid`), nobody
-    asked for a resident grid (`resident_grid`) and no section waits on the
-    whole grid, which has to be resident."""
-    return not (cooperative
-                or self._context.get_user_options().resident_grid > 0
-                or self._context.target.bounds_grid())
+    the caller asked for it (`one_round_grid`) or the target runs a looping
+    block slowly (`Target.bounds_grid`), nobody asked for a resident grid
+    (`resident_grid`) and no section waits on the whole grid, which has to
+    be resident."""
+    options = self._context.get_user_options()
+    if options.one_round_grid and options.resident_grid > 0:
+      raise GenerationError(
+          f'one_round_grid sizes the grid to the batch and resident_grid='
+          f'{options.resident_grid} to the device; ask for one of them')
+    return not (cooperative or options.resident_grid > 0
+                or (self._context.target.bounds_grid()
+                    and not options.one_round_grid))
 
   def _batch_parts(self, index: int, loop) -> int:
     """How many contiguous parts section `index`'s traversal cuts the batch
@@ -3561,7 +3567,11 @@ class Generator:
         shared_elements=shared,
         shared_bytes=shared * self._context.fp_type.size(),
         cooperative=any(s.barrier for s in sections),
-        persistent=bool(self._persistent_threading),
+        # A grid asked to cover the batch (`one_round_grid`) holds a block
+        # an element group, the loop's one trip each.
+        persistent=bool(self._persistent_threading) and not (
+            self._context.get_user_options().one_round_grid
+            and not any(s.barrier for s in sections)),
         sections=sections)
 
   #: What the name of the kernel small batches run carries on top of this

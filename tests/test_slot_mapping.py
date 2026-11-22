@@ -392,15 +392,50 @@ def test_a_broadcast_reads_its_coefficients_at_the_columns_offsets():
     assert 'tf_mes_' not in kernel
 
 
-def test_the_output_is_read_behind_the_walk():
-    """The column's sums start at zero, and the output's tiles are read
-    only after the last shuffle -- held from the start, they cost the o6
-    volume a spill in F64."""
-    kernel = _kernel()
+def _output_reads(kernel):
+    """Where the kernel reads the tensor it stores to, and that name."""
     out = re.search(r'\*\(tensorforge::VectorT<float, 4>\*\)&(glb_\w+)\['
                     r'[^\]]+\] = ', kernel).group(1)
-    first = kernel.index(f'= *(tensorforge::VectorT<float, 4>*)&{out}[')
-    assert first > kernel.rindex('tensorforge::gather<32>(')
+    return [m.start() for m in re.finditer(
+        re.escape(f'= *(tensorforge::VectorT<float, 4>*)&{out}['), kernel)]
+
+
+def test_the_output_is_read_ahead_of_the_walk():
+    """The column's sums start at zero and the output's tiles are read
+    ahead of the first shuffle (`slot_output_read` `ahead`): read behind it
+    with nothing around them, they were read in the stores' branch, one
+    tile ahead of the lane's branch and four behind it."""
+    kernel = _kernel()
+    reads = _output_reads(kernel)
+    assert len(reads) == 5
+    assert max(reads) < kernel.index('tensorforge::gather<32>(')
+
+
+def test_masked_the_output_is_read_with_its_stores_in_one_block():
+    """`masked`: behind the last shuffle, the five tiles' reads, their adds
+    and their stores one block under the lane's mask, the stores in it
+    unguarded."""
+    kernel = _kernel(slot_output_read='masked')
+    reads = _output_reads(kernel)
+    assert len(reads) == 5
+    assert kernel.count('if (batchIdActive0) {') == 1
+    block = kernel.index('if (batchIdActive0) {')
+    assert kernel.rindex('tensorforge::gather<32>(') < block < min(reads)
+    tail = kernel[block:]
+    end = tail.index('\n        }\n')
+    stores = re.findall(r'^\s*\*\(tensorforge::VectorT<float, 4>\*\)&glb_\w+'
+                        r'\[[^\]]+\] = ', tail[:end], re.M)
+    assert len(stores) == 5
+
+
+def test_masked_a_phase_whose_copies_read_its_column_reads_ahead():
+    """The derivative's phases each have scaled copies that read the column
+    as written, behind its block: under `masked` the kernel is the one
+    `ahead` gives, its name and options line aside."""
+    def body(kernel):
+        return re.sub(r'kernel_\w+|// options:.*', '', kernel)
+    assert body(_kernel('derivative', 4, 's', slot_output_read='masked')) \
+        == body(_kernel('derivative', 4, 's'))
 
 
 def test_every_fma_is_a_statement_where_it_is_computed():
@@ -418,17 +453,22 @@ def test_every_fma_is_a_statement_where_it_is_computed():
 
 # -- built and run ----------------------------------------------------------- #
 
-def test_compiled_for_sm90a_a_row_is_nine_broadcasts(tmp_path):
+@pytest.mark.parametrize('read', ['ahead', 'masked'])
+def test_compiled_for_sm90a_a_row_is_nine_broadcasts(tmp_path, read):
     """ptxas keeps the plan: 90 SHFL.IDX at o4, a lane's own loads, no
     shared memory -- and the coefficients' reads at immediate offsets: 55
     instructions of address arithmetic in the kernel with nvcc 13.4, 171
-    under the needs' rotation (l9b), the lanes prototype's L9 about 34."""
+    under the needs' rotation (l9b), the lanes prototype's L9 about 34.  And
+    the output's five tiles read with no branch among them, ahead of the
+    walk or in their masked block: read behind it with nothing around them
+    (l9c), ptxas read the first ahead of the lane's branch and the other
+    four behind it."""
     import shutil
     import subprocess
     import test_multi_element_async as tma
     from tensorforge import toolchain
     nvcc = tma._nvcc_builds('sm_90a')
-    context = me._context('sm_90a', 's', **SLOTS)
+    context = me._context('sm_90a', 's', **SLOTS, slot_output_read=read)
     gen = me._generate(me._descrs('volume', 4, 's'), context)
     headers = list(context.target.headers()) + list(gen.get_helper_headers())
     src = tmp_path / 'kernel.cu'
@@ -453,6 +493,11 @@ def test_compiled_for_sm90a_a_row_is_nine_broadcasts(tmp_path):
                      sass)
     assert sum(op in ('IADD3', 'LEA', 'IMAD', 'SHF', 'LOP3')
                for op in ops) <= 100
+    lines = [ln for ln in sass.splitlines()
+             if re.match(r'\s+/\*[0-9a-f]{4,}\*/', ln)]
+    tiles = [n for n, ln in enumerate(lines) if 'LDG.E.128' in ln][-5:]
+    assert not [ln for ln in lines[tiles[0]:tiles[-1]]
+                if re.search(r'\bBRA\b', ln)]
 
 
 ORACLE = [('volume', 4, 's'), ('volume', 4, 'd'), ('volume', 6, 'd'),
@@ -464,9 +509,23 @@ ORACLE = [('volume', 4, 's'), ('volume', 4, 'd'), ('volume', 6, 'd'),
           ('window', 6, 's'), ('plConvertToModal', 4, 's')]
 
 
-@pytest.mark.parametrize('shape,order,precision', ORACLE,
-                         ids=[f'{s}-o{o}{p}' for s, o, p in ORACLE])
-def test_every_element_of_two_trips_on_the_oracle(shape, order, precision):
+#: The output read in one masked block with its stores (`slot_output_read`
+#: `masked`): kept rows of a partial tile, windows and assigned outputs.
+MASKED = [('volume', 4, 's'), ('volume', 6, 'd'), ('sparse-star', 4, 'd'),
+          ('diagonal-star', 4, 'd'), ('localFlux', 4, 's'),
+          ('localFluxAll', 4, 's'), ('columns', 4, 'd'), ('assign', 4, 'd'),
+          ('assign-low', 4, 's'), ('window', 6, 's'),
+          ('plConvertToModal', 4, 's')]
+TRIPS = ([(s, o, p, 'ahead') for s, o, p in ORACLE]
+         + [(s, o, p, 'masked') for s, o, p in MASKED])
+
+
+@pytest.mark.parametrize('shape,order,precision,read', TRIPS,
+                         ids=[f'{s}-o{o}{p}' + ('-masked' if r == 'masked'
+                                                else '')
+                              for s, o, p, r in TRIPS])
+def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
+                                                  read):
     """The group over itself and seven more elements on the host oracle:
     the second trip's first two warps whole, its third one element of three
     -- the rest of its lanes masked -- and its fourth masked; every
@@ -474,10 +533,12 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision):
     the operators their description's numbers; and no access to shared
     memory that no barrier orders.  Dense and sparse stars, the fluxes'
     held columns, windows of the output's columns and rows, assigned
-    outputs, a section of operators alone."""
+    outputs, a section of operators alone; the output read ahead of the
+    walk and in its masked block."""
     import numpy as np
     gen = me._generate(_descrs(shape, order, precision),
-                       me._context('sm_90', precision, **SLOTS))
+                       me._context('sm_90', precision, **SLOTS,
+                                   slot_output_read=read))
     built = gen.built._element_group
     assert built.lanes is not None and built.lanes.mapping is not None
     count = built.elements + 7
@@ -561,14 +622,35 @@ SLOT_CASES = [
     ('localFluxAll', 4, 'd'), ('direction', 6, 'd'), ('columns', 6, 's')]
 
 
-@pytest.mark.parametrize('shape,order,precision', SLOT_CASES,
-                         ids=[f'{s}-o{o}{p}' for s, o, p in SLOT_CASES])
-def test_the_slot_form_computes_on_the_gpu(shape, order, precision, target,
-                                           cache_root, tensorforge_include):
+#: Beside the defaults: the output read in its masked block, and the grid
+#: covering the batch in one round (`one_round_grid`), one trip a block.
+SLOT_VARIANTS = [
+    ('volume', 4, 's', {'slot_output_read': 'masked'}),
+    ('volume', 6, 'd', {'slot_output_read': 'masked'}),
+    ('sparse-star', 6, 's', {'slot_output_read': 'masked'}),
+    ('localFluxAll', 4, 'd', {'slot_output_read': 'masked'}),
+    ('volume', 4, 's', {'one_round_grid': True}),
+    ('localFlux', 6, 'd', {'one_round_grid': True,
+                           'slot_output_read': 'masked'})]
+GPU_CASES = [(s, o, p, {}) for s, o, p in SLOT_CASES] + SLOT_VARIANTS
+
+
+def _case_id(shape, order, precision, options):
+    suffix = ''.join(f'-{"1r" if k == "one_round_grid" else v}'
+                     for k, v in sorted(options.items()))
+    return f'{shape}-o{order}{precision}{suffix}'
+
+
+@pytest.mark.parametrize('shape,order,precision,options', GPU_CASES,
+                         ids=[_case_id(*c) for c in GPU_CASES])
+def test_the_slot_form_computes_on_the_gpu(shape, order, precision, options,
+                                           target, cache_root,
+                                           tensorforge_include):
     """Built and run on the local GPU against NumPy, over a batch whose last
     group is partial and which gives a block of the persistent grid several
-    trips; the operators the description's numbers, which its literals are.
-    F32 held to the outputs' size as the lanes form is."""
+    trips -- or, in one round, every block one; the operators the
+    description's numbers, which its literals are.  F32 held to the
+    outputs' size as the lanes form is."""
     from harness.runner import run_case
     if (target.backend, target.vendor) not in eg.SLOT_TARGETS:
         pytest.skip(f'the slot form is not written for {target.backend} on '
@@ -578,10 +660,11 @@ def test_the_slot_form_computes_on_the_gpu(shape, order, precision, target,
                                 backend=target.backend, **SLOTS))
     assert group is not None and group.lanes.mapping is not None
     case = types.SimpleNamespace(
-        NAME=f'multi_element_slots_{shape}_o{order}{precision}',
+        NAME='multi_element_slots_' + _case_id(
+            shape, order, precision, options).replace('-', '_'),
         DTYPE=me._dtype(precision), BATCH=4099,
         TOL=(1e-12, 1e-12) if precision == 'd' else (1e-4, 1e-2),
-        OPTIONS=dict(SLOTS),
+        OPTIONS={**SLOTS, **options},
         INPUT_TRANSFORM=me._described(me._descrs(shape, order, precision)),
         descr_list=lambda: me._descrs(shape, order, precision),
         reference=me._reference(me._descrs(shape, order, precision)))

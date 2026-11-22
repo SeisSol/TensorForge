@@ -140,6 +140,41 @@ def test_a_resident_grid_scales_the_occupancy_grid_where_there_is_one():
     assert "static_cast<std::size_t>(0.5 * gridsize)" in half
 
 
+def _body(src):
+    """A kernel without its name and the comment lines that describe it."""
+    src = re.sub(r"\bkernel_\w+", "kernel", src)
+    return [ln for ln in src.splitlines()
+            if not re.match(r"\s*// (options|launch|tensorforge-meta):", ln)]
+
+
+@pytest.mark.parametrize("arch,backend", [("sm_120", "cuda"),
+                                          ("gfx942", "hip")])
+def test_one_round_grid_covers_the_batch_where_occupancy_would_size_it(
+        arch, backend):
+    """Asked (`one_round_grid`), the grid is a block a group of rows and no
+    occupancy query, the kernel the grid stride's as it was -- one trip
+    each, every element once on the oracle -- and its launch says so; asked
+    together with a resident grid, it is refused."""
+    gen = _generate(arch=arch, backend=backend, one_round_grid=True)
+    plain = _generate(arch=arch, backend=backend)
+    launcher = gen.get_launcher()
+    rows = _rows(gen)
+    assert "gridsize" not in launcher
+    assert (f"config.grid[0] = (numElements0 + {rows} - 1) / {rows};"
+            in launcher)
+    src = gen.get_kernel()
+    assert _body(src) == _body(plain.get_kernel())
+    assert '"persistent":false' in src
+    assert "one block per element group" in src
+    if backend == "cuda":
+        elements = 3 * rows + 2
+        assert (_written(gen, 4, elements, (1,))
+                == _written(plain, 1, elements, (1,)))
+    with pytest.raises(GenerationError, match="ask for one of them"):
+        _generate(arch=arch, backend=backend, one_round_grid=True,
+                  resident_grid=1.0)
+
+
 def test_sycl_cuts_a_resident_grid_in_two_by_default():
     """Two parts are what a two-stack GPU needs, and cost nothing on one
     stack; a grid that covers the batch in one round is left as it is,
