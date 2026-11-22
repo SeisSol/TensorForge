@@ -6511,6 +6511,27 @@ GROUPS = {
          sub(TUNING, '    if _slot_form(descrs, context):\n', '    if False:\n', 1)),
         ("the slot form's caps short of the one that binds",
          sub(TUNING, 'SLOT_MIN_BLOCKS = (1, 2, 3)\n', 'SLOT_MIN_BLOCKS = (1, 2)\n', 1)),
+        # The dense exchange as broadcasts (`element_group.BROADCASTS`): the
+        # planner's rule, the own term, the computed source, the coefficient's
+        # row.
+        ('the dense exchange planned by needs',
+         sub(ME_GROUP, '    if BROADCASTS and quantities > 1 and all(\n',
+             '    if False and quantities > 1 and all(\n', 1)),
+        ('every exchange planned as broadcasts',
+         sub(ME_GROUP, '            len(needs.get(lane, ())) == quantities - 1\n',
+             '            True\n', 1)),
+        ('a broadcast keeping its own term',
+         sub(ME_GROUP, '    if not exchange.broadcast and any(\n', '    if any(\n', 1)),
+        ('a broadcast reading the lane after',
+         sub(ME_SECTION, "            self.sources[shuffle] = _index(self.builder, 'add', self.first,\n"
+                         "                                           shuffle, 'src')\n",
+             "            self.sources[shuffle] = _index(self.builder, 'add', self.first,\n"
+             "                                           shuffle + 1, 'src')\n", 1)),
+        ("a broadcast's coefficient at the lane's own quantity",
+         sub(ME_SECTION, '                row = term + self.origin\n', '                row = self.column\n', 1)),
+        ('a broadcast read from a table of source lanes',
+         sub(ME_SECTION, '        if shuffle not in self.sources and self.exchange.broadcast:\n',
+             '        if False:\n', 1)),
     ]),
 }
 

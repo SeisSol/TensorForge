@@ -3141,12 +3141,16 @@ class Exchange:
     where each reads the same lane of its aligned run of a power of two,
     `lanes` where the sources are a lane's own, a table's (the prototype's
     registers of source lanes).  `bound` is the fewest shuffles a row: the
-    most quantities a lane needs from others."""
+    most quantities a lane needs from others.  `broadcast`: shuffle k brings
+    quantity k to every lane of its element, its own included -- from the
+    element's first lane plus k, a lane's term k its column's entry k
+    (`plan_exchange`, `BROADCASTS`)."""
 
     sources: Tuple[Tuple[int, ...], ...]
     received: Tuple[Tuple[int, ...], ...]
     kinds: Tuple[str, ...]
     bound: int
+    broadcast: bool = False
 
     @property
     def count(self) -> int:
@@ -3174,18 +3178,44 @@ def _shuffle_kind(width: int, sources: Sequence[int],
     return 'lanes'
 
 
+#: Whether `plan_exchange` plans a dense exchange as broadcasts: where every
+#: lane needs every other quantity of its element -- a dense small operand,
+#: the star as the bench's captures store it, an anisotropic material's --
+#: shuffle k brings quantity k to every lane of the element, its own
+#: included, from the element's first lane plus k.  One shuffle a row more
+#: than the needs take (nine against eight), and in return a lane's
+#: coefficient of term k is its column's entry k, at an offset of the
+#: column's own that is the same in every lane: an immediate of the load,
+#: where the needs' rotation put it at an offset of the lane's and every
+#: coefficient read took a 64-bit address add.  The L9 volume compiled for
+#: sm_90a with nvcc 13.4, instructions a trip of three elements, needs
+#: against broadcasts (the lanes prototype's L9 in brackets): o4 F32 864 /
+#: 736 (712), o4 F64 1072 / 960 (936), o6 F32 3296 / 3200 (3176), o6 F64
+#: 5184 / 5136 (5112) -- the integer ones at o4 F32 from 182 to 66, ten
+#: SHFL more -- and o6 F64's spill from 148 to 104 B; the form is issue
+#: bound at two to three warps a scheduler.  Where lanes need fewer --
+#: SeisSol's sparse star, two or three of the eight -- the needs take
+#: three shuffles against nine, and the needs it is.
+BROADCASTS = True
+
+
 def plan_exchange(mapping: SlotMapping,
                   needs: Dict[int, Set[int]]) -> Exchange:
     """The shuffles that bring every lane the quantities of its element it
     needs from other lanes (`needs`, by lane), one slot a lane: as many as
     the most a lane needs -- a provider hands its one register to whoever
     reads it, so no two readers contend -- each lane taking its needs in
-    the order after its own quantity (`(x - q) mod Q`), which for a dense
-    operand is a rotation.  Several slots a lane would want a provider's
-    select where its readers take different slots of it: not built."""
+    the order after its own quantity (`(x - q) mod Q`); or, where every
+    lane needs every other quantity, broadcasts (`BROADCASTS`).  Several
+    slots a lane would want a provider's select where its readers take
+    different slots of it: not built."""
     if mapping.slots != 1:
         raise ValueError(f'an exchange of {mapping.slots} slots a lane')
     width, quantities = mapping.width, mapping.quantities
+    if BROADCASTS and quantities > 1 and all(
+            len(needs.get(lane, ())) == quantities - 1
+            for lane, _, _, _ in mapping.items):
+        return _broadcasts(mapping)
     count = max((len(n) for n in needs.values()), default=0)
     sources = [list(range(width)) for _ in range(count)]
     received = [[-1] * width for _ in range(count)]
@@ -3199,6 +3229,23 @@ def plan_exchange(mapping: SlotMapping,
                   for s, r in zip(sources, received))
     return Exchange(tuple(tuple(s) for s in sources),
                     tuple(tuple(r) for r in received), kinds, count)
+
+
+def _broadcasts(mapping: SlotMapping) -> Exchange:
+    """The exchange as broadcasts (`BROADCASTS`): shuffle k brings quantity k
+    to every lane of its element -- the lane holding it reads itself."""
+    width, quantities = mapping.width, mapping.quantities
+    sources = [list(range(width)) for _ in range(quantities)]
+    received = [[-1] * width for _ in range(quantities)]
+    for lane, _, element, _ in mapping.items:
+        for k in range(quantities):
+            sources[k][lane] = mapping.place(element, k)[0]
+            received[k][lane] = k
+    kinds = tuple(_shuffle_kind(width, s, r)
+                  for s, r in zip(sources, received))
+    return Exchange(tuple(tuple(s) for s in sources),
+                    tuple(tuple(r) for r in received), kinds,
+                    quantities - 1, broadcast=True)
 
 
 def _possible(tensor, row: int, col: int) -> bool:
@@ -3237,8 +3284,8 @@ def slot_needs(section: GroupSection, mapping: SlotMapping,
 def slot_terms(plan: 'Lanes', product: Product, first: int) -> List[int]:
     """The terms a mixing product sums at a lane in the slot form, in its
     order: -1, the lane's own column, where some lane's coefficient for it
-    may be nonzero; then each shuffle that brings some lane a quantity
-    whose coefficient may be (`Exchange`)."""
+    may be nonzero and the exchange is no broadcast; then each shuffle that
+    brings some lane a quantity whose coefficient may be (`Exchange`)."""
     mapping, exchange = plan.mapping, plan.exchange
     small = product.second.tensor
 
@@ -3246,8 +3293,10 @@ def slot_terms(plan: 'Lanes', product: Product, first: int) -> List[int]:
         return product.cols[0] <= col < product.cols[1]
 
     terms = []
-    if any(inside(first + q) and _possible(small, first + q, first + q)
-           for _, _, _, q in mapping.items):
+    # Under broadcasts a lane's own column is one of them: no term of its own.
+    if not exchange.broadcast and any(
+            inside(first + q) and _possible(small, first + q, first + q)
+            for _, _, _, q in mapping.items):
         terms.append(-1)
     for k in range(exchange.count):
         if any(exchange.received[k][lane] >= 0 and inside(first + q)
@@ -3696,6 +3745,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'ring_chunks', 'ring_notes', 'ring_volume',
            'second_stages', 'shared_bytes', 'SM_REGISTERS', 'split',
            'step_refusal', 'streamed', 'table_elements', 'tile_units',
-           'tiled', 'Exchange', 'SLOT_TARGETS', 'SLOT_WARPS', 'SlotMapping',
+           'tiled', 'BROADCASTS', 'Exchange', 'SLOT_TARGETS', 'SLOT_WARPS',
+           'SlotMapping',
            'plan_exchange', 'slot_needs', 'slot_registers', 'slot_terms',
            'slots_plan', 'split_mapping', 'wrapped_mapping']

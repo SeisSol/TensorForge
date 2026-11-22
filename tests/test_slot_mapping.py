@@ -128,24 +128,41 @@ def _needs(mapping, pattern):
             for lane, _, _, q in mapping.items}
 
 
-def test_a_dense_star_takes_eight_shuffles_a_row():
-    """Every quantity of the element from the other eight lanes: as many
-    shuffles as the most a lane needs, each lane receiving each of its
-    element's other quantities once, from that quantity's lane -- a rotation
-    of the nine -- and the idle lanes reading themselves."""
+def test_a_dense_star_takes_nine_broadcasts_a_row():
+    """Every lane needs every other quantity of its element: broadcasts
+    (`element_group.BROADCASTS`) -- shuffle k brings quantity k to every
+    lane of the element, from its lane `9 e + k`, the lane holding it
+    reading itself: nine a row, one more than the eight the needs take, so
+    that a lane's coefficient of term k is its column's entry k.  The idle
+    lanes read themselves."""
     m = eg.split_mapping(9, 9, 32)
     x = eg.plan_exchange(m, _needs(m, lambda a, b: True))
-    assert (x.count, x.bound) == (8, 8)
+    assert (x.count, x.bound, x.broadcast) == (9, 8, True)
+    for lane in range(27):
+        e, q = divmod(lane, 9)
+        assert [x.received[k][lane] for k in range(9)] == list(range(9))
+        assert [x.sources[k][lane] for k in range(9)] == [
+            9 * e + k for k in range(9)]
+    assert all(x.sources[k][lane] == lane and x.received[k][lane] == -1
+               for k in range(9) for lane in range(27, 32))
+    assert all(x.full(k, m) for k in range(9))
+
+
+def test_needs_short_of_every_quantity_take_a_rotation():
+    """Where a lane needs fewer than all -- here all but the quantity four
+    after its own -- the needs plan: as many shuffles as the most a lane
+    needs, each lane receiving its needs once, in the order after its own
+    quantity, each from that quantity's lane."""
+    m = eg.split_mapping(9, 9, 32)
+    x = eg.plan_exchange(m, _needs(m, lambda a, b: (a - b) % 9 != 4))
+    assert (x.count, x.bound, x.broadcast) == (7, 7, False)
     assert set(x.kinds) == {'lanes'}
     for lane in range(27):
         e, q = divmod(lane, 9)
-        got = [x.received[k][lane] for k in range(8)]
-        assert got == [(q + k + 1) % 9 for k in range(8)]
-        assert [x.sources[k][lane] for k in range(8)] == [9 * e + g
+        got = [x.received[k][lane] for k in range(7)]
+        assert got == [(q + d) % 9 for d in (1, 2, 3, 5, 6, 7, 8)]
+        assert [x.sources[k][lane] for k in range(7)] == [9 * e + g
                                                           for g in got]
-    assert all(x.sources[k][lane] == lane and x.received[k][lane] == -1
-               for k in range(8) for lane in range(27, 32))
-    assert all(x.full(k, m) for k in range(8))
 
 
 def test_seissols_sparse_star_takes_three():
@@ -176,16 +193,17 @@ def test_several_slots_a_lane_are_not_exchanged_yet():
 def test_the_volume_takes_l9_in_blocks_of_four_warps(order, precision, arch):
     """L9 on CUDA whatever the order and the precision: a block of four
     warps, each its own three elements, a group of twelve; the star dense,
-    eight shuffles and every term in each product."""
+    nine broadcasts and every one a term of each product, the lane's own
+    column among them."""
     (group, why), section, _ = _plan('volume', order, precision, arch)
     assert group is not None, why
     plan = group.lanes
     assert (group.elements, group.warps, group.threads) == (12, 4, 32)
     assert plan.mapping == eg.split_mapping(9, 9, 32)
-    assert plan.exchange.count == 8
+    assert (plan.exchange.count, plan.exchange.broadcast) == (9, True)
     mixing = [p for s in section.steps for p in s.products
               if p.kind is eg.Kind.MIXING]
-    assert all(eg.slot_terms(plan, p, 0) == [-1] + list(range(8))
+    assert all(eg.slot_terms(plan, p, 0) == list(range(9))
                for p in mixing)
     assert all(s.lowering == 'lane' for s in group.section.steps)
 
@@ -196,7 +214,7 @@ def test_the_sparse_star_drops_the_own_term():
     (group, why), section, _ = _plan('sparse-star', 6, 's')
     assert group is not None, why
     plan = group.lanes
-    assert plan.exchange.count == 3
+    assert (plan.exchange.count, plan.exchange.broadcast) == (3, False)
     mixing = [p for s in section.steps for p in s.products
               if p.kind is eg.Kind.MIXING]
     assert all(eg.slot_terms(plan, p, 0) == [0, 1, 2] for p in mixing)
@@ -279,8 +297,8 @@ def test_the_derivative_takes_its_phases_in_each_warp():
     plans = group.lanes.phases
     assert (group.elements, group.warps) == (12, 4) and plans[0] is None
     assert len(plans) == 6 and all(
-        p.mapping == eg.split_mapping(9, 9, 32) and p.exchange.count == 8
-        for p in plans[1:])
+        p.mapping == eg.split_mapping(9, 9, 32) and p.exchange.count == 9
+        and p.exchange.broadcast for p in plans[1:])
     assert [p.ranges for p in plans[1:]] == [
         ((0, 35),), ((0, 20),), ((0, 10),), ((0, 4),), ((0, 1),)]
 
@@ -331,19 +349,20 @@ def test_a_lane_binds_its_element_and_the_idle_lanes_none():
     assert 'batchIdGroup0 += (gridDim.x * 12)' in kernel
 
 
-@pytest.mark.parametrize('shape,order,precision,shuffles,rows', [
-    ('volume', 4, 's', 8, 10), ('volume', 6, 'd', 8, 35),
-    ('sparse-star', 4, 'd', 3, 10)])
+@pytest.mark.parametrize('shape,order,precision,shuffles,rows,tables', [
+    ('volume', 4, 's', 9, 10, 0), ('volume', 6, 'd', 9, 35, 0),
+    ('sparse-star', 4, 'd', 3, 10, 3)])
 def test_a_row_of_the_star_is_its_shuffles(shape, order, precision,
-                                           shuffles, rows):
+                                           shuffles, rows, tables):
     """A shuffle a planned exchange a row of `I` -- the shuffles shared by
-    the three directions -- from a table of source lanes each; no shared
+    the three directions -- from a table of source lanes each, or under
+    broadcasts from the element's first lane plus the quantity; no shared
     memory."""
     kernel = _kernel(shape, order, precision)
     assert kernel.count('tensorforge::gather<32>(') == shuffles * rows
-    tables = re.findall(r'__device__ const int32_t (tf_mes_\w+)\[32\]',
-                        kernel)
-    assert len(tables) == shuffles
+    found = re.findall(r'__device__ const int32_t (tf_mes_\w+)\[32\]',
+                       kernel)
+    assert len(found) == tables
     assert '__shared__ ' not in kernel.replace(
         'extern __shared__ char totalShrMemPtr[];', '')
 
@@ -356,6 +375,21 @@ def test_a_column_is_written_back_in_whole_tiles():
                         r'\[[^\]]+\] = ', kernel, re.M)
     assert len(stores) == 5
     assert not re.search(r'^\s*glb_\w+\[[^\]]+\] = ', kernel, re.M)
+
+
+def test_a_broadcast_reads_its_coefficients_at_the_columns_offsets():
+    """Under broadcasts the source of shuffle k is the element's first lane
+    plus k, and a lane's coefficient of term k its column's entry k: the
+    row a number in every read of the three stars -- an offset of the
+    column's own, where the needs' rotation put it at an offset of the
+    lane's, a 64-bit address add a read."""
+    kernel = _kernel()
+    sources = re.findall(r'int32_t v\d+_src = v\d+_f \+ (\d+);', kernel)
+    assert sorted(int(k) for k in sources) == list(range(1, 9))
+    base = re.search(r'int32_t (v\d+_c) = v\d+_q \* 9;', kernel).group(1)
+    rows = re.findall(rf'int32_t v\d+_a = (\d+) \+ {base};', kernel)
+    assert sorted(int(k) for k in rows) == list(range(1, 9))
+    assert 'tf_mes_' not in kernel
 
 
 def test_the_output_is_read_behind_the_walk():
@@ -384,9 +418,11 @@ def test_every_fma_is_a_statement_where_it_is_computed():
 
 # -- built and run ----------------------------------------------------------- #
 
-def test_compiled_for_sm90a_a_row_is_eight_shuffles(tmp_path):
-    """ptxas keeps the plan: 80 SHFL.IDX at o4, a lane's own loads, no
-    shared memory."""
+def test_compiled_for_sm90a_a_row_is_nine_broadcasts(tmp_path):
+    """ptxas keeps the plan: 90 SHFL.IDX at o4, a lane's own loads, no
+    shared memory -- and the coefficients' reads at immediate offsets: 55
+    instructions of address arithmetic in the kernel with nvcc 13.4, 171
+    under the needs' rotation (l9b), the lanes prototype's L9 about 34."""
     import shutil
     import subprocess
     import test_multi_element_async as tma
@@ -411,8 +447,12 @@ def test_compiled_for_sm90a_a_row_is_eight_shuffles(tmp_path):
         pytest.skip('cuobjdump not found')
     sass = subprocess.run([tool, '-sass', str(obj)], capture_output=True,
                           text=True, timeout=600).stdout
-    assert len(re.findall(r'\bSHFL\.IDX\b', sass)) == 80
+    assert len(re.findall(r'\bSHFL\.IDX\b', sass)) == 90
     assert not re.search(r'\b(LDS|STS)\b', sass)
+    ops = re.findall(r'/\*[0-9a-f]{4,}\*/\s+(?:@!?U?P[0-9T] )?([A-Z0-9_]+)',
+                     sass)
+    assert sum(op in ('IADD3', 'LEA', 'IMAD', 'SHF', 'LOP3')
+               for op in ops) <= 100
 
 
 ORACLE = [('volume', 4, 's'), ('volume', 4, 'd'), ('volume', 6, 'd'),

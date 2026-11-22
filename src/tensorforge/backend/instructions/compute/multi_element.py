@@ -3905,8 +3905,13 @@ class _SlotTrip(_LaneTrip):
         self.fma_attrs = tuple(dict(self.fma_attrs, no_inline=True).items())
 
     def source(self, shuffle: int):
-        """The lane shuffle `shuffle` reads for this one: its entry of the
+        """The lane shuffle `shuffle` reads for this one: under broadcasts
+        the element's first lane plus the quantity it brings
+        (`element_group.Exchange.broadcast`), else its entry of the
         shuffle's table, a table of the generated file (`int_tables`)."""
+        if shuffle not in self.sources and self.exchange.broadcast:
+            self.sources[shuffle] = _index(self.builder, 'add', self.first,
+                                           shuffle, 'src')
         if shuffle not in self.sources:
             from tensorforge.backend.instructions.compute.multilinear import \
                 _module_table_name
@@ -3935,7 +3940,9 @@ class _SlotTrip(_LaneTrip):
     def coefficient(self, product, term: int):
         """The lane's coefficient of `term` in `product`: its element's small
         operand at the quantity the term brings and the lane's column; zero
-        where a shuffle brings the lane nothing (`Exchange.received`)."""
+        where a shuffle brings the lane nothing (`Exchange.received`).
+        Under broadcasts the quantity is the term's, the same in every lane:
+        the row a number, the read at an offset of the column's."""
         small = product.second.tensor
         key = ('coefficient', id(small), term)
         if key not in self.small:
@@ -3943,6 +3950,8 @@ class _SlotTrip(_LaneTrip):
             valid = None
             if term < 0:
                 row = self.column
+            elif self.exchange.broadcast:
+                row = term + self.origin
             else:
                 source = self.source(term)
                 got = b.op('sub', INDEX, source, self.first, hint='g')
