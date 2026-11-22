@@ -34,6 +34,11 @@ FUSED_TRANSPOSE4X4 = 'tensorforge::transpose4x4b32Fused'
 #: k-vector an emulated MFMA takes (`prepare.split_bf16`, `amd.QuadOrder`).
 PACK_BF16 = 'tensorforge::packBF16x4'
 
+#: The split and the packing of eight, into the `__bf16` k-vectors gfx950's
+#: BF16 instructions take (`stacked._emit_emulated`): two quads a lane.
+SPLIT_BF16_X8 = 'tensorforge::splitFloatx8BF16'
+PACK_BF16_X8 = 'tensorforge::packBF16x8'
+
 #: Whether the moved broadcast (`BroadcastForm.MOVED`, the VOPD form) keeps
 #: its move from being folded back into the FMAs (`movdpp16Kept`).  LLVM's
 #: DPP combine does that from gfx10 on wherever it can, and a DPP-modified

@@ -57,6 +57,12 @@ from ...split import MANTISSA
 from .features import has_feature, wave_size
 
 
+#: The features whose BF16 builtins take `__bf16` vectors (LLVM's `y`) where
+#: the older ones take `short` vectors (`s`): gfx950's MFMAs and gfx1250's
+#: WMMAs (`MatrixOp.registers`).
+BF16_REGISTER_FEATURES = frozenset({'gfx950-insts', 'wmma-n16-insts'})
+
+
 class Call(Enum):
     """The argument order of the intrinsic.
 
@@ -172,6 +178,18 @@ class MatrixOp:
     @property
     def significand(self) -> int:
         return MANTISSA[self.arithmetic or self.a.dtype]
+
+    @property
+    def registers(self):
+        """The element type the builtin declares A's and B's vectors in:
+        a BF16 operand is a vector of `short` on the instructions before
+        gfx950 -- LLVM's `V4s` -- and of `__bf16` on gfx950's and gfx1250's
+        (`V8y`, `BF16_REGISTER_FEATURES`); any other operand its own
+        type.  Checked against the vendored table."""
+        if self.a.dtype is not Datatype.BF16:
+            return self.a.dtype
+        return (Datatype.BF16 if self.feature in BF16_REGISTER_FEATURES
+                else Datatype.I16)
 
     def replication(self, which: str = 'a') -> int:
         """How many times over the wave holds each element of an operand.

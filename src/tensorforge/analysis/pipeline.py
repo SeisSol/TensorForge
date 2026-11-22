@@ -107,6 +107,10 @@ MFMA_CLOCKS: Dict[str, float] = {
     'f32_32x32x4bf16_1k': 70.0, 'f32_16x16x16bf16_1k': 16.8,
     'f32_32x32x8bf16_1k': 35.0,
     'f64_4x4x4f64': 16.0, 'f64_16x16x4f64': 32.0,
+    # gfx950's BF16 tiles (`stacked.EMULATED_TILES`): not measured -- at the
+    # clocks of the gfx942 tile of half their K, which CDNA 4's doubled BF16
+    # rate a CU makes them.
+    'f32_16x16x32_bf16': 16.8, 'f32_32x32x16_bf16': 35.0,
 }
 
 #: Every category the emitter counts under (`pir.emit._mix_category`).

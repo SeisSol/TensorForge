@@ -112,6 +112,23 @@ def parse_matrix_k4(text: str):
   return parse_bool(text)
 
 
+#: The tiles `Options.amd_matrix_k4_emulate_tile` names, by their shape:
+#: gfx90a's and gfx942's `16x16x16bf16_1k` and `32x32x8bf16_1k`, gfx950's
+#: `16x16x32_bf16` and `32x32x16_bf16` (`stacked.EMULATED_TILES`).
+EMULATE_TILES = ('16x16x16', '32x32x8', '16x16x32', '32x32x16')
+
+
+def parse_emulate_tile(text: str):
+  """A tile of `Options.amd_matrix_k4_emulate_tile` (`EMULATE_TILES`),
+  `auto`, or nothing."""
+  low = text.strip().lower()
+  if low in ('', 'none'):
+    return None
+  if low == 'auto' or low in EMULATE_TILES:
+    return low
+  raise ValueError(f'expected auto or one of {EMULATE_TILES}, got {text!r}')
+
+
 def parse_register_spill(text: str) -> str:
   """`off`, `remat` or `shared` (`Options.register_spill`)."""
   value = text.strip().lower()
@@ -1655,6 +1672,26 @@ declare('amd_matrix_k4_emulate',
             'order 8 against the fastest F32 build -- the BF16 instruction '
             'does six times the F32 one\'s work an issue, and six products '
             'and the splits take that back.')
+
+declare('amd_matrix_k4_emulate_tile',
+        default=None,
+        parse=parse_emulate_tile,
+        doc='Under `amd_matrix_k4_emulate`, the BF16 instruction the emulated '
+            'tile issues (`stacked.EMULATED_TILES`): unset, '
+            '`v_mfma_f32_16x16x16bf16_1k` at sixteen lanes a multiplication, '
+            'as before; `16x16x16` and `32x32x8` gfx90a\'s and gfx942\'s '
+            '(`_1k`), `16x16x32` and `32x32x16` gfx950\'s (`v8bf16` operands, '
+            'eight steps a lane); `auto` the widest K the target has at the '
+            'lanes a multiplication takes.  A 16-wide tile serves sixteen '
+            'lanes, four multiplications a wave and four columns an issue; a '
+            '32-wide one thirty-two lanes, two multiplications and sixteen '
+            'columns an issue -- columns past the last whole tile go into one '
+            'padded with zeros where `amd_matrix_k4_pad` asks, through the DPP '
+            'chain otherwise.  Every tile is the F32 tile\'s M order of D for '
+            'its N, six BF16 term products a step (`stacked.BF16X6`).  Checked '
+            'in a host simulation of the instructions\' layouts and built for '
+            'gfx942 and gfx950; not run on hardware -- gfx950\'s fragment '
+            'layouts are derived, not measured (`amd.layouts`).  Off.')
 
 declare('amd_matrix_k4_pipeline',
         default=0,

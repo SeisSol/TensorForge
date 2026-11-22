@@ -409,7 +409,9 @@ def test_every_mfma_the_paths_issue_is_priced():
     issued = ({t.op.builtin for t in catalog.MFMA_TILES
                if t.block in catalog.LANE_BATCHED_BLOCKS}
               | set(stacked.INSTRUCTIONS.values())
-              | set(stacked.EMULATED.values()))
+              | set(stacked.EMULATED.values())
+              | {name for table in stacked.EMULATED_TILES.values()
+                 for name in table.values()})
     for name in issued:
         assert engines.mfma_category(name)[len('mfma.'):] in MFMA_CLOCKS, name
 

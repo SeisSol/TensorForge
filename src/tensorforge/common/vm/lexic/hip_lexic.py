@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: MIT
 from .cuda_lexic import CudaLexic
 
+#: Element types HIP spells otherwise than `Datatype.ctype` does: BF16 as
+#: clang's `__bf16`.
+HIP_TYPE_NAMES = {'bfloat16': '__bf16'}
+
 
 class HipLexic(CudaLexic):
   def __init__(self, backend, underlying_hardware):
@@ -385,6 +389,9 @@ class HipLexic(CudaLexic):
 
   def get_fptype(self, fptype, length=1, relaxed=False):
     kind = 'VectorRelaxedT' if relaxed else 'VectorT'
+    # BF16 is clang's `__bf16` on HIP, which gfx950's BF16 matrix builtins
+    # take vectors of (`catalog.MatrixOp.registers`).
+    fptype = HIP_TYPE_NAMES.get(fptype, fptype)
     return f'tensorforge::{kind}<{fptype}, {length}>'
 
   def glb_store(self, lhs, rhs, *, datatype, length=1, nontemporal=False):

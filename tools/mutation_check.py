@@ -6369,6 +6369,42 @@ GROUPS = {
              '            BF16_TRIPLE.parts: BF16_TRIPLE}.get(int(parts))\n',
              '            BF16_TRIPLE.parts: TF32_STORED}.get(int(parts))\n', 1)),
     ]),
+    # The stacked emulated table (`stacked.EMULATED_TILES`): the 32-wide
+    # tiles' own M order of D, gfx950's two quads a lane, their `__bf16`
+    # vectors, the asked tile, the padded ninth column.
+    'bf16tiles': ('tests/test_amd_stacked.py -k tile', [
+        ("the 32-wide tile's lanes read in the F32 tile's M order",
+         sub(PKG / 'stacked.py',
+             '    if stacking(op) == TABLE:\n        if H != 1:\n',
+             '    if False:\n        if H != 1:\n', 1)),
+        ("a gfx950 lane's second quad of steps at its first's",
+         sub(PKG / 'stacked.py',
+             '    bases = [QUAD * count * (i // QUAD) for i in range(vector)]\n',
+             '    bases = [0 for i in range(vector)]\n', 1)),
+        ("the host-split operator's second quad read where the first is",
+         sub(PKG / 'stacked.py',
+             '        first = r0 // QUAD + count * g\n',
+             '        first = r0 // QUAD\n', 1)),
+        ('eight steps split as four',
+         sub(PKG / 'stacked.py',
+             '    splitter = SPLIT_BF16 if vector == QUAD else SPLIT_BF16_X8\n',
+             '    splitter = SPLIT_BF16\n', 1)),
+        ("gfx950's vectors in the generic name, which HIP does not know",
+         sub(HIP_LEXIC, "HIP_TYPE_NAMES = {'bfloat16': '__bf16'}\n",
+             'HIP_TYPE_NAMES = {}\n', 1)),
+        ('the asked tile at any lanes',
+         sub(PKG / 'stacked.py',
+             '        return op.builtin if op is not None and op.n == threads else None\n',
+             '        return op.builtin if op is not None else None\n', 1)),
+        ("the 32-wide tile's ninth column never padded",
+         sub(PKG / 'stacked.py',
+             '        if (padded(ctx) and (quarters(op, shape.threads) > 1 or width > 4)\n',
+             '        if (padded(ctx) and quarters(op, shape.threads) > 1\n', 1)),
+        ("gfx950's operands as short vectors",
+         sub(PKG / 'catalog.py',
+             "BF16_REGISTER_FEATURES = frozenset({'gfx950-insts', 'wmma-n16-insts'})\n",
+             "BF16_REGISTER_FEATURES = frozenset({'wmma-n16-insts'})\n", 1)),
+    ]),
     # The host oracle's arms of an `if` as coroutines that hand over at a
     # pending ring wait (`kernel_eval.Lockstep._arms`, `COROUTINE_ARMS`).
     'oraclearms': ('tests/test_oracle_roles.py tests/test_mbarrier_ring.py', [

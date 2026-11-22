@@ -56,6 +56,13 @@ WAVE, THREADS, MULTS, COLUMNS = 64, 16, 4, 4
 OPS = {Datatype.F64: OP, Datatype.F32: F32_OP}
 BF16_OP = next(o for o in catalog.MATRIX_OPS
                if o.builtin == "mfma_f32_16x16x16bf16_1k")
+
+#: The stacked emulated table (`stacked.EMULATED_TILES`), by shape, and the
+#: target and lanes a multiplication each is checked at.
+EMU_TILES = {shape: next(o for o in catalog.MATRIX_OPS if o.builtin == name)
+             for shape, name in stacked.EMULATED_TILES[Datatype.F32].items()}
+TILE_TARGETS = {"16x16x16": ("gfx942", 16), "32x32x8": ("gfx942", 32),
+                "16x16x32": ("gfx950", 16), "32x32x16": ("gfx950", 32)}
 ORDERS = {Datatype.F64: stacked.QUARTER_MINOR,
           Datatype.F32: stacked.QUARTER_MAJOR}
 TYPES = [Datatype.F64, Datatype.F32]
@@ -254,10 +261,13 @@ class SimWriter:
     def call_stmt(self, callee, *args, writes=(), **kw):
         # The runtime split of four floats into three BF16 terms each,
         # rounded to nearest even as `static_cast<__bf16>` does, the terms
-        # kept as the floats they stand for.
-        assert callee == "tensorforge::splitFloatx4BF16", callee
+        # kept as the floats they stand for -- or of eight, for gfx950's
+        # tiles (`splitFloatx8BF16`).
+        width = {"tensorforge::splitFloatx4BF16": 4,
+                 "tensorforge::splitFloatx8BF16": 8}.get(callee)
+        assert width is not None, callee
         outs, values = args[:3], args[3:]
-        assert len(values) == 4 and len(writes) == 3
+        assert len(values) == width and len(writes) == 3
         self.splits += 1
         rest = np.stack([np.asarray(v, dtype=np.float32) for v in values],
                         axis=1)
@@ -282,8 +292,12 @@ class SimWriter:
         if callee == "tensorforge::packBF16x4":
             # Terms the host split, stored as the floats they stand for.
             return np.asarray(args[0])
+        if callee == "tensorforge::packBF16x8":
+            # Two quads of them, the first's four steps first.
+            return np.concatenate([np.asarray(args[0]), np.asarray(args[1])],
+                                  axis=1)
         op = next((o for o in list(OPS.values()) + [BF16_OP]
-                   if o.callee == callee), None)
+                   + list(EMU_TILES.values()) if o.callee == callee), None)
         assert op is not None, callee
         assert self.issued in (None, op), "two instructions in one product"
         self.issued = op
@@ -828,6 +842,291 @@ def test_an_emulated_chain_carries_every_cell_of_the_tile(route, prepared):
     assert writer.issued is BF16_OP
     assert np.abs(out.values - want).max() / np.abs(want).max() < 1e-6
     assert out.reads == out.writes == 4 * columns
+
+
+# -- the stacked emulated table: the 32-wide tiles and gfx950's ------------- #
+
+def _tile_ctx(shape, route="transpose", **options):
+    arch, _ = TILE_TARGETS[shape]
+    return _ctx(arch=arch, dtype=Datatype.F32, amd_matrix_k4=route,
+                amd_matrix_k4_emulate=True, amd_matrix_k4_emulate_tile=shape,
+                **options)
+
+
+@pytest.mark.parametrize("shape", sorted(EMU_TILES))
+def test_every_tile_of_the_table_stacks(shape):
+    """The 16-wide tiles lay D out as the F32 tile does (the quarter major),
+    the 32-wide ones in an order of their own -- row ``(s & 3) + 4 q + 8 (s
+    >> 2)`` in slot `s` of half `q` (`TABLE`, `d_rows`); A and B agree on the
+    steps of every lane quarter and slot, gfx950's on derived fragments
+    (`layouts.Provenance.DERIVED`), which is all the sum needs of them."""
+    op = EMU_TILES[shape]
+    order = stacked.stacking(op)
+    if op.n == 16:
+        assert order == stacked.QUARTER_MAJOR
+    else:
+        assert order == stacked.TABLE
+        rows = stacked.d_rows(op)
+        assert rows == {(q, s): (s & 3) + 4 * q + 8 * (s >> 2)
+                        for q in range(2) for s in range(16)}
+    assert op.registers is (Datatype.BF16 if op.feature == "gfx950-insts"
+                            else Datatype.I16)
+    if op.feature == "gfx950-insts":
+        assert layouts.provenance(op, "A") is layouts.Provenance.DERIVED
+    assert stacked.fits(op, op.n)
+
+
+def test_the_register_types_are_the_vendored_tables():
+    """`MatrixOp.registers` against LLVM's own signatures: `short` vectors
+    for every BF16 builtin but gfx950's and gfx1250's, `__bf16` there."""
+    rows = {r["builtin"]: r for r in json.loads(
+        (Path(__file__).parent / "data" / "amd_matrix_builtins.json")
+        .read_text())["builtins"]}
+    seen = 0
+    for op in catalog.MATRIX_OPS:
+        row = rows.get(op.builtin)
+        if row is None or op.a.dtype is not Datatype.BF16:
+            continue
+        want = {"i16": Datatype.I16, "bf16": Datatype.BF16}[row["a"][1]]
+        assert op.registers is want, op.builtin
+        seen += 1
+    assert seen >= 10
+
+
+@pytest.mark.parametrize("shape", sorted(EMU_TILES))
+def test_the_lanes_name_their_elements_and_columns(shape):
+    """`lane_cell` at the tile's lanes: the element and the column a lane's
+    row of A stands for are the quarter and the slot D holds that row in."""
+    op = EMU_TILES[shape]
+    writer = SimWriter(op.n)
+    element, column = stacked.lane_cell(writer, op, op.n,
+                                        writer.thread_id("x"))
+    where = {m: qs for qs, m in stacked.d_rows(op).items()}
+    for lane in range(op.n):
+        assert (int(np.broadcast_to(element, (WAVE,))[lane]),
+                int(np.broadcast_to(column, (WAVE,))[lane])) == where[lane]
+
+
+def test_the_tile_asked_for_is_issued_where_the_target_has_it():
+    f32 = Datatype.F32
+
+    def asked(arch, threads, tile=None):
+        options = dict(amd_matrix_k4=True, amd_matrix_k4_emulate=True)
+        if tile is not None:
+            options["amd_matrix_k4_emulate_tile"] = tile
+        op = stacked.instruction(threads, f32, _ctx(arch=arch, dtype=f32,
+                                                    **options))
+        return op.builtin if op is not None else None
+    # Not asked: today's tile at sixteen lanes, nothing at thirty-two.
+    assert asked("gfx942", 16) == "mfma_f32_16x16x16bf16_1k"
+    assert asked("gfx942", 32) is None
+    assert asked("gfx950", 16) == "mfma_f32_16x16x16bf16_1k"
+    # Asked: at the lanes its N is, where the target has it.
+    assert asked("gfx942", 32, "32x32x8") == "mfma_f32_32x32x8bf16_1k"
+    assert asked("gfx942", 16, "32x32x8") is None
+    assert asked("gfx90a", 32, "32x32x8") == "mfma_f32_32x32x8bf16_1k"
+    assert asked("gfx942", 16, "16x16x32") is None
+    assert asked("gfx950", 16, "16x16x32") == "mfma_f32_16x16x32_bf16"
+    assert asked("gfx950", 32, "32x32x16") == "mfma_f32_32x32x16_bf16"
+    # `auto`: the largest K the target has at the lanes.
+    assert asked("gfx942", 16, "auto") == "mfma_f32_16x16x16bf16_1k"
+    assert asked("gfx942", 32, "auto") == "mfma_f32_32x32x8bf16_1k"
+    assert asked("gfx950", 16, "auto") == "mfma_f32_16x16x32_bf16"
+    assert asked("gfx950", 32, "auto") == "mfma_f32_32x32x16_bf16"
+    assert asked("gfx942", 64, "auto") is None
+    # Asked at lanes its N is not, a tile is refused, not taken at another
+    # width: a 16-wide tile at thirty-two lanes would span two quarters of
+    # a multiplication, a 32-wide one at sixty-four lanes two halves --
+    # neither the emulated tile's assignment -- and the product goes to the
+    # scheme's other paths.
+    assert asked("gfx942", 32, "16x16x16") is None
+    assert asked("gfx950", 32, "16x16x32") is None
+    assert asked("gfx942", 64, "32x32x8") is None
+    assert asked("gfx950", 64, "32x32x16") is None
+    for shape, threads in (("16x16x16", 32), ("32x32x8", 64)):
+        assert not stacked.stacks(
+            _shape(threads=threads, accumulator=Datatype.F32),
+            _tile_ctx(shape, route=True))
+    with pytest.raises(Exception, match="emulate_tile"):
+        asked("gfx942", 16, "8x8x8")
+
+
+def _simulate_tile(shape, op_rows, elements, kx=0, columns=None,
+                   route="transpose", prepared=False, **options):
+    op = EMU_TILES[shape]
+    threads = op.n
+    width = stacked.tile_columns(op, threads)
+    columns = columns or width
+    ops, out = _operands(op_rows, elements, kx, columns,
+                         shard=route == "shard", dtype=Datatype.F32,
+                         threads=threads, prepared=prepared)
+    writer = SimWriter(threads)
+    assert stacked.matmul_stacked(writer, ops,
+                                  _tile_ctx(shape, route, **options),
+                                  Span(Strategy.MATRIX, 0, columns))
+    assert writer.issued is op
+    want = np.einsum("rk,ekj->erj", op_rows,
+                     np.asarray(elements)[:, :, :columns])
+    got = out[:, :op_rows.shape[0], :columns]
+    return got, want, writer
+
+
+@pytest.mark.parametrize("shape", sorted(EMU_TILES))
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+@pytest.mark.parametrize("rows,depth,kx", [
+    (55, 35, 0),     # SeisSol's order-6 volume
+    (20, 10, 0),     # order 4, under one issue
+    (55, 34, 4),     # from step 4, a quad in
+    (40, 45, 0),     # past one issue of gfx950's, inside the next
+    (70, 70, 8),     # two image blocks of a 32-lane multiplication
+])
+@pytest.mark.parametrize("prepared", [False, True])
+def test_a_table_tile_holds_single_precision(shape, route, rows, depth, kx,
+                                             prepared):
+    """Every tile of the table, its six BF16 term products into the F32
+    accumulator -- every element at the precision of an F32 product (1e-6
+    normwise) against NumPy, over windows that start inside an issue and
+    contractions that end inside one; the operator split in the kernel or
+    by the host (two quads a lane on gfx950's)."""
+    threads = EMU_TILES[shape].n
+    columns = stacked.tile_columns(EMU_TILES[shape], threads)
+    op_rows, elements = _random(rows, depth, columns,
+                                seed=rows * 7 + depth + kx, threads=threads)
+    op_rows = op_rows.astype(np.float32).astype(float)
+    elements = np.asarray(elements, dtype=np.float32).astype(float)
+    got, want, writer = _simulate_tile(shape, op_rows, elements, kx=kx,
+                                       route=route, prepared=prepared)
+    assert np.abs(got - want).max() / np.abs(want).max() < 1e-6
+    op = EMU_TILES[shape]
+    # Six products a nonzero block of the operator's tile and issue.
+    blocks = -(-rows // op.n) * -(-(depth + kx) // op.k)
+    assert writer.issues <= 6 * blocks
+    if prepared:
+        # The element's fragment split once an issue that meets the
+        # contraction; the operator not at all.
+        assert writer.splits == len([s0 for s0 in range(0, depth + kx, op.k)
+                                     if s0 + op.k > kx])
+
+
+@pytest.mark.parametrize("shape", ["32x32x8", "32x32x16"])
+def test_a_32_wide_tile_pads_the_ninth_column_where_asked(shape):
+    """SeisSol's nine columns on a tile of sixteen: through the DPP chain
+    unless `amd_matrix_k4_pad` asks, then one padded tile -- every column
+    right, the padding read as zeros."""
+    single = _shape(threads=32, accumulator=Datatype.F32)
+    assert amd.plan(Strategy.MATRIX, single, 9, _tile_ctx(shape)) == (
+        Span(Strategy.DPP, 0, 9),)
+    padded = _tile_ctx(shape, amd_matrix_k4_pad=True)
+    assert amd.plan(Strategy.MATRIX, single, 9, padded) == (
+        Span(Strategy.MATRIX, 0, 9),)
+    assert amd.plan(Strategy.MATRIX, single, 7, padded) == (
+        Span(Strategy.DPP, 0, 7),)
+    assert amd.plan(Strategy.MATRIX, single, 20, padded) == (
+        Span(Strategy.MATRIX, 0, 20),)
+    op_rows, elements = _random(55, 35, 16, seed=11, threads=32)
+    op_rows = op_rows.astype(np.float32).astype(float)
+    elements = np.asarray(elements, dtype=np.float32).astype(float)
+    got, want, _ = _simulate_tile(shape, op_rows, elements, columns=9,
+                                  amd_matrix_k4_pad=True)
+    assert np.abs(got - want).max() / np.abs(want).max() < 1e-6
+
+
+@pytest.mark.parametrize("shape", sorted(EMU_TILES))
+@pytest.mark.parametrize("route", ["transpose", "shard"])
+def test_a_table_tile_carries_a_chain(shape, route):
+    """A chain of three products on every tile of the table: its D holds
+    the cells the tile gives a lane -- sixteen a lane on the 32-wide ones --
+    read in once and written once."""
+    from tensorforge.backend.instructions.compute.matmul import AccumulatorChain
+    op = EMU_TILES[shape]
+    threads = op.n
+    mults = WAVE // threads
+    rng = np.random.default_rng(47)
+    windows = ((1, 54), (1, 55), (1, 56))
+    rows, depth = 64, 35
+    columns = stacked.tile_columns(op, threads)
+    q0 = rng.uniform(-1, 1, (mults, rows, columns))
+    out = _Output(q0, threads=threads)
+    state = {}
+    want = q0.copy()
+    writer = SimWriter(threads)
+    ctx = _tile_ctx(shape, route, mma_d_layout=True)
+    for d, (r0, r1) in enumerate(windows):
+        op_rows = np.zeros((rows, depth))
+        op_rows[r0:r1] = rng.uniform(-1, 1, (r1 - r0, depth))
+        op_rows = op_rows.astype(np.float32).astype(float)
+        elements = rng.uniform(-1, 1, (mults, depth, columns)).astype(
+            np.float32).astype(float)
+        chain = AccumulatorChain(opens=d == 0, closes=d == len(windows) - 1,
+                                 state=state, rows=(1, 56), load=out.load,
+                                 store=out.store)
+        ops, _ = _operands(op_rows, elements, 0, columns,
+                           shard=route == "shard", chain=chain,
+                           dtype=Datatype.F32, threads=threads)
+        ops = dataclasses.replace(ops, C=_no_write)
+        assert stacked.matmul_stacked(writer, ops, ctx,
+                                      Span(Strategy.MATRIX, 0, columns))
+        want[:, r0:r1] += np.einsum("rk,ekj->erj", op_rows[r0:r1], elements)
+    assert writer.issued is op
+    assert np.abs(out.values - want).max() / np.abs(want).max() < 1e-6
+    assert out.reads == out.writes == op.d.per_lane * -(-56 // threads)
+
+
+def _tile_kernel(shape, kernel="gpu_volume"):
+    """SeisSol's order-6 volume in single precision generated on the tile's
+    target at its lanes, emulated on it, the ninth column padded."""
+    import seissol_suite as suite
+    from tensorforge.frontend.yateto import DescriptionReader
+    arch, threads = TILE_TARGETS[shape]
+    system = "elastic-linearck"
+    descrs = DescriptionReader(None, {}).read(suite.description(
+        system, f"{system}-o6-s", kernel))[0]
+    ctx = _tile_ctx(shape, route=True, amd_matrix_k4_pad=True,
+                    lanes_per_mult=threads)
+    gen = Generator(descrs, ctx)
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter("ignore")
+        gen.generate()
+    return ctx, gen
+
+
+@pytest.mark.parametrize("shape", sorted(EMU_TILES))
+def test_a_kernel_issues_the_tile_and_builds_for_its_target(shape, tmp_path):
+    """The generator takes the tile asked for into a kernel -- its builtin
+    with the BF16 vectors it declares, the split of the width it carries --
+    and hipcc builds it for the tile's target: the instruction in the ISA,
+    no scratch.  Built, not run: there is no gfx942 or gfx950 here."""
+    import subprocess
+    from harness import syntax
+    op = EMU_TILES[shape]
+    arch, threads = TILE_TARGETS[shape]
+    ctx, gen = _tile_kernel(shape)
+    kernel = gen.get_kernel()
+    assert f"__builtin_amdgcn_{op.builtin}(" in kernel
+    wide = op.registers is Datatype.BF16
+    assert ("splitFloatx8BF16" in kernel) == wide
+    assert ("tensorforge::VectorT<__bf16, 8>" in kernel) == wide
+    hipcc = syntax.device_compiler("hip")
+    if hipcc is None:
+        pytest.skip("hipcc not found")
+    from tensorforge import toolchain
+    headers = list(ctx.target.headers()) + list(gen.get_helper_headers())
+    src = tmp_path / "tile.hip"
+    src.write_text("\n".join(f'#include "{h}"' for h in headers) + "\n"
+                   + kernel)
+    run = subprocess.run([hipcc, "-O3", "-std=c++17", "-w",
+                          f"--offload-arch={arch}", "-I",
+                          toolchain.include_dir(), "--cuda-device-only",
+                          "-S", "-o", "-", str(src)],
+                         capture_output=True, text=True, timeout=1200)
+    if run.returncode and "offload-arch" in run.stderr:
+        pytest.skip(f"hipcc does not know {arch}")
+    assert run.returncode == 0, run.stderr[-3000:]
+    isa = run.stdout
+    names = set(re.findall(r"\bv_mfma_\w+", isa))
+    assert any(n.startswith(f"v_mfma_f32_{op.m}x{op.n}x{op.k}") for n in names), names
+    scratch = [int(x) for x in re.findall(r"\.private_segment_fixed_size:\s*(\d+)", isa)]
+    assert scratch and max(scratch) == 0, scratch
 
 
 def _no_write(writer, value, i, j):

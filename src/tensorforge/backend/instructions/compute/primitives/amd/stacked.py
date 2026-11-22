@@ -97,8 +97,25 @@ INSTRUCTIONS = {Datatype.F64: 'mfma_f64_16x16x4f64',
 #: The instruction an emulated product issues, by the type it accumulates in
 #: (`Options.amd_matrix_k4_emulate`): BF16 terms of both operands into the F32
 #: accumulator, sixteen steps an issue, four a lane, and D the F32 tile's
-#: (`stacking`).
+#: (`stacking`).  The one taken where no tile is asked for
+#: (`Options.amd_matrix_k4_emulate_tile`).
 EMULATED = {Datatype.F32: 'mfma_f32_16x16x16bf16_1k'}
+
+#: The stacked emulated table: every BF16 instruction an emulated product may
+#: issue, by the type it accumulates in and the shape
+#: `Options.amd_matrix_k4_emulate_tile` names.  gfx90a's and gfx942's `_1k`
+#: ones -- `16x16x16`, four multiplications of sixteen lanes a wave and four
+#: columns an issue, and `32x32x8`, two of thirty-two lanes and sixteen
+#: columns -- four steps a lane in `short` vectors; gfx950's -- `16x16x32`
+#: and `32x32x16`, the same M, N and D at twice the K -- eight steps a lane in
+#: `__bf16` vectors (`catalog.MatrixOp.registers`).  The 32-wide tiles' D
+#: holds its M rows in an order of its own (`TABLE`).
+EMULATED_TILES = {Datatype.F32: {
+    '16x16x16': 'mfma_f32_16x16x16bf16_1k',
+    '32x32x8': 'mfma_f32_32x32x8bf16_1k',
+    '16x16x32': 'mfma_f32_16x16x32_bf16',
+    '32x32x16': 'mfma_f32_32x32x16_bf16',
+}}
 
 #: The BF16 terms an F32 operand is split into, which cover its significand.
 BF16_TERMS = 3
@@ -116,6 +133,15 @@ BF16X6 = terms.plan('bf16x6', terms.Form(Datatype.BF16, BF16_TERMS),
 #: `mfma_f32_16x16x4f32`.
 QUARTER_MINOR = 'quarter minor'
 QUARTER_MAJOR = 'quarter major'
+
+#: An M order of D that is neither, read off the table (`d_rows`): the 32x32
+#: tiles hold row ``(s & 3) + 4 q + 8 (s >> 2)`` in slot `s` of half `q`.
+TABLE = 'table'
+
+#: Steps of the contraction a lane's k-vector holds in one run: a quad, one
+#: 16-byte read of a prepared operand (`amd.quad_order`).  A lane of
+#: gfx950's tiles carries two (`_emit_emulated`).
+QUAD = 4
 
 #: Lanes a multiplication may span: a quarter of the wave, two or all four
 #: (see the module).
@@ -151,24 +177,34 @@ def requested(ctx) -> Optional[str]:
 @lru_cache(maxsize=None)
 def stacking(op) -> Optional[str]:
     """How `op` lays a wave out in quarters -- the M order of its D,
-    `QUARTER_MINOR` or `QUARTER_MAJOR` -- or `None` where its fragments are
-    not the stacked assignment.
+    `QUARTER_MINOR`, `QUARTER_MAJOR` or one of its own (`TABLE`) -- or
+    `None` where its fragments are not the stacked assignment.
 
     Three statements, each read off the fragment tables (`layouts`), for
     quarters of `n` lanes, `L` a lane of the wave:
 
-    * A: lane `L` holds ``A[L % n][L // n]``: its step of the contraction is
-      its quarter, its M row its lane in the quarter;
-    * B: lane `L` holds ``B[L // n][L % n]``: the operator's row `L % n` at
-      the step of its quarter;
+    * A: lane `L` holds row ``L % n`` of A, at steps of the contraction that
+      depend on its quarter and slot alone, each step in one of them;
+    * B: lane `L` holds the operator's row ``L % n`` -- B's column -- at the
+      very steps A's lane holds in each slot;
     * D: ``D[m][n']`` sits in slot `s` of lane ``n' + n q``, for ``m = q + 4
-      s`` or ``m = 4 q + s``.
+      s`` or ``m = 4 q + s`` -- or, `TABLE`, for one row of every quarter
+      and slot the table gives (`d_rows`).
 
     `mfma_f64_16x16x4f64` has all three with the quarter minor,
-    `mfma_f32_16x16x4f32` with it major.  Asked of the table rather than
-    assumed, because the D layouts of one shape disagree between
-    instructions (`layouts`), and a wrong order here is a correctly typed
-    operand holding another lane's numbers.
+    `mfma_f32_16x16x4f32` with it major, the 32x32 BF16 tiles with their
+    own.  Asked of the table rather than assumed, because the D layouts of
+    one shape disagree between instructions (`layouts`), and a wrong order
+    here is a correctly typed operand holding another lane's numbers.
+
+    Which step a quarter's slot holds is not asked beyond A and B agreeing
+    on it: the instruction multiplies A's element of a lane quarter and slot
+    by B's of the same, so the emitter may lay its steps out as it likes,
+    the same way in both (`_emit_emulated`).  That is what lets gfx950's
+    tiles stand on their derived fragments (`layouts.Provenance.DERIVED`):
+    their K could be placed otherwise on the hardware and the sum would be
+    the same; only D, from the precedent of every CDNA tile of its shape,
+    decides where a product lands.
     """
     quarter = op.n
     count = op.wave // quarter
@@ -178,20 +214,49 @@ def stacking(op) -> Optional[str]:
     # The steps a lane carries: one, or a k-vector of them (the BF16 tile).
     vector = op.k // count
     slots = op.m // count
+    steps = {}
     for lane in range(op.wave):
         for s in range(vector):
-            step = vector * (lane // quarter) + s
-            if element_at(op, 'A', s, lane) != (0, lane % quarter, step):
+            a = element_at(op, 'A', s, lane)
+            b = element_at(op, 'B', s, lane)
+            if a is None or b is None:
                 return None
-            if element_at(op, 'B', s, lane) != (0, step, lane % quarter):
+            (ablock, row, step), (bblock, kstep, column) = a, b
+            if (ablock or bblock or row != lane % quarter
+                    or column != lane % quarter or step != kstep):
                 return None
+            if steps.setdefault((lane // quarter, s), step) != step:
+                return None
+    if sorted(steps.values()) != list(range(op.k)):
+        return None
     for order in (QUARTER_MINOR, QUARTER_MAJOR):
         if all(position(op, 'D', stacked_row(order, q, s, count, slots), n)
                == (s, n + quarter * q)
                for q in range(count) for s in range(slots)
                for n in range(quarter)):
             return order
-    return None
+    return TABLE if d_rows(op) is not None else None
+
+
+@lru_cache(maxsize=None)
+def d_rows(op):
+    """`{(q, s): m}`: the row of M D holds in slot `s` of quarter `q` -- the
+    same for every lane of the quarter, ``D[m][n']`` in lane ``n' + n q`` --
+    read off the table, or None where a quarter's slot holds no one row."""
+    quarter = op.n
+    count = op.wave // quarter
+    slots = op.m // count
+    rows = {}
+    for m in range(op.m):
+        at = position(op, 'D', m, 0)
+        if at is None or at[1] % quarter or at[0] >= slots:
+            return None
+        q = at[1] // quarter
+        if any(position(op, 'D', m, n) != (at[0], n + quarter * q)
+               for n in range(quarter)):
+            return None
+        rows[q, at[0]] = m
+    return rows if len(rows) == count * slots else None
 
 
 def fits(op, threads: int) -> bool:
@@ -222,6 +287,12 @@ def lane_cell(writer, op, threads, t):
     H = quarters(op, threads)
     count = op.wave // op.n
     slots = op.m // count
+    if stacking(op) == TABLE:
+        if H != 1:
+            from tensorforge.common.exceptions import InternalError
+            raise InternalError(f'{op.builtin} stacks multiplications of '
+                                f'{op.n} lanes, not {threads}')
+        return _table_cell(writer, op, t)
     minor = stacking(op) == QUARTER_MINOR
     if H == 1:
         if minor:
@@ -244,6 +315,48 @@ def lane_cell(writer, op, threads, t):
     return element, column
 
 
+def _table_cell(writer, op, t):
+    """`lane_cell` where D's M order is the table's (`TABLE`): the quarter
+    -- the element -- and the slot -- the column -- of row `t`, out of the
+    bits of `t` each goes to (`d_rows`), a run of them a term."""
+    from tensorforge.backend.pir.core import INDEX
+    rows = d_rows(op)
+    where = {m: qs for qs, m in rows.items()}
+    bits = (op.m - 1).bit_length()
+    weights = [where[1 << b] for b in range(bits)]
+    for m in range(op.m):
+        q = sum(w[0] for b, w in enumerate(weights) if m >> b & 1)
+        s = sum(w[1] for b, w in enumerate(weights) if m >> b & 1)
+        if where[m] != (q, s):
+            from tensorforge.common.exceptions import InternalError
+            raise InternalError(f'{op.builtin}: D\'s M order is not linear '
+                                f'in the row\'s bits')
+
+    def term(side, hint):
+        out = None
+        b = 0
+        while b < bits:
+            weight = weights[b][side]
+            if not weight:
+                b += 1
+                continue
+            run = 1
+            while (b + run < bits and weights[b + run][side]
+                   == weight << run):
+                run += 1
+            part = t if not b else writer.op('div', INDEX, t, 1 << b,
+                                             hint=hint)
+            if b + run < bits:
+                part = writer.op('rem', INDEX, part, 1 << run, hint=hint)
+            if weight != 1:
+                part = writer.op('mul', INDEX, part, weight, hint=hint)
+            out = part if out is None else writer.op('add', INDEX, out,
+                                                     part, hint=hint)
+            b += run
+        return out if out is not None else 0
+    return term(0, 'e'), term(1, 'c')
+
+
 def emulated(ctx) -> bool:
     """Whether an F32 product is emulated in BF16 terms on the stacked tiles
     (`Options.amd_matrix_k4_emulate`)."""
@@ -252,18 +365,54 @@ def emulated(ctx) -> bool:
                                      False) in (True, 'bf16x6')
 
 
+def emulated_tile(ctx) -> Optional[str]:
+    """The tile `Options.amd_matrix_k4_emulate_tile` names -- a shape of
+    `EMULATED_TILES` or `'auto'` -- or `None` where it names none."""
+    options = getattr(ctx, 'get_user_options', None)
+    asked = getattr(options(), 'amd_matrix_k4_emulate_tile', None) \
+        if options else None
+    if asked is None:
+        return None
+    if asked != 'auto' and asked not in EMULATED_TILES[Datatype.F32]:
+        from tensorforge.common.exceptions import GenerationError
+        raise GenerationError(f'Options.amd_matrix_k4_emulate_tile='
+                              f'{asked!r}: auto or a tile of '
+                              f'{tuple(EMULATED_TILES[Datatype.F32])}')
+    return asked
+
+
+def _emulated_name(threads: int, accumulator, ctx) -> Optional[str]:
+    """The BF16 instruction an emulated product of `threads` lanes issues:
+    `EMULATED`'s at sixteen lanes where no tile is asked for; the asked
+    tile where its N is the lanes; under `auto` the one of the largest K the
+    target has whose N is."""
+    asked = emulated_tile(ctx)
+    if asked is None:
+        return EMULATED[accumulator] if threads == LANES[0] else None
+    table = EMULATED_TILES[accumulator]
+    ops = {o.builtin: o for o in MATRIX_OPS if o.builtin in table.values()}
+    if asked != 'auto':
+        op = ops.get(table[asked])
+        return op.builtin if op is not None and op.n == threads else None
+    fitting = sorted((o for o in ops.values() if o.n == threads
+                      and o.available_for(accumulator, ctx)),
+                     key=lambda o: -o.k)
+    return fitting[0].builtin if fitting else None
+
+
 def instruction(threads: int, accumulator, ctx):
     """The instruction the scheme issues here, or `None`: asked for, defined
     for the accumulator, available on the target, and stacking at this lane
     count (`stacking`).  F32 emulated in BF16 terms takes `EMULATED`'s, at
-    sixteen lanes."""
+    sixteen lanes, or the tile `Options.amd_matrix_k4_emulate_tile` asks
+    for at the lanes its N is (`_emulated_name`)."""
     if requested(ctx) is None or threads not in LANES:
         return None
     name = INSTRUCTIONS.get(accumulator)
     if emulated(ctx) and accumulator in EMULATED:
-        if threads != LANES[0]:
+        name = _emulated_name(threads, accumulator, ctx)
+        if name is None:
             return None
-        name = EMULATED[accumulator]
     op = next((o for o in MATRIX_OPS if o.builtin == name), None)
     if op is None or not op.available_for(accumulator, ctx):
         return None
@@ -375,7 +524,9 @@ def stacked_plan(shape, n: int, ctx):
     width = tile_columns(op, shape.threads)
     edge = (n // width) * width
     if edge <= 0:
-        if (padded(ctx) and quarters(op, shape.threads) > 1
+        # Wider than four columns: a multiplication of several quarters, or
+        # a 32-wide emulated tile's sixteen columns at thirty-two lanes.
+        if (padded(ctx) and (quarters(op, shape.threads) > 1 or width > 4)
                 and 2 * n >= width):
             return whole(Strategy.MATRIX, n)
         return whole(Strategy.DPP, n)
@@ -686,15 +837,31 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
     element's column.  Both are split into three BF16 terms each
     (`tensorforge::splitFloatx4BF16`), and six term products -- the pairs
     whose order of magnitude reaches F32's, smallest first
-    (`split.products`) -- add into the F32 accumulator.  The operator's
-    steps are one read each at the tile's rows (`MatmulOperands.A_lanes`).
-    Sixteen lanes a multiplication."""
+    (`split.products`, `BF16X6`) -- add into the F32 accumulator.  The
+    operator's steps are one read each at the tile's rows
+    (`MatmulOperands.A_lanes`).  Sixteen lanes a multiplication.
+
+    The other tiles of the table (`EMULATED_TILES`) alike.  A 32-wide one
+    takes thirty-two lanes a multiplication, two a wave, and its D holds
+    sixteen columns of each element in the order `d_rows` reads off the
+    table (`lane_cell`, `TABLE`): eight steps an issue, four a lane, the
+    quarters halves.  gfx950's carry eight steps a lane, two quads: slot `i`
+    of quarter `q` holds step ``4 q + i % 4 + 4 count (i / 4)`` -- a quad of
+    the quarter's in each half of the k-vector, which keeps a quad in one
+    block of the register image of a multiplication of sixteen lanes, and
+    the operator split on the host two 16-byte reads a term
+    (`_prepared_terms`) -- split by `splitFloatx8BF16` into `__bf16`
+    vectors.  The instruction pairs A's and B's slots of a lane quarter
+    whatever steps they hold, so the steps' places are the emitter's to
+    choose, alike in both."""
     from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
-    from .codegen import SPLIT_BF16
+    from .codegen import SPLIT_BF16, SPLIT_BF16_X8
     C, chain = ops.C, ops.chain
     threads, M, K, kx = ops.threads, ops.lead_slots, ops.k, ops.kx
     count = op.wave // op.n
     vector = op.k // count
+    if vector % QUAD or vector // QUAD not in (1, 2):
+        return False
     # The operator as the host split it (`amd.prepared_order`): k-quads of
     # its three terms; else split here, read by row and step.
     prepared = ops.A_slot is not None and ops.a_parts == BF16_TERMS
@@ -702,7 +869,8 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
         return False
     ftype = ScalarType(ops.accumulator)
     acctype = ScalarType(ops.accumulator, op.d.per_lane)
-    termtype = ScalarType(Datatype.I16, vector)
+    termtype = ScalarType(op.registers, vector)
+    splitter = SPLIT_BF16 if vector == QUAD else SPLIT_BF16_X8
     zero = writer.const(0.0, ftype)
     t = writer.thread_id('x')
     p = writer.op('rem', INDEX, writer.thread_id('y'), mults, hint='m')
@@ -710,10 +878,17 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
     q = lanes.q
     tiles = list(range(span.start, span.stop, width))
     plan = BF16X6
-    # The lane's steps of an issue: `4 q + i`.
+    # The lane's steps of an issue: `4 q + i`, and in a k-vector of two
+    # quads ``4 q + i % 4`` from `bases[i]` on, a quad of every quarter's
+    # steps before the second half's.
     offsets = [writer.op('add', INDEX,
-                         writer.op('mul', INDEX, q, vector, hint='ko'), i,
-                         hint='ko') for i in range(vector)]
+                         writer.op('mul', INDEX, q, QUAD, hint='ko'),
+                         i % QUAD, hint='ko') for i in range(vector)]
+    bases = [QUAD * count * (i // QUAD) for i in range(vector)]
+
+    def step(r, i):
+        """The step of an issue slot `i` of quarter `r` holds."""
+        return QUAD * r + i % QUAD + bases[i]
 
     def known_zero(rt, s0):
         lo, hi = max(0, s0 - kx), min(K, s0 + op.k - kx)
@@ -723,7 +898,7 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
     def split(values, hint):
         out = [writer.declare(termtype, hint=hint)
                for _ in range(BF16_TERMS)]
-        writer.call_stmt(SPLIT_BF16, *out, *values, writes=tuple(out))
+        writer.call_stmt(splitter, *out, *values, writes=tuple(out))
         return out
 
     if chain is not None and chain.phase in ('open', 'close'):
@@ -738,16 +913,17 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
         return False
 
     def element_terms(c0, s0):
-        """The lane's four steps of its element's column, zero outside the
+        """The lane's steps of its element's column, zero outside the
         contraction, as terms."""
         values = []
         for i, offset in enumerate(offsets):
-            got = source(c0, s0, min(width, span.stop - c0), offset=offset)
+            got = source(c0, s0 + bases[i], min(width, span.stop - c0),
+                         offset=offset)
             if got is None:
                 return None
             # Quarters whose step `4 q + i` falls outside take a zero.
             outside = [r for r in range(count)
-                       if not kx <= s0 + vector * r + i < K + kx]
+                       if not kx <= s0 + step(r, i) < K + kx]
             for r in outside:
                 got = writer.op('select', ftype,
                                 writer.op('eq', BOOL, q, r, hint='g'),
@@ -758,10 +934,10 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
     def operator_terms(rt, s0):
         if prepared:
             return _prepared_terms(writer, ops, lanes, rt, s0 - kx, vector,
-                                   count)
+                                   count, op)
         values = []
-        for offset in offsets:
-            got = _operator_lanes(writer, ops, lanes, rt, s0 - kx,
+        for offset, base in zip(offsets, bases):
+            got = _operator_lanes(writer, ops, lanes, rt, s0 - kx + base,
                                   offset=offset, span=op.k)
             if got is None:
                 return None
@@ -810,35 +986,44 @@ def _emit_emulated(writer, ops, ctx, span, op, mults, width) -> bool:
     return True
 
 
-def _prepared_terms(writer, ops, lanes, rt, r0, vector, count):
+def _prepared_terms(writer, ops, lanes, rt, r0, vector, count, op):
     """The emulated tile's B out of the operator the host split
     (`amd.prepared_order`): the quad of the lane's quarter -- ``r0 / 4 + q``
     of tile `rt` -- in each of the three terms' planes, one read a term,
     packed to BF16 (`tensorforge::packBF16x4`).  A quad past either end of the
     contraction reads the nearest one: the element's fragment is zero
-    there."""
+    there.  Where a lane carries two quads (gfx950's tiles), the second is
+    ``r0 / 4 + count + q``, a read of its own, and the two pack together
+    (`tensorforge::packBF16x8`)."""
     from tensorforge.backend.pir.core import INDEX, ScalarType
-    from .codegen import PACK_BF16
+    from .codegen import PACK_BF16, PACK_BF16_X8
     threads, slots = ops.threads, ops.lead_slots
-    quads = -(-ops.k // vector)
-    first = r0 // vector
-    shift = writer.op('mul', INDEX, lanes.q, slots, hint='r')
-    if first < 0 or first + count > quads:
-        # The quarters' quads clamped into the operand: `first + q` in
-        # `[0, quads)`.
-        quad = writer.op('min', INDEX,
-                         writer.op('max', INDEX,
-                                   writer.op('add', INDEX, lanes.q, first,
-                                             hint='r'), 0, hint='r'),
-                         quads - 1, hint='r')
-        shift = writer.op('mul', INDEX, quad, slots, hint='r')
-        first = 0
-    got = ops.A_slot(writer, (first * slots + rt) * threads * vector,
-                     parts=BF16_TERMS, shift=shift, width=vector)
-    if not got:
-        return None
-    termtype = ScalarType(Datatype.I16, vector)
-    return [writer.call(PACK_BF16, termtype, part, hint='bt') for part in got]
+    quads = -(-ops.k // QUAD)
+    reads = []
+    for g in range(vector // QUAD):
+        first = r0 // QUAD + count * g
+        shift = writer.op('mul', INDEX, lanes.q, slots, hint='r')
+        if first < 0 or first + count > quads:
+            # The quarters' quads clamped into the operand: `first + q` in
+            # `[0, quads)`.
+            quad = writer.op('min', INDEX,
+                             writer.op('max', INDEX,
+                                       writer.op('add', INDEX, lanes.q, first,
+                                                 hint='r'), 0, hint='r'),
+                             quads - 1, hint='r')
+            shift = writer.op('mul', INDEX, quad, slots, hint='r')
+            first = 0
+        got = ops.A_slot(writer, (first * slots + rt) * threads * QUAD,
+                         parts=BF16_TERMS, shift=shift, width=QUAD)
+        if not got:
+            return None
+        reads.append(got)
+    termtype = ScalarType(op.registers, vector)
+    if len(reads) == 1:
+        return [writer.call(PACK_BF16, termtype, part, hint='bt')
+                for part in reads[0]]
+    return [writer.call(PACK_BF16_X8, termtype, lo, hi, hint='bt')
+            for lo, hi in zip(*reads)]
 
 
 def _operator_lanes(writer, ops, lanes, rt, r0, offset=None, span=4):

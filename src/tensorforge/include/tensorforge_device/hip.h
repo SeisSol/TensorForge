@@ -1708,6 +1708,45 @@ packBF16x4(VectorT<float, 4> terms) {
                             VectorT<unsigned, 2>{low, high});
 }
 
+/// Eight floats as three BF16 terms each, the k-vectors gfx950's BF16 matrix
+/// instructions take (`mfma_f32_16x16x32_bf16`, `mfma_f32_32x32x16_bf16`):
+/// `__bf16` vectors -- LLVM's `V8y` --, where gfx90a's `_1k` ones take
+/// `short` vectors (`splitFloatx4BF16`).  Each term rounded to nearest even
+/// and the remainder carried, as `splitFloatBF16` does: the three sum to the
+/// value exactly.
+__device__ __forceinline__ void
+splitFloatx8BF16(VectorT<__bf16, 8> &t0, VectorT<__bf16, 8> &t1,
+                 VectorT<__bf16, 8> &t2, float i0, float i1, float i2, float i3,
+                 float i4, float i5, float i6, float i7) {
+  const float in[8] = {i0, i1, i2, i3, i4, i5, i6, i7};
+#pragma unroll
+  for (int e = 0; e < 8; ++e) {
+    const __bf16 a = static_cast<__bf16>(in[e]);
+    const float r1 = in[e] - static_cast<float>(a);
+    const __bf16 b = static_cast<__bf16>(r1);
+    const float r2 = r1 - static_cast<float>(b);
+    t0[e] = a;
+    t1[e] = b;
+    t2[e] = static_cast<__bf16>(r2);
+  }
+}
+
+/// Two quads of BF16 values stored as floats -- the terms `prepare.split_bf16`
+/// writes, read as two 16-byte k-quads (`amd.quad_order`) -- as the k-vector
+/// of eight gfx950's BF16 matrix instructions take: the upper half of each,
+/// two to a register, `lo`'s first.  Four `v_perm`, nothing converted.
+__device__ __forceinline__ VectorT<__bf16, 8> packBF16x8(VectorT<float, 4> lo,
+                                                         VectorT<float, 4> hi) {
+  const auto a = __builtin_bit_cast(VectorT<unsigned, 4>, lo);
+  const auto b = __builtin_bit_cast(VectorT<unsigned, 4>, hi);
+  return __builtin_bit_cast(
+      VectorT<__bf16, 8>,
+      VectorT<unsigned, 4>{__builtin_amdgcn_perm(a[1], a[0], 0x07060302u),
+                           __builtin_amdgcn_perm(a[3], a[2], 0x07060302u),
+                           __builtin_amdgcn_perm(b[1], b[0], 0x07060302u),
+                           __builtin_amdgcn_perm(b[3], b[2], 0x07060302u)});
+}
+
 __device__ __forceinline__ std::tuple<_Float16, _Float16>
 splitFloatF16(float input) {
   const auto i1 = static_cast<_Float16>(input);
