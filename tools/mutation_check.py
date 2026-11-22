@@ -6159,19 +6159,17 @@ GROUPS = {
              "    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,\n"
              "                            full=96, empty=1,\n", 1)),
         ('a band writing a slot the products still read',
-         sub(ME_SECTION, "            b.ring_acquire(areas, slot, parity)\n", '', 1)),
+         sub(ME_SECTION, "            b.ring_acquire(self.areas, slot, parity)\n", '', 1)),
         # measync's mutations of `_tcgen05_a` and `_tcgen05`, on the fold's
         # own copies of their lines.
         ('a band of warps the group does not hold whole storing the folded A',
-         sub(ME_SECTION, "                            'its mbarriers')\n"
-                         '    bands = max(1, trip.group.elements // 4)\n',
-             "                            'its mbarriers')\n"
-             '    bands = trip.group.elements // 4 + 1\n', 1)),
+         sub(ME_SECTION, '        bands = max(1, trip.group.elements // 4)\n'
+                         "        band = b.op('div', INDEX, trip.slot, 4, hint='band')\n",
+             '        bands = trip.group.elements // 4 + 1\n'
+             "        band = b.op('div', INDEX, trip.slot, 4, hint='band')\n", 1)),
         ('the tensor memory allocated again by a folded trip',
-         sub(ME_SECTION, '    b, section = trip.builder, trip.section\n'
-                         '    tmem = trip.tmem\n',
-             '    b, section = trip.builder, trip.section\n'
-             '    tmem = b.tmem_alloc(256, arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
+         sub(ME_SECTION, '        self.tmem = trip.tmem\n',
+             '        self.tmem = b.tmem_alloc(256, arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
         ("a block's lower halves over its upper ones",
          sub(ME_SECTION, '                b.tmem_st(tmem, at + 2 * STAR_ROWS * p + STAR_ROWS,\n',
              '                b.tmem_st(tmem, at + 2 * STAR_ROWS * p,\n', 1)),
@@ -6214,12 +6212,8 @@ GROUPS = {
                        '                              output=output)\n'
                        '                        for t in list(tilings) if t.star]\n', '', 1)),
         ("the star's numbers of the next column",
-         sub(ME_SECTION, "    column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),\n"
-                         "                    step.cols[0], 'p')\n"
-                         "    inband = ",
-             "    column = _index(b, 'add', b.op('rem', INDEX, _index(b, 'add', row, 1, 'p'), width, hint='p'),\n"
-             "                    step.cols[0], 'p')\n"
-             "    inband = ", 1)),
+         sub(ME_SECTION, "        column = _index(b, 'add', b.op('rem', INDEX, row, self.width,\n",
+             "        column = _index(b, 'add', b.op('rem', INDEX, _index(b, 'add', row, 1, 'p'), self.width,\n", 1)),
     ]),
     # A matrix step's D added into the element's output by bulk reductions
     # (`Options.matrix_output`, `element_group.output_refusal`,
@@ -6567,8 +6561,8 @@ GROUPS = {
          sub(ME_SECTION, '    hold = slots if ring is None else ring.hold\n',
              '    hold = slots\n', 1)),
         ("a hold its rings refuse taken by the plan",
-         sub(ME_GROUP, '        if hold is not None and hold_refusal(staged, int(hold)) is None:\n',
-             '        if hold is not None:\n', 1)),
+         sub(ME_GROUP, '    taken = int(hold) if hold_refusal(section, int(hold)) is None else 0\n',
+             '    taken = int(hold)\n', 1)),
         ("wgmma's folded star holding B past A's slots",
          sub(ME_GROUP, '        if folded(section, step) and hold > STAR_SLOTS[step.lowering]:\n',
              '        if False:\n', 1)),
@@ -6653,6 +6647,68 @@ GROUPS = {
          sub(ORACLE, "        if not stmt.startswith(('tensorforge::mbarrierWait',\n"
                      "                                'tensorforge::ldsRingWait')):\n",
              "        if not stmt.startswith('tensorforge::mbarrierWait'):\n", 1)),
+    ]),
+    # The three-role demonstrator (`Options.matrix_roles`,
+    # `multi_element._tcgen05_roles`): each role's acts, the rings named to
+    # their roles, the mma role's D and output, the plan's refusals and the
+    # oracle's landing of products across roles.
+    'threeroles': ('tests/test_three_roles.py -n 6', [
+        ("the operator role filling no chunk",
+         sub(ME_SECTION, '                ring.fill(trip, j, base, issue)\n',
+             '                pass\n', 1)),
+        ("the mma role giving no slot of B back behind its blocks",
+         sub(ME_SECTION, '            if j >= hold - 1:\n'
+                         '                ring.release(trip, j - hold + 1, base, issue)\n',
+             '            if False:\n'
+             '                ring.release(trip, j - hold + 1, base, issue)\n', 1)),
+        ("the mma role's last held slots of B never given back",
+         sub(ME_SECTION, '        for j in range(max(0, fold.blocks - hold + 1), fold.blocks):\n'
+                         '            ring.release(trip, j, base, issue)\n', '', 1)),
+        ("A's ring named to no roles",
+         sub(ME_SECTION, "    fold = _Fold(trip, step, M, producer='star', consumers=('mma',))\n",
+             '    fold = _Fold(trip, step, M)\n', 1)),
+        ("B's ring named to no roles in the three roles",
+         sub(ME_SECTION, "            named = (dict(producer='operator', consumers=('mma',))\n",
+             '            named = (dict()\n', 1)),
+        ("every row's output through the group's first element",
+         sub(ME_SECTION, "    source = b.op('select', SIZE, held, e, group, hint='e')\n",
+             '    source = group\n', 1)),
+        ("the epilogue's rows by the warp, not its quarter",
+         sub(ME_SECTION, "        'rem', INDEX, b.thread_id('y'), 4, hint='q'), 32, hint='m'),\n",
+             "        'rem', INDEX, b.thread_id('y'), 8, hint='q'), 32, hint='m'),\n", 1)),
+        ("the star warps' staging not met behind the last trip's bands",
+         sub(ME_SECTION, "            # every element's rows.\n            b.barrier(Participants.ROLE)\n",
+             "            # every element's rows.\n", 1)),
+        ("the mma role's barrier ahead of the next trip's products dropped",
+         sub(ME_SECTION, "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n"
+                         '        b.barrier(Participants.ROLE)\n',
+             "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n", 1)),
+        ("D read ahead of the wait for its products",
+         sub(ME_SECTION, "        b.commit_group('tcgen05', object=cursor, issue=issue)\n"
+                         "        b.matrix_wait('tcgen05', object=cursor, tmem=[trip.tmem])\n"
+                         "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')\n"
+                         '        _tcgen05_role_epilogue(trip, step, M)\n',
+             "        b.commit_group('tcgen05', object=cursor, issue=issue)\n"
+             "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')\n"
+             '        _tcgen05_role_epilogue(trip, step, M)\n', 1)),
+        ("roles where the star step is not folded",
+         sub(ME_GROUP, "    if not folded(section, step):\n"
+                       "        return ('the star step is not folded into the operator step '\n",
+             '    if False:\n'
+             "        return ('the star step is not folded into the operator step '\n", 1)),
+        ("roles on wgmma",
+         sub(ME_GROUP, "    if step.lowering != 'tcgen05':\n"
+                       "        return (f'the step is {step.lowering}\\'s; three roles are tcgen05\\'s '\n",
+             '    if False:\n'
+             "        return (f'the step is {step.lowering}\\'s; three roles are tcgen05\\'s '\n", 1)),
+        ("the comment's mma warps from the operator's",
+         sub(ME_GROUP, '        mma = e + OPERATOR_WARPS\n', '        mma = e\n', 1)),
+        ("the generator lowering the section again without its roles",
+         sub(GEN, '          output=element_group.output_of(planned), roles=planned.roles)\n',
+             '          output=element_group.output_of(planned))\n', 1)),
+        ("the oracle's check of a landing product counted as an access",
+         sub(ORACLE, '                if not _same(self.mem.peek(base, slot), value):\n',
+             '                if not _same(self.mem.read(base, slot), value):\n', 1)),
     ]),
 }
 

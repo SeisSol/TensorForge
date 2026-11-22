@@ -711,6 +711,15 @@ class Slot:
             self.data[key] = (struct.unpack('<Q', h)[0] % 20011) / 1009.0 - 9.9
         return self.data[key]
 
+    def peek(self, base: str, idx: int) -> float:
+        """What `read` returns, without an access of its own: the check of a
+        value an access read before (`Interp._tc_land`)."""
+        tracker, self.tracker = self.tracker, None
+        try:
+            return self.read(base, idx)
+        finally:
+            self.tracker = tracker
+
     def write(self, base: str, idx: int, value) -> None:
         if isinstance(value, _InFlight):
             # A store reads the register it stores (`_InFlight`).
@@ -2570,7 +2579,13 @@ class Interp:
         the phase its products arrive at completes behind theirs.  The
         values of the cells no product still in flight writes go to tensor
         memory, and what each read is checked unchanged -- a write of an
-        operand ahead of the wait is a race with the engine."""
+        operand ahead of the wait is a race with the engine.  The check
+        accesses nothing (`Slot.peek`): the products' reads are their
+        issuing thread's where it issued them, which the commit's arrival
+        orders for a thread that waits for it.  The lane that lands them
+        here need not be one that waited for that arrival: in the roles of
+        `multi_element._tcgen05_roles` the products' own wait for D lands
+        those whose slots a producer of another role refills later."""
         state = getattr(self.mem, 'tc_state', None)
         if state is None:
             return
@@ -2584,7 +2599,7 @@ class Interp:
         del bound[:last + 1]
         for writes, reads, issued in landing:
             for base, slot, value in reads:
-                if not _same(self.mem.read(base, slot), value):
+                if not _same(self.mem.peek(base, slot), value):
                     raise Abort(f'{base}[{slot}] written while the tcgen05 '
                                 f'product reading it is in flight: {issued!r}')
             for cell in writes:

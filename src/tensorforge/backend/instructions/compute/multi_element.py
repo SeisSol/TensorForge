@@ -151,10 +151,54 @@ def _roles(context, group):
                      warp=context.target.lexic.thread_idx_y, first=first_id(2))
 
 
-def _element_pointer(builder, context, symbol, element, dtype):
+def _three_roles(context, group):
+    """The block's three roles (`Options.matrix_roles`): the element warps
+    (`star`), the operator producer's warp behind them (`operator`), and
+    the warpgroup behind that (`mma`), each meeting on a named barrier of
+    its own -- NVIDIA's top three (`roles.first_id`)."""
+    from tensorforge.backend.pir.roles import Role, RoleSplit, first_id
+    from tensorforge.generators.element_group import (MMA_WARPS,
+                                                      OPERATOR_WARPS)
+    elements, lanes = group.elements, group.threads
+    return RoleSplit((Role('star', lanes * elements, warps=(0, elements)),
+                      Role('operator', lanes * OPERATOR_WARPS,
+                           warps=(elements, OPERATOR_WARPS)),
+                      Role('mma', lanes * MMA_WARPS,
+                           warps=(elements + OPERATOR_WARPS, MMA_WARPS))),
+                     warp=context.target.lexic.thread_idx_y, first=first_id(3))
+
+
+def _group_pointer(trip, context, tensor, element):
+    """Element `element` of the group's pointer to the output `tensor`, and
+    whether it has one -- the element masked, it has none: computed from
+    the group's index, as a producer computes an input's
+    (`_element_pointer`), where no warp of the role reading it publishes
+    one (`_Trip.pointer`, the three roles)."""
+    from tensorforge.backend.instructions.batch_loop import (BatchLoop,
+                                                             GROUP_KEY,
+                                                             MASK_KEY)
+    from tensorforge.backend.pir.core import SIZE
+    b = trip.builder
+    bound = BatchLoop.indices_in(b)
+    if not bound or GROUP_KEY not in bound:
+        raise InternalError('a group\'s pointer outside the element group\'s '
+                            'loop')
+    group = bound[GROUP_KEY]
+    e = b.op('add', SIZE, group, element, hint='e')
+    held = bound[MASK_KEY](b, e)
+    source = b.op('select', SIZE, held, e, group, hint='e')
+    pointer = _element_pointer(b, context, trip.symbols[id(tensor)], source,
+                               trip.section.dtype, writes=True)
+    return pointer, held
+
+
+def _element_pointer(builder, context, symbol, element, dtype,
+                     writes=False):
     """Element `element`'s pointer to the operand of `symbol`, as the batch
     traversal binds a warp's own (`GetElementPtr._element_address`): what
-    a producer's lane copies its element from."""
+    a producer's lane copies its element from -- or, `writes`, what the
+    three roles' mma role adds an output's cells through (`_group_pointer`),
+    the output's own pointer to the passes."""
     import types
     from tensorforge.backend.instructions.ptr_manip import GetElementPtr
     from tensorforge.common.helper import get_extra_offset_name
@@ -170,6 +214,12 @@ def _element_pointer(builder, context, symbol, element, dtype):
         symbol.obj.storage_volume())
     ctype = dtype.ctype()
     name = f'{_hint("e", symbol.obj)}_{builder.next_index()}'
+    if writes:
+        return builder.decl_expr(f'{ctype} *const {name}', address,
+                                 bound.type, symbol, args=(element,),
+                                 kind=Effect.READ, space=MemSpace.GLOBAL,
+                                 hint=name, extern=name,
+                                 alias_root=builder.alias_root(symbol))
     return builder.decl_expr(f'const {ctype} *const {name}', address,
                              bound.type, symbol, args=(element,),
                              kind=Effect.READ, space=MemSpace.GLOBAL,
@@ -543,11 +593,15 @@ class MultiElementOperators(AbstractInstruction):
                                     lifetime='body', handed=True)
             elements = self._group.elements
             consumers = 1 if step.lowering == 'tcgen05' else elements
+            # In the three roles the operator producer fills it and the mma
+            # role drains it (`_tcgen05_roles`).
+            named = (dict(producer='operator', consumers=('mma',))
+                     if section.roles else {})
             ring = builder.mbarrier_ring(
                 f'bk{n}', slots, full=1, empty=consumers,
                 leader='threadIdx.x == 0 && threadIdx.y == 0',
                 arena=GeneralLexicon.TOTAL_SHR_MEM,
-                hold=ring_hold(section, step))
+                hold=ring_hold(section, step), **named)
             if ring is None:
                 raise InternalError('a prepared ring in a body without an '
                                     'arena for its mbarriers')
@@ -2406,71 +2460,118 @@ def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
     products, commits them onto A's slot and B's, and fills B's ring
     ahead; the bands run on into the next blocks, `STAR_SLOTS` ahead at
     most.  Behind the last block the products are committed onto the
-    block's mbarrier, which every thread waits for, ahead of D."""
-    from tensorforge.backend.instructions.compute.primitives import nvidia
+    block's mbarrier, which every thread waits for, ahead of D.
+
+    The block's warps do all of it here; in the three roles the element
+    warps fill A, a warp of its own fills B and a warpgroup issues
+    (`_tcgen05_roles`) -- the same parts (`_Fold`)."""
     from tensorforge.backend.pir.engines import FenceKind
-    from tensorforge.generators.element_group import (STAR_ROWS, STAR_SLOTS,
-                                                      matrix_shape,
-                                                      ring_chunks)
-    b, section = trip.builder, trip.section
-    tmem = trip.tmem
-    _, _, k_ = matrix_shape('tcgen05', 100)
-    width = step.cols[1] - step.cols[0]
-    count = len(step.products)
-    slots = STAR_SLOTS['tcgen05']
-    stages = [section.stage(p.first.tensor, (p.rows, p.depth))
-              for p in step.products]
-    depth = max(st.depth for st in stages)
-    blocks = -(-depth // STAR_ROWS)
-    ring = trip.rings.get(id(step))
-    if ring is not None and len(ring_chunks(section, step)) != blocks:
-        raise InternalError(f'{step.dest.alias}: B\'s ring is not cut into the '
-                            f'folded star\'s blocks of K')
-    _, columns, _ = _tcgen05_columns(section, step)
-    slot_columns = 2 * STAR_ROWS * count
-    # A ring of the step's own, named after its place in the section as B's
-    # prepared ring is (`bk{n}`): a section of several folded steps sets up
-    # one each, which a shared name would declare twice in one scope.
-    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,
-                            full=128, empty=1,
-                            leader='threadIdx.x == 0 && threadIdx.y == 0',
-                            arena=GeneralLexicon.TOTAL_SHR_MEM)
-    if areas is None:
-        raise InternalError('a folded star in a body without an arena for '
-                            'its mbarriers')
-    bands = max(1, trip.group.elements // 4)
-    band = b.op('div', INDEX, trip.slot, 4, hint='band')
-    m = b.op('add', INDEX, b.op('mul', INDEX, b.op(
-        'rem', INDEX, trip.slot, 4, hint='q'), 32, hint='m'), trip.lane,
-        hint='m')
-    live = b.op('lt', BOOL, m, M, hint='in') if M < 128 else None
-    row = b.op('select', INDEX, live, m, 0, hint='m') if live is not None \
-        else m
-    element = b.op('div', INDEX, row, width, hint='e')
-    column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),
-                    step.cols[0], 'p')
-    inband = b.op('lt', BOOL, trip.slot, 4 * bands, hint='inband')
-    # Every thread's, the warps past the bands' a row's they never use:
-    # read where every block's branch sees them.
-    numbers = _star_numbers(trip, step, element, column)
+    b = trip.builder
+    fold = _Fold(trip, step, M)
+    rows = fold.rows(trip, M)
     # Block `j` takes slot `j % slots` of A's ring in every trip, so that
     # its columns are numbers the products name; the slot's rounds are
     # counted over the trips (`_trip_count`), `uses` a trip.
     trips = _trip_count(trip)
     every = b.const(True, BOOL)
+    ring = fold.ring
     base = ring.base(trip, 0) if ring is not None else None
     start = True
-    for j in range(blocks):
-        s_ = j % slots
-        uses = -(-(blocks - s_) // slots)
+    for j in range(fold.blocks):
+        slot, parity, at = fold.round(trips, j)
+        fold.fill(trip, rows, j, slot, parity, at, every)
+        start = fold.issue(trip, j, slot, parity, at, issue, base, n, start)
+        if ring is not None:
+            ring.ahead(trip, j, base)
+    b.commit_group('tcgen05', object=cursor, issue=issue)
+    b.matrix_wait('tcgen05', object=cursor, tmem=[fold.tmem])
+    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+
+
+class _Fold:
+    """The folded star of a tcgen05 step (`_tcgen05_star`): A's ring of
+    `STAR_SLOTS` slots in tensor memory behind D's columns, set up here,
+    and the parts its blocks take -- the bands' fill of a block's slot
+    (`fill`), and the issuing thread's take of it and of B, its products
+    and its releases (`issue`) -- which the block's warps take in turn, or
+    the three roles each their own (`_tcgen05_roles`).  `named` names the
+    ring's roles where it hands A from one to another."""
+
+    def __init__(self, trip, step, M, **named):
+        from tensorforge.generators.element_group import (STAR_ROWS,
+                                                          STAR_SLOTS,
+                                                          matrix_shape,
+                                                          ring_chunks)
+        b, section = trip.builder, trip.section
+        self.step, self.builder = step, b
+        self.tmem = trip.tmem
+        _, _, self.k = matrix_shape('tcgen05', 100)
+        self.width = step.cols[1] - step.cols[0]
+        count = len(step.products)
+        self.slots = STAR_SLOTS['tcgen05']
+        stages = [section.stage(p.first.tensor, (p.rows, p.depth))
+                  for p in step.products]
+        depth = max(st.depth for st in stages)
+        self.blocks = -(-depth // STAR_ROWS)
+        self.ring = trip.rings.get(id(step))
+        if self.ring is not None and \
+                len(ring_chunks(section, step)) != self.blocks:
+            raise InternalError(f'{step.dest.alias}: B\'s ring is not cut '
+                                f'into the folded star\'s blocks of K')
+        _, self.columns, _ = _tcgen05_columns(section, step)
+        self.slot_columns = 2 * STAR_ROWS * count
+        self.areas = _fold_ring(trip, step, self.slots, named)
+
+    def rows(self, trip, M):
+        """What a thread of the bands holds for its row of A: its band,
+        whether it is in one and its row is the group's, its row's element
+        and column, and its element's star numbers (`_star_numbers`)."""
+        b, step = self.builder, self.step
+        bands = max(1, trip.group.elements // 4)
+        band = b.op('div', INDEX, trip.slot, 4, hint='band')
+        m = b.op('add', INDEX, b.op('mul', INDEX, b.op(
+            'rem', INDEX, trip.slot, 4, hint='q'), 32, hint='m'), trip.lane,
+            hint='m')
+        live = b.op('lt', BOOL, m, M, hint='in') if M < 128 else None
+        row = b.op('select', INDEX, live, m, 0, hint='m') \
+            if live is not None else m
+        element = b.op('div', INDEX, row, self.width, hint='e')
+        column = _index(b, 'add', b.op('rem', INDEX, row, self.width,
+                                       hint='p'), step.cols[0], 'p')
+        inband = b.op('lt', BOOL, trip.slot, 4 * bands, hint='inband')
+        # Every thread's, the warps past the bands' a row's they never use:
+        # read where every block's branch sees them.
+        numbers = _star_numbers(trip, step, element, column)
+        return (bands, band, live, element, inband, numbers)
+
+    def round(self, trips, j):
+        """Block `j`'s slot of A's ring, the parity of its round -- the
+        slot's rounds counted over the trips, `uses` a trip -- and its
+        first column of tensor memory."""
+        b = self.builder
+        s_ = j % self.slots
+        uses = -(-(self.blocks - s_) // self.slots)
         parity = b.op('rem', INDEX, _index(b, 'add', _index(
-            b, 'mul', trips, uses, 'ta'), j // slots, 'ta'), 2, hint='tap')
+            b, 'mul', trips, uses, 'ta'), j // self.slots, 'ta'), 2,
+            hint='tap')
         slot = b.const(s_, INDEX)
-        at = columns[0] + s_ * slot_columns
+        return slot, parity, self.columns[0] + s_ * self.slot_columns
+
+    def fill(self, trip, rows, j, slot, parity, at, every) -> None:
+        """Block `j`'s A, by its band: the slot back from the products of
+        its last round, the band's rows of every product into it, both
+        TF32 halves, behind the engine's fence its arrival -- every thread
+        of the band (`every`)."""
+        from tensorforge.backend.instructions.compute.primitives import \
+            nvidia
+        from tensorforge.backend.pir.engines import FenceKind
+        from tensorforge.generators.element_group import STAR_ROWS
+        b, step, tmem = self.builder, self.step, self.tmem
+        bands, band, live, element, inband, numbers = rows
         mine = b.op('and', BOOL, inband, b.op('eq', BOOL, band, j % bands,
                                               hint='mine'), hint='mine')
         with b.if_(mine):
-            b.ring_acquire(areas, slot, parity)
+            b.ring_acquire(self.areas, slot, parity)
             values = _star_block(trip, step, numbers, element, j * STAR_ROWS,
                                  STAR_ROWS, live)
             for p, xs in enumerate(values):
@@ -2480,15 +2581,27 @@ def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
                 b.tmem_st(tmem, at + 2 * STAR_ROWS * p + STAR_ROWS,
                           [_as_float(b, lo) for _, lo in split])
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
-            b.ring_publish(areas, slot, every)
+            b.ring_publish(self.areas, slot, every)
+
+    def issue(self, trip, j, slot, parity, at, issue, base, n, start,
+              release=True):
+        """Block `j`'s products, by the thread `issue` picks: its A's slot
+        as it lands, behind the engine's fence; its B (`_star_pieces`); the
+        products, D written fresh by the first of them (`start`); their
+        commit onto A's slot -- and onto B's, where `release`: the three
+        roles commit B's slots as the ring's hold says (`_tcgen05_roles`).
+        Whether the next block's first product starts D still."""
+        from tensorforge.backend.pir.engines import FenceKind
+        from tensorforge.generators.element_group import STAR_ROWS
+        b, step, tmem, ring = self.builder, self.step, self.tmem, self.ring
         with b.if_(issue):
-            b.ring_take(areas, slot, parity)
+            b.ring_take(self.areas, slot, parity)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
         for piece, k0 in _star_pieces(trip, step, ring, j, base, issue):
             p = step.products.index(piece.product)
             rows = min(STAR_ROWS, piece.stage.depth - j * STAR_ROWS)
             plan = _plan(piece.stage)
-            for kt in range(0, rows, k_):
+            for kt in range(0, rows, self.k):
                 bs = piece.descriptors(b, k0 + kt, 'tcgen05')
                 for ia, ib in plan.products:
                     b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
@@ -2497,13 +2610,28 @@ def _tcgen05_star(trip, step, cursor, issue, n, M) -> None:
                               + STAR_ROWS * ia + kt, term=(ia, ib),
                               plan=plan)
                     start = False
-        b.ring_release(areas, slot, issue, engine='tcgen05')
-        if ring is not None:
+        b.ring_release(self.areas, slot, issue, engine='tcgen05')
+        if ring is not None and release:
             ring.release(trip, j, base, issue)
-            ring.ahead(trip, j, base)
-    b.commit_group('tcgen05', object=cursor, issue=issue)
-    b.matrix_wait('tcgen05', object=cursor, tmem=[tmem])
-    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+        return start
+
+
+def _fold_ring(trip, step, slots, named):
+    """A's ring of a folded tcgen05 step (`_Fold`): full counting a band's
+    128 threads, empty the products' commit; between the roles `named`
+    gives, where the block runs in roles."""
+    b, section = trip.builder, trip.section
+    # A ring of the step's own, named after its place in the section as B's
+    # prepared ring is (`bk{n}`): a section of several folded steps sets up
+    # one each, which a shared name would declare twice in one scope.
+    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,
+                            full=128, empty=1,
+                            leader='threadIdx.x == 0 && threadIdx.y == 0',
+                            arena=GeneralLexicon.TOTAL_SHR_MEM, **named)
+    if areas is None:
+        raise InternalError('a folded star in a body without an arena for '
+                            'its mbarriers')
+    return areas
 
 
 def _wgmma_star(trip, step, ring, pass_, accs, layouts, n, top) -> None:
@@ -2775,6 +2903,120 @@ def _tcgen05(trip, step) -> None:
     else:
         _tcgen05_resident(trip, step, cursor, issue, n, M)
     _tcgen05_epilogue(trip, step, holds, row, live)
+
+
+def _tcgen05_roles(trip, step, split, stage) -> None:
+    """`_tcgen05` with its star folded, in the three roles of `split`
+    (`Options.matrix_roles`): the parts of the fold (`_Fold`) each in its
+    role, which meet on the rings alone.
+
+    * `star`, the element warps: the trip's elements staged (`stage`),
+      then A computed a block at a time into its ring in tensor memory,
+      the bands as without the roles (`_Fold.fill`).
+    * `operator`, a warp: its first lane fills B's prepared ring with every
+      chunk of the trip in turn (`_OperatorRing.fill`) -- waiting for a
+      slot back from the products of its last round, a bulk copy, the
+      chunk's bytes announced -- ahead of the products as far as the
+      ring's slots allow.
+    * `mma`, a warpgroup: its first thread takes each block's A and B and
+      issues and commits its products (`_Fold.issue`) -- onto A's slot, and
+      onto the slot of B's chunk the ring's hold reaches back to
+      (`engines.RingSpec.hold`): this block's at the default 1, which the
+      products arrive at once complete, the one before at 2, which the
+      next block's products hold too; behind the last,
+      the products committed onto D's mbarrier, which the role waits for;
+      then each warp takes its quarter of tensor memory's lanes, a row of
+      D a thread, and adds it into the output through its row's element's
+      pointer (`_tcgen05_role_epilogue`), and the role meets ahead of the
+      next trip's products, which write D again."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import (TCGEN05_ROWS,
+                                                      matrix_shape)
+    b = trip.builder
+    rows, cols = step.rows, step.cols
+    _, n_, _ = matrix_shape('tcgen05', 100)
+    n = _round_up(rows[1] - rows[0], n_)
+    M = trip.group.elements * (cols[1] - cols[0])
+    if M > TCGEN05_ROWS:
+        raise InternalError(f'a tcgen05 step over {M} rows of the group, '
+                            f'past its {TCGEN05_ROWS} lanes')
+    if trip.tmem is None:
+        raise InternalError('a tcgen05 step without the block\'s tensor '
+                            'memory (`MultiElementOperators.tmem`)')
+    mma = split.role('mma')
+    cursor = b.bulk_channel('tcmma', 'threadIdx.x == 0 && threadIdx.y == 0',
+                            participants=Participants.ROLE,
+                            threads=mma.threads,
+                            arena=GeneralLexicon.TOTAL_SHR_MEM)
+    fold = _Fold(trip, step, M, producer='star', consumers=('mma',))
+    ring = fold.ring
+    if ring is None:
+        raise InternalError('three roles without B\'s prepared ring, which '
+                            'the operator role fills')
+    trips = _trip_count(trip)
+    base = ring.base(trip, 0)
+    warp = b.thread_id('y')
+
+    def first_of(role):
+        return b.op('and', BOOL, b.op('eq', BOOL, warp,
+                                      split.role(role).warps[0], hint=role),
+                    b.op('eq', BOOL, trip.lane, 0, hint=role), hint=role)
+
+    roles = b.split_roles(split)
+    with roles.role('star'):
+        stage()
+        held = fold.rows(trip, M)
+        every = b.const(True, BOOL)
+        for j in range(fold.blocks):
+            slot, parity, at = fold.round(trips, j)
+            fold.fill(trip, held, j, slot, parity, at, every)
+    with roles.role('operator'):
+        issue = first_of('operator')
+        with b.if_(issue):
+            for j in range(len(ring.chunks)):
+                ring.fill(trip, j, base, issue)
+    with roles.role('mma'):
+        issue = first_of('mma')
+        start, hold = True, ring.hold
+        for j in range(fold.blocks):
+            slot, parity, at = fold.round(trips, j)
+            start = fold.issue(trip, j, slot, parity, at, issue, base, n,
+                               start, release=False)
+            if j >= hold - 1:
+                ring.release(trip, j - hold + 1, base, issue)
+        for j in range(max(0, fold.blocks - hold + 1), fold.blocks):
+            ring.release(trip, j, base, issue)
+        b.commit_group('tcgen05', object=cursor, issue=issue)
+        b.matrix_wait('tcgen05', object=cursor, tmem=[trip.tmem])
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+        _tcgen05_role_epilogue(trip, step, M)
+        # The next trip's products write D again: behind every warp's
+        # loads of it, between the engine's fences.
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
+        b.barrier(Participants.ROLE)
+
+
+def _tcgen05_role_epilogue(trip, step, M) -> None:
+    """D out of tensor memory by the mma role's warpgroup (`_tcgen05_roles`):
+    each warp its quarter of the lanes -- the warp's index modulo four --
+    a row of D a thread, the step's rows to the next eight in the widths
+    the load has, each cell added into the output through the pointer of
+    its row's element (`_d_writer`, `_group_pointer`), nothing for a row
+    past the group."""
+    from tensorforge.generators.element_group import TCGEN05_ROWS
+    b = trip.builder
+    height = step.rows[1] - step.rows[0]
+    m = b.op('add', INDEX, b.op('mul', INDEX, b.op(
+        'rem', INDEX, b.thread_id('y'), 4, hint='q'), 32, hint='m'),
+        trip.lane, hint='m')
+    write = _d_writer(trip, step)
+    c0, end = 0, _round_up(height, 8)
+    while c0 < end:
+        count = 1 << (min(TMEM_CHUNK, end - c0).bit_length() - 1)
+        for j, value in enumerate(b.tmem_ld(trip.tmem, c0, count)):
+            if c0 + j < height:
+                write(m, c0 + j, value, 'row', M < TCGEN05_ROWS)
+        c0 += count
 
 
 def _tcgen05_ring(trip, step, ring, cursor, issue, n, M) -> None:
@@ -3988,6 +4230,9 @@ class MultiElementSection(AbstractInstruction):
         if section.ring:
             self._ring(trip)
             return
+        if section.roles:
+            self._three(trip)
+            return
         # The prepared rings' first chunks, at the trip's head: they land
         # while the trip stages and mixes (`_OperatorRing.head`).
         for ring in trip.rings.values():
@@ -4116,6 +4361,48 @@ class MultiElementSection(AbstractInstruction):
             self._produce(trip, ring, slot, parity, group, bound[MASK_KEY])
         with roles.role('elements'):
             self._consume(trip, ring, slot, parity)
+
+    def _three(self, trip) -> None:
+        """A trip in the three roles (`Options.matrix_roles`,
+        `element_group.roles_refusal`): the section's one tcgen05 step with
+        its star step folded, the block split into the element warps
+        (`star`), the operator producer's warp (`operator`) and the
+        warpgroup behind it (`mma`), meeting on the rings alone
+        (`_tcgen05_roles`).  The element warps stage their elements'
+        operands as without the roles, into the group's buffers, which
+        their role alone reads; no pointer table: the mma role computes
+        the pointers of its rows' elements (`_group_pointer`)."""
+        b = trip.builder
+        section = self._group.section
+        elements = self._group.elements
+        (step,) = [s for s in section.steps if s.lowering == 'tcgen05']
+        for buffer in section.inputs + section.intermediates:
+            if buffer.held:
+                continue
+            trip.buffers[id(buffer.tensor)] = b.alloc(
+                section.dtype, (elements * buffer.room,),
+                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
+                hint=_hint('g', buffer.tensor))
+        trip.meet = Participants.ROLE
+        trip.pointer = lambda tensor, element: _group_pointer(
+            trip, self._context, tensor, element)
+
+        def stage() -> None:
+            # The last trip's reads of the group's buffers met, the trip's
+            # elements staged, and met again for the bands, which read
+            # every element's rows.
+            b.barrier(Participants.ROLE)
+            tokens = []
+            for buffer, symbol in zip(section.inputs, self._inputs):
+                tokens += self._stage(trip, buffer, symbol)
+            for buffer in section.intermediates:
+                if buffer.pitch > buffer.height and not buffer.held:
+                    self._pad(trip, buffer)
+            if tokens:
+                b.wait(*tokens)
+            b.barrier(Participants.ROLE)
+        _tcgen05_roles(trip, step, _three_roles(self._context, self._group),
+                       stage)
 
     def _produce(self, trip, ring, slot, parity, group, active_of) -> None:
         """The producer's trip: the slot back from the element warps' last

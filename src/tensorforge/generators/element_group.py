@@ -566,6 +566,12 @@ class GroupSection:
     #: engine, for the kernel's comment (`precision_notes`); '' where it
     #: did not.
     engine_note: str = ''
+    #: `three` where the block runs the section in three roles of its warps
+    #: (`Options.matrix_roles`, `roles_refusal`): the element warps
+    #: staging and computing A, an operator producer behind them, and the
+    #: warpgroup that issues and writes D behind that; '' where the element
+    #: warps do everything.
+    roles: str = ''
 
     @property
     def chained(self) -> bool:
@@ -696,6 +702,10 @@ class ElementGroup:
         through a ring (`GroupSection.ring`), behind the element warps -- a
         warpgroup where it gives its registers to them, as `setmaxnreg`
         moves a warpgroup's (`GroupSection.registers`)."""
+        if self.section.roles:
+            # The operator producer's warp and the mma role's warpgroup
+            # behind the element warps (`roles_refusal`).
+            return OPERATOR_WARPS + MMA_WARPS
         if not self.section.ring:
             return 0
         return WARPGROUP_WARPS if self.section.registers else PRODUCER_WARPS
@@ -1652,7 +1662,7 @@ def lower(section: GroupSection, context, matrix: bool = True,
           double: bool = True, ring: int = 0,
           registers: int = 0, halves: int = 0,
           prepared: bool = False, star: str = '',
-          output: str = 'red') -> GroupSection:
+          output: str = 'red', roles: str = '') -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
@@ -1672,7 +1682,8 @@ def lower(section: GroupSection, context, matrix: bool = True,
     `streamed` asks.  `star` `engine`: the star step folded into each
     asynchronous step that can take it (`fuse`).  `output` `bulk` or `box`:
     D added into the output by bulk reductions where a matrix step can
-    (`output_refusal`).
+    (`output_refusal`).  `roles` `three`: the block in the three roles
+    where the section takes them (`roles_refusal`).
     The matrix tiling is NVIDIA's: elsewhere every step takes an FMA form,
     as below sm_80."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
@@ -1706,10 +1717,12 @@ def lower(section: GroupSection, context, matrix: bool = True,
         staged = dataclasses.replace(
             staged, ring_slots=int(options.matrix_ring_slots),
             ring_rows=int(options.matrix_ring_rows))
-        hold = options.matrix_ring_hold
-        if hold is not None and hold_refusal(staged, int(hold)) is None:
-            staged = dataclasses.replace(staged, ring_hold=int(hold))
+        staged = _held(staged, context)
     pitched = _pitched(staged)
+    if roles and not lanes:
+        roled = dataclasses.replace(pitched, roles=roles, doubled=0)
+        if roles_refusal(roled, context) is None:
+            return _held(roled, context)
     if ring and not lanes:
         ringed = _bulk_pitched(pitched)
         if producer_refusal(ringed, context) is None:
@@ -1772,6 +1785,80 @@ def register_budgets(group: 'ElementGroup') -> Optional[Tuple[int, int,
         return None
     entry, budgets = found
     return entry, budgets['producer'], budgets['elements']
+
+
+#: The warps of the three roles' operator producer, and of their mma role
+#: on tcgen05: a warpgroup, whose four warps reach the four quarters of
+#: tensor memory's lanes (`Options.matrix_roles`).
+OPERATOR_WARPS = 1
+MMA_WARPS = 4
+
+
+def roles_asked(context) -> str:
+    """The roles the options ask the block in (`Options.matrix_roles`)."""
+    return context.get_user_options().matrix_roles
+
+
+def roles_refusal(section: GroupSection, context) -> Optional[str]:
+    """Why the section cannot run in the three roles (`Options.
+    matrix_roles`), or None where it can: one asynchronous step, on
+    tcgen05 so far, with the star step folded into it (`matrix_star`
+    `engine`) -- the element warps compute A into its ring -- and B
+    streamed prepared through the operator ring (`matrix_ring`
+    `prepared`), which the operator role fills; D added a cell at a time
+    by the mma role, not by bulk reductions."""
+    if roles_asked(context) == 'off':
+        return 'the option is off'
+    steps = [s for s in section.steps if s.lowering in ASYNC_LOWERINGS]
+    if len(steps) != 1:
+        return f'{len(steps)} asynchronous steps; the roles take one'
+    step = steps[0]
+    if step.lowering != 'tcgen05':
+        return (f'the step is {step.lowering}\'s; three roles are tcgen05\'s '
+                f'(sm_100a) so far')
+    if not folded(section, step):
+        return ('the star step is not folded into the operator step '
+                '(`matrix_star` `engine`): the element warps compute A '
+                'into its ring')
+    others = sorted({s.lowering for s in section.steps
+                     if s.lowering not in ASYNC_LOWERINGS + ('fused',)})
+    if others:
+        return (f'steps of {", ".join(others)} beside the asynchronous one; '
+                f'the roles take its folded star and it alone')
+    if not all(st.prepared and st.streamed
+               for st in _step_stages(section, step)):
+        return ('B does not stream prepared (`matrix_ring` `prepared`): the '
+                'operator role fills that ring')
+    if step.output:
+        return ('D is added by bulk reductions; the mma role adds it a cell '
+                'at a time')
+    return None
+
+
+def roles_notes(group: 'ElementGroup', context) -> List[str]:
+    """What the kernel's comment says of the block's roles where the options
+    ask for them (`Options.matrix_roles`): the warps each role takes and
+    what it does, or why the block runs in none -- the section's refusal,
+    or, where its own plan would take them, the fill rule's choice of
+    another plan (`fill`)."""
+    asked = roles_asked(context)
+    if asked == 'off':
+        return []
+    section = group.section
+    if section.roles:
+        e = group.elements
+        mma = e + OPERATOR_WARPS
+        return [f'the block in three roles, meeting on the rings and on a '
+                f'named barrier each: warps 0 to {e - 1} stage their '
+                f'elements and compute A into the folded star\'s ring '
+                f'(star), warp {e} fills B\'s prepared ring by bulk copies '
+                f'(operator), warps {mma} to {mma + MMA_WARPS - 1} issue the '
+                f'products and add D into the outputs (mma)']
+    why = roles_refusal(dataclasses.replace(section, roles=asked), context)
+    if why is None:
+        why = ('the roles\' plan does not fit the group the fill rule '
+               'chose, which this one does')
+    return [f'matrix_roles={asked} declined: {why}']
 
 
 def producer_refusal(section: GroupSection, context) -> Optional[str]:
@@ -2202,7 +2289,9 @@ def output_notes(section: GroupSection, context) -> List[str]:
         if step.lowering not in MATRIX_LOWERINGS or step.dest.is_tmp:
             continue
         if not step.output:
-            why = output_refusal(section, step, context)
+            why = ('the mma role adds D a cell at a time (`matrix_roles`)'
+                   if section.roles else output_refusal(section, step,
+                                                        context))
             if why is None:
                 # A step that takes them, the fill rule's choice: the
                 # group's size, or another of its lowering's choices.
@@ -2275,20 +2364,23 @@ def hold_refusal(section: GroupSection, hold: int) -> Optional[str]:
     """Why the prepared rings of the section's streamed steps cannot hold
     their slots for `hold` chunks (`Options.matrix_ring_hold`), or None:
     tcgen05 gives a slot back by the commit of its chunk's products, which
-    arrive at once complete -- 1 alone; wgmma at most the ring's slots, a
-    hold past them waiting for a round no slot is free for -- and 2 where
-    the star step is folded, whose A has two slots a warpgroup that the
-    same wait gives back (`STAR_SLOTS`)."""
+    arrive at once complete -- 1 alone, but in the three roles
+    (`GroupSection.roles`), whose mma role may commit a chunk's slot behind
+    later chunks' products (`multi_element._tcgen05_roles`); at most the
+    ring's slots, a hold past them waiting for a round no slot is free for
+    -- and on wgmma 2 where the star step is folded, whose A has two slots
+    a warpgroup that the same wait gives back (`STAR_SLOTS`)."""
     for step in section.steps:
         if step.lowering not in ASYNC_LOWERINGS:
             continue
         stages = _step_stages(section, step)
         if not (stages[0].prepared and stages[0].streamed):
             continue
-        if step.lowering == 'tcgen05' and hold != 1:
+        if step.lowering == 'tcgen05' and hold != 1 and not section.roles:
             return ('tcgen05 commits a chunk\'s products onto its slot\'s '
                     'empty side, which they arrive at once complete: a '
-                    'hold of 1 alone')
+                    'hold of 1 alone, but in the three roles '
+                    '(`matrix_roles`)')
         if hold > section.ring_slots:
             return (f'a hold of {hold} chunks is past the ring\'s '
                     f'{section.ring_slots} slots')
@@ -2297,6 +2389,17 @@ def hold_refusal(section: GroupSection, hold: int) -> Optional[str]:
                     f'slots a warpgroup, which the products\' wait gives '
                     f'back with B\'s')
     return None
+
+
+def _held(section: GroupSection, context) -> GroupSection:
+    """The section with the hold the options ask of its prepared rings
+    (`Options.matrix_ring_hold`) where they take it (`hold_refusal`), each
+    engine's own otherwise (`GroupSection.ring_hold` 0)."""
+    hold = context.get_user_options().matrix_ring_hold
+    if hold is None or not section.ring_slots:
+        return section
+    taken = int(hold) if hold_refusal(section, int(hold)) is None else 0
+    return dataclasses.replace(section, ring_hold=taken)
 
 
 def ring_chunks(section: GroupSection, step: Step) -> Tuple[
@@ -3200,6 +3303,14 @@ def fill(section: GroupSection, context,
                        output=output)
                  for slots in PRODUCER_SLOTS]
         lowerings[:0] = [r for r in rings if r.ring]
+        # Ahead of them, the block in its three roles where the options ask
+        # and the section takes them (`roles_refusal`): B streamed through
+        # the prepared ring, which the operator role fills.
+        if roles_asked(context) != 'off' and asynchronous(first):
+            roled = lower(section, context, split=True, streamed=True,
+                          prepared=ring_asked(context), star=first.star,
+                          roles=roles_asked(context))
+            lowerings[:0] = [roled] if roled.roles else []
         # Each with D added by bulk reductions where the options ask
         # (`Options.matrix_output`), then as it was: the staged columns
         # take room the reductions a cell do not, and where they would cost
@@ -3231,6 +3342,8 @@ def fill(section: GroupSection, context,
                 need = shared_bytes(lowered, taken)
                 warps = taken + (0 if not lowered.ring else WARPGROUP_WARPS
                                  if lowered.registers else PRODUCER_WARPS)
+                if lowered.roles:
+                    warps += OPERATOR_WARPS + MMA_WARPS
                 if (need <= budget
                         and 32 * warps <= hw.max_threads_per_block):
                     return ElementGroup(taken, lowered, need)
