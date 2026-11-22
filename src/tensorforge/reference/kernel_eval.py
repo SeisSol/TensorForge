@@ -2201,6 +2201,26 @@ class Interp:
              else None))
         self._mb_complete(state)
 
+    def ring_wait_pending(self, stmt: str) -> bool:
+        """Whether `stmt` is a wait on a ring's mbarrier (`mbarrierWait`)
+        for a phase that has not completed: the lane cannot pass it yet,
+        and a role waiting there hands over to the other (`Lockstep._arms`).
+        Reads nothing a race is about; a barrier nobody set up is the wait's
+        own to refuse."""
+        if not stmt.startswith('tensorforge::mbarrierWait'):
+            return False
+        m = _MB_WAIT.match(stmt)
+        if m is None:
+            return False
+        bar = self.ev(m.group('bar'))
+        if not isinstance(bar, Ptr):
+            return False
+        state = getattr(self.mem, 'mb_ring', {}).get(
+            (bar.base, bar.off + int(self.ev(m.group('bi')))))
+        if state is None:
+            return False
+        return state['phases'] % 2 == int(self.ev(m.group('parity'))) & 1
+
     def _ring_statement(self, stmt: str) -> None:
         """A ring's statement (`cuda.h`, `mbarrierInit` and its kin).  The
         lanes run in lockstep, a role's branch after the other's: a wait for
@@ -3705,6 +3725,19 @@ def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
     return env
 
 
+#: Whether `Lockstep` runs the two arms of an `if` as coroutines
+#: (`Lockstep._arms`): an arm whose next statement is a wait on a ring's
+#: mbarrier for a phase that has not completed (`Interp.ring_wait_pending`)
+#: hands over to the other arm, and the run resumes it once the other has
+#: gone as far as it can -- so that roles waiting on each other's
+#: mbarriers run as they do on the device, a role's region a loop of its
+#: own.  Where neither arm can go on, the run is the hang it would be: the
+#: wait refuses as it always did.  False runs an arm whole before the
+#: other, as the oracle did before roles: a wait can then only be met by a
+#: statement ahead of it in that order.
+COROUTINE_ARMS = True
+
+
 class Lockstep:
     """Drives a set of lanes through one body together.
 
@@ -3734,6 +3767,9 @@ class Lockstep:
         self.wave_cache: Dict = {}
         self.tracker: Optional[Races] = interps[0].mem.tracker if interps \
             else None
+        #: Statements executed so far: whether a round of coroutine arms
+        #: went anywhere (`_arms`).
+        self.steps = 0
 
     def _tracked(self, stmt: str, lanes: List['Interp']) -> None:
         """One statement under `Races`: the synchronization it is, and which
@@ -3823,6 +3859,40 @@ class Lockstep:
         return out
 
     def run(self, block: List, lanes: Optional[List['Interp']] = None) -> None:
+        """`block` for `lanes` (all of the run's by default).  Where every
+        arm of the run waits (`_arms`), the hang it would be: the waiting
+        lanes take their wait, which refuses it."""
+        for stmt, waiting in self._exec(block, lanes):
+            self.current, self.wave_cache = waiting, {}
+            for it in waiting:
+                it.assign(stmt)
+            raise Abort(f'every arm of the run waits, at {stmt!r}')
+
+    def _arms(self, arms):
+        """The arms of an `if`, `(block, lanes)` each, as coroutines: each
+        runs until it finishes or its next statement is a ring wait that
+        cannot return yet, then the next; a round in which none went any
+        further hands the wait of the first still waiting up -- to the arms
+        of an enclosing `if`, which may complete its phase, or to `run`.
+        Where none waits, the arms run whole one after the other, as they
+        always did."""
+        running = [self._exec(block, lanes) for block, lanes in arms]
+        waits = {}
+        while running:
+            before = self.steps
+            for arm in list(running):
+                try:
+                    waits[id(arm)] = next(arm)
+                except StopIteration:
+                    running.remove(arm)
+                    waits.pop(id(arm), None)
+            if running and self.steps == before:
+                yield waits[id(running[0])]
+
+    def _exec(self, block: List, lanes: Optional[List['Interp']] = None):
+        """`run` as a generator: what it yields is a wait the lanes cannot
+        pass yet, `(statement, lanes waiting)` -- only with `COROUTINE_ARMS`,
+        resumed by the arms of an `if` (`_arms`)."""
         lanes = self.interps if lanes is None else lanes
         if not lanes:
             return
@@ -3831,6 +3901,14 @@ class Lockstep:
             self.current = lanes
             self.wave_cache = {}
             if kind == 'expr':
+                while COROUTINE_ARMS:
+                    waiting = [it for it in lanes
+                               if it.ring_wait_pending(node[1])]
+                    if not waiting:
+                        break
+                    yield node[1], waiting
+                    self.current, self.wave_cache = lanes, {}
+                self.steps += 1
                 if self.tracker is not None:
                     self._tracked(node[1], lanes)
                     continue
@@ -3839,9 +3917,14 @@ class Lockstep:
             elif kind == 'if':
                 taken = [it for it in lanes if it.ev(node[1])]
                 other = [it for it in lanes if it not in taken]
-                self.run(node[2], taken)
+                arms = [(node[2], taken)]
                 if node[3] is not None:
-                    self.run(node[3], other)
+                    arms.append((node[3], other))
+                if COROUTINE_ARMS and len(arms) == 2 and taken and other:
+                    yield from self._arms(arms)
+                else:
+                    for arm, arm_lanes in arms:
+                        yield from self._exec(arm, arm_lanes)
             elif kind == 'for':
                 v, a, cmp_, b, step = node[1:6]
                 for it in lanes:
@@ -3854,7 +3937,7 @@ class Lockstep:
                                   else it.env[v] > it.ev(b))]
                     if not active:
                         break
-                    self.run(node[6], active)
+                    yield from self._exec(node[6], active)
                     self.current, self.wave_cache = active, {}
                     for it in active:
                         it.env[v] += (it.ev(step.split('=')[1]) *
@@ -3876,7 +3959,7 @@ class Lockstep:
                         raise Abort('lanes disagree on whether to enter a '
                                     'while loop')
                     try:
-                        self.run(node[2], active)
+                        yield from self._exec(node[2], active)
                     except _Break as left:
                         if len(left.lanes) != len(active):
                             raise Abort('a break some lanes of a loop take '
@@ -3889,7 +3972,7 @@ class Lockstep:
             elif kind == 'break':
                 raise _Break(lanes)
             elif kind == 'block':
-                self.run(node[1], lanes)
+                yield from self._exec(node[1], lanes)
 
 
 #: `dim3 block(threads, mults, 1)` in the generated launcher.  The lane count

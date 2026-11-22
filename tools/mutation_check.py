@@ -6299,6 +6299,24 @@ GROUPS = {
          sub(ME_GROUP, '        lowerings[:] = [twin for t in lowerings\n'
                        '                        for twin in _output_twins(t)]\n', '', 1)),
     ]),
+    # The host oracle's arms of an `if` as coroutines that hand over at a
+    # pending ring wait (`kernel_eval.Lockstep._arms`, `COROUTINE_ARMS`).
+    'oraclearms': ('tests/test_oracle_roles.py tests/test_mbarrier_ring.py', [
+        ('a pending ring wait not seen',
+         sub(ORACLE, "        return state['phases'] % 2 == int(self.ev(m.group('parity'))) & 1\n",
+             '        return False\n', 1)),
+        ("a pending wait's parity the other way round",
+         sub(ORACLE, "        return state['phases'] % 2 == int(self.ev(m.group('parity'))) & 1\n",
+             "        return state['phases'] % 2 != int(self.ev(m.group('parity'))) & 1\n", 1)),
+        ('the arms of an if whole one after the other',
+         sub(ORACLE, '                if COROUTINE_ARMS and len(arms) == 2 and taken and other:\n',
+             '                if False:\n', 1)),
+        ('arms left waiting where none went on',
+         sub(ORACLE, '            if running and self.steps == before:\n'
+                     '                yield waits[id(running[0])]\n',
+             '            if running and self.steps == before:\n'
+             '                break\n', 1)),
+    ]),
 }
 
 
