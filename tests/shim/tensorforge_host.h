@@ -300,6 +300,16 @@ template <int Row, typename T> T movdpp16Kept(T a);
 // rendezvous.  Over the barrier's type, as in the header.
 template <unsigned Waves, typename Barrier> void joinNamedBarrier(Barrier *);
 template <typename Barrier> void syncNamedBarrier(Barrier *);
+template <typename Barrier> void arriveNamedBarrier(Barrier *);
+// The objects of a block's roles (`pir.roles`): every role's counted, the
+// wave's own joined.
+template <unsigned... Waves, typename Barrier>
+void joinRoleBarriers(Barrier *, unsigned);
+// A ring's barriers as LDS counters on AMD (`engines.RingSpec`, kind
+// `lds_arrive`).
+void ldsRingInit(std::uint64_t *, std::uint32_t);
+void ldsRingArrive(std::uint64_t *, bool);
+void ldsRingWait(std::uint64_t *, std::uint32_t);
 
 // The buffer resources (`pir.buffers`): AMDGPU's resource type is opaque
 // here, made over a pointer of either space, and an access through one

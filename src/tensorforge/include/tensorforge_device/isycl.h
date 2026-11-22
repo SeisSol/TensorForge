@@ -692,5 +692,119 @@ template <std::size_t Bytes, typename T> ESIMD_INLINE SlmPtr<T> slmArena() {
   return SlmPtr<T>(0);
 }
 
+// -- named barriers of roles and rings (PVC) ----------------------------------
+//
+// A work-group's named barriers (`named_barrier_init`, `named_barrier_signal`,
+// `named_barrier_wait`; PVC): the roles' (`pir.roles`) and the rings'
+// (`engines.RingSpec` of kind `named`), from id 1 on -- id 0 taken for the
+// work-group's own barrier, which `namedBarriersInit` counts besides them.  A
+// signal names the barrier, the thread's part in it -- a producer (1), a
+// consumer (2), both (0) -- and the counts of the barrier's producers and
+// consumers in threads, which under ESIMD are the work-items; a consumer
+// waits behind its signal until the phase's producers have signaled.  The
+// hardware keeps a barrier's phases in their order: a ring's waits name no
+// parity, and its consumers signal every empty side once ahead of their first
+// round (`pir.engines.ring_prime`), so that the producer finds the slots
+// free.  The signal fences what the thread wrote ahead of it.
+//
+// Every id and count is a compile-time constant, a template argument: IGC
+// 1.0.15468 (SNG2's system compiler under oneAPI 2025.2.1) refuses a named
+// barrier whose id is a value ("GenXCisaBuilder failed for:
+// llvm.genx.nbarrier.arrive(i8 %id, ...): Incorrect args to intrinsic call";
+// IGC 2.7.11 and 2.41.5 take one).  A role's barrier is its role's own id
+// (`pir.roles.RoleSplit.constant`), and a ring's slot -- a value, the round's
+// -- picks its side's barrier by a chain of branches each naming its barrier
+// as a constant (`namedRingArrive`, `namedRingWait`).
+//
+// These helpers call named barriers as Intel's e2e tests do (intel/llvm,
+// sycl/test-e2e/ESIMD/named_barriers: init with id 0 the unnamed barrier's,
+// flag 1 a producer, 2 a consumer, the producers' and the consumers' counts).
+// On SNG2's PVC (oneAPI 2025.2.1, driver 23.43.27642) they run, Intel's
+// pattern and the ring as the lowering writes it alike, where IGC 2.41.5
+// compiles them (job 564784, ~/tf-probe/roles/sng2-igc241) -- and every kernel
+// hangs at its first named barrier where the system's IGC 1.0.15468 does
+// (jobs 564774, 564780, 564782): it writes a signal as vISA's
+// `nbarrier.signal <flag> <producers>`, the flag in the id's place and the
+// consumers' count dropped, where 2.41.5 writes the whole message to the
+// gateway.  So the lowering asks the IGC the build runs which of the two it
+// writes (`pir.engines.pvc_named_refusal`) and refuses roles and rings on PVC
+// where it is the old one, or where there is none to ask.
+
+/// The `Count` named barriers a kernel's roles and rings take, ids 1 to
+/// `Count`: its first statement.
+template <std::uint8_t Count> ESIMD_INLINE void namedBarriersInit() {
+  intel_esimd::named_barrier_init<Count + 1>();
+}
+
+/// The rendezvous of a role's `Threads` threads on its named barrier `Id`.
+template <std::uint8_t Id, std::uint32_t Threads>
+ESIMD_INLINE void namedBarrierSync() {
+  intel_esimd::named_barrier_signal(Id, 0, Threads, Threads);
+  intel_esimd::named_barrier_wait(Id);
+}
+
+/// An arrival at the named barrier `Id`, a side of a ring's slot -- a
+/// producer's publish on the full side, a consumer's release of the empty one
+/// -- by the thread `issue` picks: a signal as one of the side's `Producers`,
+/// its `Consumers` the threads that wait on it.
+template <std::uint8_t Id, std::uint32_t Producers, std::uint32_t Consumers>
+ESIMD_INLINE void namedSideArrive(bool issue) {
+  if (issue) {
+    intel_esimd::named_barrier_signal(Id, 1, Producers, Consumers);
+  }
+}
+
+/// A wait on the named barrier `Id`, a side of a ring's slot -- a consumer's
+/// for the producer's bytes, the producer's for the slot back: a signal as
+/// one of its `Consumers`, then the wait for the phase's `Producers`.
+template <std::uint8_t Id, std::uint32_t Producers, std::uint32_t Consumers>
+ESIMD_INLINE void namedSideWait() {
+  intel_esimd::named_barrier_signal(Id, 2, Producers, Consumers);
+  intel_esimd::named_barrier_wait(Id);
+}
+
+/// `namedSideArrive` on slot `slot`'s side of a ring of `Slots` slots whose
+/// sides of that kind are the barriers `First` to `First + Slots - 1`: a branch
+/// a slot, each naming its barrier as a constant.
+template <std::uint8_t First, int Slots, std::uint32_t Producers,
+          std::uint32_t Consumers>
+ESIMD_INLINE void namedRingArrive(int slot, bool issue) {
+  static_assert(Slots >= 1, "a ring of one slot or more");
+  if constexpr (Slots > 1) {
+    if (slot < Slots - 1) {
+      namedRingArrive<First, Slots - 1, Producers, Consumers>(slot, issue);
+      return;
+    }
+  }
+  namedSideArrive<First + Slots - 1, Producers, Consumers>(issue);
+}
+
+/// `namedSideWait` on slot `slot`'s side of a ring of `Slots` slots whose
+/// sides of that kind are the barriers `First` to `First + Slots - 1`.
+template <std::uint8_t First, int Slots, std::uint32_t Producers,
+          std::uint32_t Consumers>
+ESIMD_INLINE void namedRingWait(int slot) {
+  static_assert(Slots >= 1, "a ring of one slot or more");
+  if constexpr (Slots > 1) {
+    if (slot < Slots - 1) {
+      namedRingWait<First, Slots - 1, Producers, Consumers>(slot);
+      return;
+    }
+  }
+  namedSideWait<First + Slots - 1, Producers, Consumers>();
+}
+
+/// The consumers' first release of every slot of a ring of `Slots` slots
+/// whose empty sides are the barriers `First` to `First + Slots - 1`
+/// (`pir.engines.ring_prime`): an arrival at each, in turn.
+template <std::uint8_t First, int Slots, std::uint32_t Producers,
+          std::uint32_t Consumers>
+ESIMD_INLINE void namedRingPrime(bool issue) {
+  if constexpr (Slots > 0) {
+    namedRingPrime<First, Slots - 1, Producers, Consumers>(issue);
+    namedSideArrive<First + Slots - 1, Producers, Consumers>(issue);
+  }
+}
+
 } // namespace tensorforge
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_ISYCL_H_

@@ -26,6 +26,8 @@ from .core import (Access, BufferType, Effect, IRError, MemSpace, Op, Operand,
                    Participants)
 from .asyncmem import check_commits, check_tokens
 from . import engines
+from . import roles as role_split
+from . import rings as ring_acts
 from .buffers import verify_buffer
 from .tensors import verify_tensor
 from .transfers import tagged
@@ -252,11 +254,15 @@ def _risen(s: Stmt) -> set:
 
 def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                  reachable_at: Uniformity, in_while: bool = False,
-                 role_level: Optional[Uniformity] = None) -> None:
+                 role_level: Optional[Uniformity] = None,
+                 role: Optional[Any] = None) -> None:
     """``live`` is the set of value ids visible from enclosing scopes.
 
     ``in_while`` says whether this body is a queried loop's region, which is
-    the only place an ``Op.EXIT`` may sit.
+    the only place an ``Op.EXIT`` may sit.  ``role_level`` is how uniformly
+    the innermost role of a block in roles enters this body, and ``role``
+    which role that is (`pir.roles`): None in a link's second region that
+    goes on to the next link, which is no role of its own.
     """
     live = set(live)
 
@@ -368,12 +374,19 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # multiplication-wide barrier inside a multiplication-wide loop -- a
         # rendezvous of exactly the threads that agree on the trip count, and
         # therefore fine.
+        # A role's rendezvous: on its named object, every thread of the
+        # role arriving -- not the setup of an object, which the block
+        # does ahead of the roles, nor an mbarrier the role waits on.
         role_barrier = (s.effect & Effect.BARRIER and s.op in engines.REGISTRY
+                        and s.op != Op.SYNC_INIT
                         and getattr(engines.object_of(s), 'participants',
-                                    None) is Participants.ROLE)
+                                    None) is Participants.ROLE
+                        and engines.object_of(s).kind
+                        is engines.SyncKind.NAMED)
         if role_barrier:
             # Every thread of its role arrives: legal where the role is
             # entered as a block is, inside the roles of a block alone.
+            obj = engines.object_of(s)
             if role_level is None:
                 diag.append(f'{s.op}: a role\'s barrier outside the roles of '
                             f'a block (`IRBuilder.roles`)')
@@ -383,6 +396,19 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                     f'reaches uniformly at {role_level.name.lower()} level; '
                     f'the threads of the role that took another path never '
                     f'arrive (deadlock, not a wrong answer)')
+            elif role is None:
+                diag.append(f'{s.op}: a role\'s barrier in a split\'s second '
+                            f'region that goes on to the next link, no '
+                            f'role\'s (`pir.roles`)')
+            elif (obj.ident, obj.threads) != (role.ident, role.threads):
+                # The id is each thread's own role's, but the count is the
+                # role's the barrier was made for: another role's threads
+                # would wait for a count their role never reaches.
+                diag.append(
+                    f'{s.op}: a barrier of {obj.threads} threads meeting on '
+                    f'{obj.ident} in the region of the role {role.name}, '
+                    f'{role.threads} threads meeting on {role.ident} '
+                    f'(deadlock, not a wrong answer)')
         elif s.effect & Effect.BARRIER:
             scope = engines.arrival_of(s)
             if reachable_at < scope:
@@ -391,6 +417,15 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
                     f'only reached uniformly at {reachable_at.name.lower()} '
                     f'level; the threads that took another path never arrive '
                     f'(deadlock, not a wrong answer)')
+
+        # -- a ring's acts in the roles it names ---------------------------- #
+        #
+        # Its producer acquires, copies into and publishes a slot, its
+        # consumers take and release it (`rings.refusal`): a wait on the
+        # other side waits for a phase its own role completes.
+        why = ring_acts.refusal(s, None if role is None else role.name)
+        if why is not None:
+            diag.append(why)
 
         # -- a transfer goes through an engine of its op ------------------ #
         why = engines.transfer_engine_refusal(s)
@@ -405,6 +440,13 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         if s.op == Op.IF:
             if not 1 <= len(s.regions) <= 2:
                 diag.append('if: expects one or two regions')
+            if s.attr('roles'):
+                # A split into roles holds the shape of its chain, strictly
+                # (`roles.chain_refusal`): a statement a pass moved between
+                # two links would run on the threads of several roles.
+                why = role_split.chain_refusal(s)
+                if why is not None:
+                    diag.append(f'if: {why}')
             if len(s.args) != 1:
                 diag.append('if: expects exactly one condition operand')
             for r in s.regions:
@@ -627,18 +669,25 @@ def _check_scope(body: Tuple[Stmt, ...], live: set, diag: List[str],
         # -- recurse ------------------------------------------------------- #
         if s.regions:
             inner = min(reachable_at, _entry_uniformity(s))
-            if s.op == Op.IF and s.attr('roles'):
+            roles = (role_split.roles_of(s) if s.op == Op.IF
+                     and s.attr('roles') and len(s.regions) == 2 else None)
+            if roles is not None:
                 # Each role is entered by all of its threads where the split
-                # is reached by the block's (`IRBuilder.roles`).
-                inner_role = reachable_at
+                # is reached by the block's (`IRBuilder.roles`); a link
+                # further in the chain, or a role that splits again, where
+                # the split's first link is reached by its threads
+                # (`IRBuilder.split_roles`).
+                inner_role = reachable_at if role_level is None \
+                    else role_level
             elif role_level is not None:
                 inner_role = min(role_level, _entry_uniformity(s))
             else:
                 inner_role = None
-            for r in s.regions:
+            for k, r in enumerate(s.regions):
                 _check_scope(r.body, live | {a.id for a in r.args}, diag, inner,
                              in_while=(s.op == Op.WHILE),
-                             role_level=inner_role)
+                             role_level=inner_role,
+                             role=roles[k] if roles is not None else role)
             live.update(_risen(s))
 
         for t in s.target:

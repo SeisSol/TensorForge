@@ -5953,17 +5953,17 @@ GROUPS = {
     # oracle's numbers, races and waits.
     'producer': ('tests/test_element_producer.py', [
         ('the producer waiting for its consumers\' parity',
-         sub(ME_SECTION, "        b.ring_wait(ring, 'empty', slot, b.op('sub', INDEX, 1, parity,\n",
-             "        b.ring_wait(ring, 'empty', slot, b.op('add', INDEX, 0, parity,\n", 1)),
+         sub(BUILD, "            'sub', INDEX, 1, parity, hint='free'), writes=writes, reads=reads)\n",
+             "            'add', INDEX, 0, parity, hint='free'), writes=writes, reads=reads)\n", 1)),
         ('the slot\'s bytes announced short',
          sub(ME_SECTION, '            nbytes += elements * width * rows * section.dtype.size()\n',
              '            nbytes += elements * width * (rows - 4) * section.dtype.size()\n', 1)),
         ('a slot given back by the first lane alone',
-         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_arrive(ring, 'empty', slot,",
-             "        b.ring_arrive(ring, 'empty', slot,", 1)),
+         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_release(ring, slot,",
+             "        b.ring_release(ring, slot,", 1)),
         ('the bytes announced ahead of the lanes\' stores',
-         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_arrive(ring, 'full', slot,",
-             "        b.ring_arrive(ring, 'full', slot,", 1)),
+         sub(ME_SECTION, "        b.barrier(Participants.WAVE)\n        b.ring_publish(ring, slot,",
+             "        b.ring_publish(ring, slot,", 1)),
         ('a slot free once one element warp is done',
          sub(ME_SECTION, "            'me', section.ring, full=1, empty=elements,\n",
              "            'me', section.ring, full=1, empty=1,\n", 1)),
@@ -6060,12 +6060,9 @@ GROUPS = {
                'tests/test_operator_ring.py::test_the_kernel_copies_b_and_converts_none_of_it '
                'tests/test_operator_ring.py::test_the_commit_onto_a_rings_slot_is_its_empty_side', [
         ('the producer copying into a slot it did not wait for',
-         sub(ME_SECTION, "        b.ring_wait(self.ring, 'empty', slot, b.op('sub', INDEX, 1, parity,\n"
-                 "                                                   hint='free'),\n"
-                 "                    writes=[self.storage])\n", '', 1)),
+         sub(ME_SECTION, "        b.ring_acquire(self.ring, slot, parity, writes=[self.storage])\n", '', 1)),
         ("tcgen05's products never giving their slot back",
-         sub(ME_SECTION, "            b.commit_group('tcgen05', object=self.ring, issue=issue,\n"
-                 "                           slot=slot)\n", '', 1)),
+         sub(ME_SECTION, "            b.ring_release(self.ring, slot, issue, engine='tcgen05')\n", '', 1)),
         # measync's mutations of the converting ring's issue, on the
         # prepared ring's own copies of its lines.
         ("the prepared ring's A lower half at the upper's columns",
@@ -6110,17 +6107,17 @@ GROUPS = {
         ("the table's numbers past the window's contraction",
          sub(ME_GROUP, '            if col >= d1:\n                continue\n', '', 1)),
         ("wgmma's slot given back ahead of the wait for its products",
-         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, 1, accs)\n'
-                 '            ring.release(trip, i - 1, base)\n',
-             '            ring.release(trip, i - 1, base)\n'
-             '            flight = _wgmma_retire(b, flight, 1, accs)\n', 1)),
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, ring.hold - 1, accs)\n'
+                 '            ring.release(trip, i - ring.hold + 1, base)\n',
+             '            ring.release(trip, i - ring.hold + 1, base)\n'
+             '            flight = _wgmma_retire(b, flight, ring.hold - 1, accs)\n', 1)),
         ("wgmma's slot given back by its first lane alone",
          sub(ME_SECTION, '        b.barrier(Participants.WAVE)\n'
-                 "        b.ring_arrive(self.ring, 'empty', slot,\n",
-             "        b.ring_arrive(self.ring, 'empty', slot,\n", 1)),
+                 "        b.ring_release(self.ring, slot,\n",
+             "        b.ring_release(self.ring, slot,\n", 1)),
         ("the trip's head filling every slot",
-         sub(ME_SECTION, '            for j in range(min(self.slots - 1, len(self.chunks))):\n',
-             '            for j in range(min(self.slots, len(self.chunks))):\n', 1)),
+         sub(ME_SECTION, '            for j in range(min(self.lead, len(self.chunks))):\n',
+             '            for j in range(min(self.lead + 1, len(self.chunks))):\n', 1)),
         ("the trip's first chunks never filled",
          sub(ME_SECTION, '        for ring in trip.rings.values():\n            ring.head(trip)\n', '', 1)),
         ("a product's A written over its products in flight",
@@ -6162,20 +6159,17 @@ GROUPS = {
              "    areas = b.mbarrier_ring(f'ta{section.steps.index(step)}', slots,\n"
              "                            full=96, empty=1,\n", 1)),
         ('a band writing a slot the products still read',
-         sub(ME_SECTION, "            b.ring_wait(areas, 'empty', slot, b.op('sub', INDEX, 1, parity,\n"
-                         "                                                   hint='free'))\n", '', 1)),
+         sub(ME_SECTION, "            b.ring_acquire(self.areas, slot, parity)\n", '', 1)),
         # measync's mutations of `_tcgen05_a` and `_tcgen05`, on the fold's
         # own copies of their lines.
         ('a band of warps the group does not hold whole storing the folded A',
-         sub(ME_SECTION, "                            'its mbarriers')\n"
-                         '    bands = max(1, trip.group.elements // 4)\n',
-             "                            'its mbarriers')\n"
-             '    bands = trip.group.elements // 4 + 1\n', 1)),
+         sub(ME_SECTION, '        bands = max(1, trip.group.elements // 4)\n'
+                         "        band = b.op('div', INDEX, trip.slot, 4, hint='band')\n",
+             '        bands = trip.group.elements // 4 + 1\n'
+             "        band = b.op('div', INDEX, trip.slot, 4, hint='band')\n", 1)),
         ('the tensor memory allocated again by a folded trip',
-         sub(ME_SECTION, '    b, section = trip.builder, trip.section\n'
-                         '    tmem = trip.tmem\n',
-             '    b, section = trip.builder, trip.section\n'
-             '    tmem = b.tmem_alloc(256, arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
+         sub(ME_SECTION, '        self.tmem = trip.tmem\n',
+             '        self.tmem = b.tmem_alloc(256, arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
         ("a block's lower halves over its upper ones",
          sub(ME_SECTION, '                b.tmem_st(tmem, at + 2 * STAR_ROWS * p + STAR_ROWS,\n',
              '                b.tmem_st(tmem, at + 2 * STAR_ROWS * p,\n', 1)),
@@ -6183,12 +6177,12 @@ GROUPS = {
          sub(ME_SECTION, '                              a_column=at + 2 * STAR_ROWS * p\n',
              '                              a_column=columns[0] + 2 * STAR_ROWS * p\n', 1)),
         ("wgmma's slot of A written while its products are in flight",
-         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, 1, accs)\n'
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, hold - 1, accs)\n'
                          '            if ring is not None:\n'
-                         '                ring.release(trip, j - 1, base)\n',
-             '            flight = _wgmma_retire(b, flight, 2, accs)\n'
+                         '                ring.release(trip, j - hold + 1, base)\n',
+             '            flight = _wgmma_retire(b, flight, hold, accs)\n'
              '            if ring is not None:\n'
-             '                ring.release(trip, j - 1, base)\n', 1)),
+             '                ring.release(trip, j - hold + 1, base)\n', 1)),
         ("wgmma's stores of A not fenced for the async proxy",
          sub(ME_SECTION, '                                     \'as\'), mine, \'as\'), align=16)\n'
                          '        b.fence(FenceKind.PROXY)\n',
@@ -6218,12 +6212,8 @@ GROUPS = {
                        '                              output=output)\n'
                        '                        for t in list(tilings) if t.star]\n', '', 1)),
         ("the star's numbers of the next column",
-         sub(ME_SECTION, "    column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),\n"
-                         "                    step.cols[0], 'p')\n"
-                         "    inband = ",
-             "    column = _index(b, 'add', b.op('rem', INDEX, _index(b, 'add', row, 1, 'p'), width, hint='p'),\n"
-             "                    step.cols[0], 'p')\n"
-             "    inband = ", 1)),
+         sub(ME_SECTION, "        column = _index(b, 'add', b.op('rem', INDEX, row, self.width,\n",
+             "        column = _index(b, 'add', b.op('rem', INDEX, _index(b, 'add', row, 1, 'p'), self.width,\n", 1)),
     ]),
     # A matrix step's D added into the element's output by bulk reductions
     # (`Options.matrix_output`, `element_group.output_refusal`,
@@ -6557,6 +6547,302 @@ GROUPS = {
         ("one round's launch said to loop",
          sub(GEN, '            self._context.get_user_options().one_round_grid\n',
              '            False\n', 1)),
+    # --- warp roles (tensorforge-roles) ------------------------------------- #
+    # A block in N roles (`pir.roles`, `IRBuilder.split_roles`): the chain of
+    # links, each role's barrier id, the verifier's and the placement's
+    # reading of the chain, and the roles' register budgets.
+    'roles': ('tests/test_roles.py '
+              'tests/test_element_producer.py::test_the_producers_registers_go_to_the_element_warps '
+              'tests/test_element_producer.py::test_the_moves_stay_in_the_blocks_registers '
+              'tests/test_element_producer.py::test_the_kernel_moves_the_registers_once '
+              'tests/test_mbarrier_ring.py -n 6', [
+        ("a role's id stepping past its range's first warp",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "        steps = ''.join(f' + ({self.warp} >= {lo})' for lo in self.starts)\n",
+             "        steps = ''.join(f' + ({self.warp} > {lo})' for lo in self.starts)\n", 1)),
+        ("a middle role's condition its range's start alone",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "        return b.op('and', BOOL, b.op('ge', BOOL, warp, lo, hint=role.name),\n",
+             "        return b.op('ge', BOOL, warp, lo, hint=role.name)\n"
+             "        return b.op('and', BOOL, b.op('ge', BOOL, warp, lo, hint=role.name),\n", 1)),
+        ("every link of the chain carrying the whole split",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "                    movable=False, attrs=(('roles', tuple(roles[k:])),))\n",
+             "                    movable=False, attrs=(('roles', tuple(roles)),))\n", 1)),
+        ("a chain a statement broke let through",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    if (len(rest) != 1 or not is_split(rest[0])\n',
+             '    if False and (len(rest) != 1 or not is_split(rest[0])\n', 1)),
+        ("a region built with the next role current",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '        b._roles.append(split.roles[i])\n',
+             '        b._roles.append(split.roles[(i + 1) % len(split.roles)])\n', 1)),
+        ("the moves past the block's pool let through",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    if held > entry * split.warps * wave:\n',
+             '    if False:\n', 1)),
+        ("a moving role of no whole warpgroups let through",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '        if count != entry and (lo % WARPGROUP_WARPS\n',
+             '        if False and (lo % WARPGROUP_WARPS\n', 1)),
+        ("the takers' share of the SM's registers, not the block's",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    gained = (entry * total - given) // sum(t for _, t in takers) // 8 * 8\n',
+             '    gained = (registers - given) // sum(t for _, t in takers) // 8 * 8\n', 1)),
+        ("the registers raised before the block met",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    b.barrier(Participants.BLOCK)\n    for role in split.roles:\n',
+             '    for role in split.roles:\n', 1)),
+        ("the conditions of every role but the first",
+         sub(BUILD, '                 for role in split.roles[:-1]]\n',
+             '                 for role in split.roles[1:]]\n', 1)),
+        ("another role's barrier in a role let through",
+         sub(PASSES, '            elif (obj.ident, obj.threads) != (role.ident, role.threads):\n',
+             '            elif False:\n', 1)),
+        ("the verifier reading no chain's shape",
+         sub(PASSES, '                why = role_split.chain_refusal(s)\n',
+             '                why = None\n', 1)),
+        ("a later link's roles reached at its condition's level",
+         sub(PASSES, '                inner_role = reachable_at if role_level is None \\\n'
+                     '                    else role_level\n',
+             '                inner_role = reachable_at\n', 1)),
+        ("every role's hazards met on the first role's barrier",
+         sub(BARRIERS, '            def make(handoff, block, role=role):\n',
+             '            def make(handoff, block, role=s.attr(\'roles\')[0]):\n', 1)),
+        ("the accesses across the roles of the first role's writes alone",
+         sub(BARRIERS, '        for i, (_, writes_a) in enumerate(roles):\n',
+             '        for i, (_, writes_a) in enumerate(roles[:1]):\n', 1)),
+        ("the state past a split of its first two roles' ends",
+         sub(BARRIERS, '        for end in ends[1:]:\n',
+             '        for end in ends[1:2]:\n', 1)),
+    ]),
+    # The ring as one object (`engines.RingSpec`, `IRBuilder.ring_acquire`
+    # and its kin, `pir.rings`): its description, the scope every statement
+    # on it states, its acts held to its roles, and the hand-offs a pass
+    # reads.
+    'ringobj': ('tests/test_ring_object.py tests/test_mbarrier_ring.py -n 6', [
+        ("a ring's description not carried by its object",
+         sub(ENGINES, "    return SyncObjectType(scope, kind, Participants.BLOCK, slots=int(slots),\n"
+                      "                          ring=spec)\n",
+             "    return SyncObjectType(scope, kind, Participants.BLOCK, slots=int(slots))\n", 1)),
+        ("a ring's waits stating no scope",
+         sub(ENGINES, "    return _stmt(Op.WAIT_PHASE, (('object', ring), ('side', side),\n"
+                      "                                 ('scope', _ring_scope(ring))),\n",
+             "    return _stmt(Op.WAIT_PHASE, (('object', ring), ('side', side)),\n", 1)),
+        ("a cluster's scope spelled as the block's",
+         sub(ENGINES, '    if scope is not None and scope is not SyncScope.BLOCK:\n',
+             '    if False:\n', 1)),
+        ("a role's acts read the other way round",
+         sub(ENGINES, "        producer = (side == 'empty') == waits\n",
+             "        producer = (side == 'full') == waits\n", 1)),
+        ('a producer among its own consumers let through',
+         sub(ENGINES, '        if self.producer is not None and self.producer in consumers:\n',
+             '        if False:\n', 1)),
+        ("a commit onto a slot read as a publish",
+         sub(Path('src/tensorforge/backend/pir/rings.py'), "        return 'release', 'empty'\n",
+             "        return 'publish', 'full'\n", 1)),
+        ("a split's later roles' hand-offs given to its first",
+         sub(Path('src/tensorforge/backend/pir/rings.py'),
+             '                    for r, region in regions:\n'
+             '                        visit(region.body, r.name)\n',
+             '                    for r, region in regions:\n'
+             '                        visit(region.body, regions[0][0].name)\n', 1)),
+        ("a publish's bytes read as none",
+         sub(Path('src/tensorforge/backend/pir/rings.py'), "        return int(s.attr('tx') or 0)\n",
+             '        return 0\n', 1)),
+        ("a publish of other bytes than its round's let through",
+         sub(Path('src/tensorforge/backend/pir/rings.py'),
+             "    if act == 'publish' and spec.tx and int(s.attr('tx') or 0) != spec.tx:\n",
+             '    if False:\n', 1)),
+        ("the verifier asking no ring's roles",
+         sub(PASSES, '        why = ring_acts.refusal(s, None if role is None else role.name)\n',
+             '        why = None\n', 1)),
+        ('a ring set up without the roles it names',
+         sub(BUILD, '                                producer, tuple(consumers), int(tx),\n',
+             '                                None, (), int(tx),\n', 1)),
+        ("an engine's release written as an arrival",
+         sub(BUILD, '        if engine is not None:\n'
+                    '            return self.commit_group(engine, object=ring, issue=issue,\n',
+             '        if False:\n'
+             '            return self.commit_group(engine, object=ring, issue=issue,\n', 1)),
+        ("the producer's ring naming no roles",
+         sub(ME_SECTION, "            arena=GeneralLexicon.TOTAL_SHR_MEM, producer='producer',\n"
+                         "            consumers=('elements',))\n",
+             '            arena=GeneralLexicon.TOTAL_SHR_MEM)\n', 1)),
+        # The release point (`RingSpec.hold`, `Options.matrix_ring_hold`).
+        ("a ring held past its slots",
+         sub(ENGINES, '        if not 1 <= int(self.hold) <= int(self.slots):\n',
+             '        if not 1 <= int(self.hold):\n', 1)),
+        ("a ring's hold not carried to its description",
+         sub(BUILD, '                                kind, scope, int(hold), tuple(waiters),\n',
+             '                                kind, scope, 1, tuple(waiters),\n', 1)),
+        ("wgmma's slot given back a chunk past the one its wait retired",
+         sub(ME_SECTION, '            ring.release(trip, i - ring.hold + 1, base)\n',
+             '            ring.release(trip, i - ring.hold + 2, base)\n', 1)),
+        ("the wait behind a wgmma chunk leaving its hold in flight",
+         sub(ME_SECTION, '            flight = _wgmma_retire(b, flight, ring.hold - 1, accs)\n',
+             '            flight = _wgmma_retire(b, flight, ring.hold, accs)\n', 1)),
+        ("the slots still held behind the last chunk never given back",
+         sub(ME_SECTION, '    for i in range(max(0, len(ring.chunks) - ring.hold + 1),\n',
+             '    for i in range(max(0, len(ring.chunks) - 1),\n', 1)),
+        ("the first thread filling past the slot given back",
+         sub(ME_SECTION, "        return self.slots - self.hold + (self.step.lowering != 'tcgen05')\n",
+             "        return self.slots - self.hold + 1 + (self.step.lowering != 'tcgen05')\n", 1)),
+        ("the first thread's lead blind to the hold",
+         sub(ME_SECTION, "        return self.slots - self.hold + (self.step.lowering != 'tcgen05')\n",
+             "        return self.slots - 2 + (self.step.lowering != 'tcgen05')\n", 1)),
+        ("wgmma's folded star waiting as before whatever the hold",
+         sub(ME_SECTION, '    hold = slots if ring is None else ring.hold\n',
+             '    hold = slots\n', 1)),
+        ("a hold its rings refuse taken by the plan",
+         sub(ME_GROUP, '    taken = int(hold) if hold_refusal(section, int(hold)) is None else 0\n',
+             '    taken = int(hold)\n', 1)),
+        ("wgmma's folded star holding B past A's slots",
+         sub(ME_GROUP, '        if folded(section, step) and hold > STAR_SLOTS[step.lowering]:\n',
+             '        if False:\n', 1)),
+    ]),
+    # The roles and rings on AMD and Intel (`pir.roles.roles_refusal`,
+    # `engines.ring_kind`): gfx1250's role objects and the rings of LDS
+    # counters on the host oracle, CDNA's and SPMD's refusals, PVC's named
+    # barriers in the text.
+    'roleslower': ('tests/test_roles_lowerings.py -n 6', [
+        ("every role of gfx1250 meeting on the first object",
+         sub(ENGINES, "            return (f'tensorforge::syncNamedBarrier(&{ROLE_OBJECTS}'\n"
+                      "                    f'[{obj.ident}]);')\n",
+             "            return (f'tensorforge::syncNamedBarrier(&{ROLE_OBJECTS}'\n"
+             "                    f'[0]);')\n", 1)),
+        ("an LDS ring's empty side counting the full side's arrivals",
+         sub(ENGINES, "        f'    tensorforge::ldsRingInit(&{ring}[{obj.slots} + r], '\n"
+                      "        f'{s.attr(\"empty\")});',\n",
+             "        f'    tensorforge::ldsRingInit(&{ring}[{obj.slots} + r], '\n"
+             "        f'{s.attr(\"full\")});',\n", 1)),
+        ("an LDS ring's wait for the first phase's parity always",
+         sub(ENGINES, "        return Lowered((f'tensorforge::ldsRingWait({_ring_barrier(s, env)}, '\n"
+                      "                        f'{env.name(s.args[1])});',))\n",
+             "        return Lowered((f'tensorforge::ldsRingWait({_ring_barrier(s, env)}, '\n"
+             "                        f'0);',))\n", 1)),
+        ("an LDS ring's arrival with bytes let through",
+         sub(ENGINES, "        if s.attr('tx'):\n"
+                      "            raise IRError(f'{s.op} of {s.attr(\"tx\")} bytes on a ring of LDS '\n",
+             "        if False:\n"
+             "            raise IRError(f'{s.op} of {s.attr(\"tx\")} bytes on a ring of LDS '\n", 1)),
+        ("the roles' objects counted in the split's order, not their ids'",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    ordered = sorted(split.roles, key=lambda r: r.warps[0])\n',
+             '    ordered = list(split.roles)\n', 1)),
+        ("a second split's objects let through on gfx1250",
+         sub(BUILD, '        elif self._role_objects != split.ident:\n',
+             '        elif False:\n', 1)),
+        ('CDNA refusing roles for want of objects alone',
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "        if str(hw.model).startswith('gfx9'):\n"
+             "            return CDNA_REFUSAL\n", '', 1)),
+        ("a PVC ring's empty sides on its full sides' ids",
+         sub(ENGINES, "    return obj.ring.ident + (obj.slots if side == 'empty' else 0)\n",
+             '    return obj.ring.ident\n', 1)),
+        ("the consumers' first release on the full sides",
+         sub(ENGINES, "    return _stmt(Op.ARRIVE, (('object', ring), ('side', 'empty'),\n",
+             "    return _stmt(Op.ARRIVE, (('object', ring), ('side', 'full'),\n", 1)),
+        ("PVC's roles named by the split's id of each thread, a value",
+         sub(BUILD, '                split, first=self._named_take(len(split.roles)),\n'
+                    '                constant=True)\n',
+             '                split, first=self._named_take(len(split.roles)))\n', 1)),
+        ("every role's constant id the first role's",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '            r._replace(ident=str(self.id_of(r.name)) if self.constant\n',
+             '            r._replace(ident=str(self.first) if self.constant\n', 1)),
+        ("PVC's named barriers let through whatever the IGC",
+         sub(ENGINES, 'PVC_NAMED_BARRIERS: Optional[bool] = None\n',
+             'PVC_NAMED_BARRIERS: Optional[bool] = True\n', 1)),
+        ("a PVC role split let through where its barriers hang",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '        why = engines.pvc_named_refusal()\n        if why is not None:\n            return why\n',
+             '', 1)),
+        ("no IGC to ask taken for one that writes the gateway message",
+         sub(ENGINES, '    return PVC_UNPROBED if form is None else PVC_REFUSAL\n',
+             '    return None if form is None else PVC_REFUSAL\n', 1)),
+        ("IGC 1.0.15468's signal taken for the gateway message",
+         sub(Path('src/tensorforge/toolchain.py'), "        return 'flag-producers'\n",
+             "        return 'gateway'\n", 1)),
+        ("a PVC ring's helper told one slot more",
+         sub(ENGINES, "    at = (f'{named_ring_id(obj, side)}, {obj.slots}, {counts[0]}, '\n",
+             "    at = (f'{named_ring_id(obj, side)}, {obj.slots + 1}, {counts[0]}, '\n", 1)),
+        ("a PVC ring's side counted as the other side",
+         sub(ENGINES, "    counts = ((spec.full, full) if side == 'full' else (spec.empty, empty))\n",
+             "    counts = ((spec.empty, empty) if side == 'full' else (spec.full, full))\n", 1)),
+        ("the kernel's named barriers never counted",
+         sub(BUILD, '        if self._named:\n', '        if False:\n', 1)),
+        ("SPMD refused for no reason of its own",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "    if fam == 'sycl':\n        return SPMD_REFUSAL\n", '', 1)),
+        ('a ring of mbarriers below sm_90 let through',
+         sub(ENGINES, '        if level is None or level < 90:\n', '        if False:\n', 1)),
+        ("the oracle's arms never handing over at an LDS ring's wait",
+         sub(ORACLE, "        if not stmt.startswith(('tensorforge::mbarrierWait',\n"
+                     "                                'tensorforge::ldsRingWait')):\n",
+             "        if not stmt.startswith('tensorforge::mbarrierWait'):\n", 1)),
+    ]),
+    # The three-role demonstrator (`Options.matrix_roles`,
+    # `multi_element._tcgen05_roles`): each role's acts, the rings named to
+    # their roles, the mma role's D and output, the plan's refusals and the
+    # oracle's landing of products across roles.
+    'threeroles': ('tests/test_three_roles.py -n 6', [
+        ("the operator role filling no chunk",
+         sub(ME_SECTION, '                ring.fill(trip, j, base, issue)\n',
+             '                pass\n', 1)),
+        ("the mma role giving no slot of B back behind its blocks",
+         sub(ME_SECTION, '            if j >= hold - 1:\n'
+                         '                ring.release(trip, j - hold + 1, base, issue)\n',
+             '            if False:\n'
+             '                ring.release(trip, j - hold + 1, base, issue)\n', 1)),
+        ("the mma role's last held slots of B never given back",
+         sub(ME_SECTION, '        for j in range(max(0, fold.blocks - hold + 1), fold.blocks):\n'
+                         '            ring.release(trip, j, base, issue)\n', '', 1)),
+        ("A's ring named to no roles",
+         sub(ME_SECTION, "    fold = _Fold(trip, step, M, producer='star', consumers=('mma',))\n",
+             '    fold = _Fold(trip, step, M)\n', 1)),
+        ("B's ring named to no roles in the three roles",
+         sub(ME_SECTION, "            named = (dict(producer='operator', consumers=('mma',))\n",
+             '            named = (dict()\n', 1)),
+        ("every row's output through the group's first element",
+         sub(ME_SECTION, "    source = b.op('select', SIZE, held, e, group, hint='e')\n",
+             '    source = group\n', 1)),
+        ("the epilogue's rows by the warp, not its quarter",
+         sub(ME_SECTION, "        'rem', INDEX, b.thread_id('y'), 4, hint='q'), 32, hint='m'),\n",
+             "        'rem', INDEX, b.thread_id('y'), 8, hint='q'), 32, hint='m'),\n", 1)),
+        ("the star warps' staging not met behind the last trip's bands",
+         sub(ME_SECTION, "            # every element's rows.\n            b.barrier(Participants.ROLE)\n",
+             "            # every element's rows.\n", 1)),
+        ("the mma role's barrier ahead of the next trip's products dropped",
+         sub(ME_SECTION, "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n"
+                         '        b.barrier(Participants.ROLE)\n',
+             "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')\n", 1)),
+        ("D read ahead of the wait for its products",
+         sub(ME_SECTION, "        b.commit_group('tcgen05', object=cursor, issue=issue)\n"
+                         "        b.matrix_wait('tcgen05', object=cursor, tmem=[trip.tmem])\n"
+                         "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')\n"
+                         '        _tcgen05_role_epilogue(trip, step, M)\n',
+             "        b.commit_group('tcgen05', object=cursor, issue=issue)\n"
+             "        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')\n"
+             '        _tcgen05_role_epilogue(trip, step, M)\n', 1)),
+        ("roles where the star step is not folded",
+         sub(ME_GROUP, "    if not folded(section, step):\n"
+                       "        return ('the star step is not folded into the operator step '\n",
+             '    if False:\n'
+             "        return ('the star step is not folded into the operator step '\n", 1)),
+        ("roles on wgmma",
+         sub(ME_GROUP, "    if step.lowering != 'tcgen05':\n"
+                       "        return (f'the step is {step.lowering}\\'s; three roles are tcgen05\\'s '\n",
+             '    if False:\n'
+             "        return (f'the step is {step.lowering}\\'s; three roles are tcgen05\\'s '\n", 1)),
+        ("the comment's mma warps from the operator's",
+         sub(ME_GROUP, '        mma = e + OPERATOR_WARPS\n', '        mma = e\n', 1)),
+        ("the generator lowering the section again without its roles",
+         sub(GEN, '          output=element_group.output_of(planned), roles=planned.roles)\n',
+             '          output=element_group.output_of(planned))\n', 1)),
+        ("the oracle's check of a landing product counted as an access",
+         sub(ORACLE, '                if not _same(self.mem.peek(base, slot), value):\n',
+             '                if not _same(self.mem.read(base, slot), value):\n', 1)),
     ]),
 }
 

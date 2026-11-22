@@ -4569,7 +4569,7 @@ class Generator:
           registers=planned.registers,
           halves=element_group.halves(planned),
           prepared=element_group.prepared(planned), star=planned.star,
-          output=element_group.output_of(planned))
+          output=element_group.output_of(planned), roles=planned.roles)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
@@ -5247,6 +5247,9 @@ class Generator:
       for note in element_group.output_notes(self._element_group.section,
                                              self._context):
         writer(f'// output: {note}')
+      for note in element_group.roles_notes(self._element_group,
+                                            self._context):
+        writer(f'// roles: {note}')
     groups = self._launch_groups()
     if len(groups) > 1:
       writer(f'// launches: {len(groups)}, cut at the grid barriers, one after '

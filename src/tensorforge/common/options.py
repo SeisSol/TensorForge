@@ -264,6 +264,23 @@ def parse_matrix_ring_slots(text: str) -> int:
   return value
 
 
+#: The holds `Options.matrix_ring_hold` takes, besides None.
+MATRIX_RING_HOLD = tuple(range(1, 9))
+
+
+def parse_matrix_ring_hold(text: str) -> Optional[int]:
+  """None (`none`, `auto` or nothing) or 1 to 8
+  (`Options.matrix_ring_hold`)."""
+  low = str(text).strip().lower()
+  if low in ('', 'none', 'auto'):
+    return None
+  value = int(low)
+  if value not in MATRIX_RING_HOLD:
+    raise ValueError(f'matrix_ring_hold is one of {MATRIX_RING_HOLD} or '
+                     f'auto, not {value}')
+  return value
+
+
 #: What `Options.matrix_star` takes.
 MATRIX_STAR = ('buffer', 'halves', 'engine')
 
@@ -285,6 +302,18 @@ def parse_matrix_output(text: str) -> str:
   value = str(text).strip().lower()
   if value not in MATRIX_OUTPUT:
     raise ValueError(f'expected one of {MATRIX_OUTPUT}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_roles` takes.
+MATRIX_ROLES = ('off', 'three')
+
+
+def parse_matrix_roles(text: str) -> str:
+  """`off` or `three` (`Options.matrix_roles`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_ROLES:
+    raise ValueError(f'expected one of {MATRIX_ROLES}, got {text!r}')
   return value
 
 
@@ -2780,6 +2809,34 @@ declare('matrix_ring_slots',
             'converting ring\'s two of thirty-two, so that the group keeps '
             'its size.')
 
+declare('matrix_ring_hold',
+        default=None,
+        env='TF_MATRIX_RING_HOLD',
+        parse=parse_matrix_ring_hold,
+        doc='How many chunks of the prepared operator ring (`matrix_ring` '
+            '`prepared`) the products hold a slot for '
+            '(`engines.RingSpec.hold`): its chunk\'s and the ones after it, '
+            'the slot given back behind the work of that many.  None, the '
+            'default, takes each engine\'s own: wgmma 2, the wait behind a '
+            'chunk retiring the one before, whose slot the warps give back; '
+            'tcgen05 1, the commit of a chunk\'s products onto its slot\'s '
+            'empty side.  1 on wgmma waits for each chunk\'s products '
+            'before the next chunk loads its A, and the block\'s first '
+            'thread fills a slot a chunk earlier (the slot just given '
+            'back, `multi_element._OperatorRing.lead`).  Measured on a '
+            'GH200 at the o8 F32 volume (ns an element, 2 against 1): the '
+            'ring at its default four slots 12.99 against 12.19, at two '
+            '14.89 against 12.35, at eight of 8 rows 12.35 against 12.82; '
+            'the folded star 16.34 against 16.98 (a prototype of the o12 '
+            'volume, two slots: 52.7 against 36.5).  At most the slots, '
+            'and 2 on '
+            'the folded star of wgmma, whose A has two slots; tcgen05 takes '
+            '1 alone, but in the three roles (`matrix_roles`), whose mma '
+            'role commits a chunk\'s slot behind the products of the chunks '
+            'it holds it for.  Where a ring cannot hold its slots so, every '
+            'ring keeps its engine\'s own and the kernel\'s comment says why '
+            '(`element_group.hold_refusal`).')
+
 declare('matrix_tf32_operands',
         default=False,
         env='TF_MATRIX_TF32_OPERANDS',
@@ -2840,6 +2897,26 @@ declare('matrix_output',
             'their own), where the step assigns, and where the output\'s '
             'columns are not on sixteen bytes (`element_group.'
             'output_refusal`).')
+
+declare('matrix_roles',
+        default='off',
+        env='TF_MATRIX_ROLES',
+        parse=parse_matrix_roles,
+        doc='The block of the multi-element layout\'s asynchronous tiling in '
+            'roles of its warps (`pir.roles`), meeting on the rings alone.  '
+            '`off`, the default: the element warps do everything, the '
+            'block\'s first thread filling the operator ring and issuing.  '
+            '`three`: the element warps stage their elements and compute A '
+            'into the folded star\'s ring (`star`); a warp behind them fills '
+            'the prepared operator ring by bulk copies (`operator`); a '
+            'warpgroup behind that issues the products and writes D '
+            '(`mma`), giving B\'s slots back as `matrix_ring_hold` says -- by '
+            'default behind each block\'s products.  Where the section folds '
+            'its star step into one asynchronous step that streams B '
+            'prepared (`matrix_star` `engine`, `matrix_ring` `prepared`) on '
+            'tcgen05 (sm_100a); elsewhere the plan says why not, and the '
+            'kernel\'s comment (`element_group.roles_refusal`, '
+            '`roles_notes`).  A demonstrator of the roles, not measured yet.')
 
 declare('matrix_ring_rows',
         default=16,

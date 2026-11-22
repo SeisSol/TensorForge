@@ -21,6 +21,7 @@ sections against NumPy.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import types
 import warnings
@@ -210,16 +211,49 @@ def test_the_producer_copies_what_no_bulk_copy_takes():
 
 
 @pytest.mark.parametrize('arch,elements,budgets', [
-    ('sm_90a', 16, (96, 40, 112)), ('sm_100a', 12, (128, 40, 152))])
+    ('sm_90a', 16, (96, 40, 104)), ('sm_100a', 12, (128, 40, 152))])
 def test_the_producers_registers_go_to_the_element_warps(arch, elements,
                                                           budgets):
     """`element_registers`: the producer a warpgroup, the element warps
     whole warpgroups; the kernel's entry fixed at the SM's registers over
     the block's threads, the producer keeping 40 and the element warps
-    taking the rest."""
+    taking the rest of the block's: on sm_90a 96 x 640 = 61440, of which
+    the producer's warpgroup keeps 5120 and the element warps' 512 threads
+    take 104 each (53248), where the SM's 65536 would have given them 112
+    -- 62464 in all, past what the block holds.  sm_100a's 128 x 512 is
+    the SM's whole."""
     group = _plan(arch, element_registers=40)
     assert group.elements == elements and group.producers == 4
     assert eg.register_budgets(group) == budgets
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+def test_the_moves_stay_in_the_blocks_registers(arch):
+    """Every move `element_registers` allows -- whole warpgroups of
+    element warps up to the block's 1024 threads, each count `setmaxnreg`
+    takes -- holds no more registers after it than the block holds at its
+    entry: the pool is the block's and zero-sum, and the element warps'
+    `inc` past it would wait forever.  Each count is one `setmaxnreg`
+    takes, the producer's below the entry and the element warps' above."""
+    from tensorforge.backend.pir.engines import REGISTER_BUDGETS
+    group = _plan(arch, element_registers=40)
+    moved = 0
+    for elements in range(4, 29, 4):
+        for keep in REGISTER_BUDGETS:
+            g = dataclasses.replace(
+                group, elements=elements,
+                section=dataclasses.replace(group.section, registers=keep))
+            budgets = eg.register_budgets(g)
+            if budgets is None:
+                continue
+            entry, mine, theirs = budgets
+            producers = 32 * g.producers
+            assert mine == keep and mine < entry < theirs, budgets
+            assert theirs in REGISTER_BUDGETS, budgets
+            assert (producers * mine + 32 * elements * theirs
+                    <= entry * 32 * g.warps), (elements, keep, budgets)
+            moved += 1
+    assert moved
 
 
 def test_registers_move_where_the_target_moves_them():
@@ -235,7 +269,7 @@ def test_the_kernel_moves_the_registers_once():
     src = _kernel('sm_90a', element_registers=40).get_kernel()
     assert '__maxnreg__(96)' in src and '__launch_bounds__' not in src
     dec = src.index('setmaxnreg.dec.sync.aligned.u32 40;')
-    inc = src.index('setmaxnreg.inc.sync.aligned.u32 112;')
+    inc = src.index('setmaxnreg.inc.sync.aligned.u32 104;')
     loop = src.index('for (size_t')
     assert dec < src.index('__syncthreads();', dec) < inc < loop
     assert src.count('setmaxnreg') == 2
