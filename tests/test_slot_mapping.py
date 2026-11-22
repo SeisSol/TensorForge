@@ -46,12 +46,40 @@ def _diagonal_star_description(order=4, precision='s'):
     return d
 
 
+def _copied_description(order=4, precision='s'):
+    """The volume, then its output copied, `P = Q` over the rows it adds
+    into: a chained section of one phase, whose copy reads an output that
+    accumulated from the column the lane holds -- what the output holds
+    after the phase, not the phase's sums alone."""
+    import copy
+    import json
+    d = json.loads(json.dumps(me._volume_description(order, precision)))
+    q = next(t for t in d['tensors'] if t['name'] == 'Q')
+    d['tensors'].append({**copy.deepcopy(q), 'name': 'P'})
+    last = d['operations'][-1]
+    box = [list(last['result']['bbox'][0]), list(last['result']['bbox'][1])]
+
+    def view(name):
+        return {'name': name, 'indices': ['a', 'b'], 'bbox': box,
+                'offset': [0, 0], 'offset_from': None, 'sliced': False}
+    d['operations'].append({
+        'type': 'multilinear', 'result': view('P'), 'args': [view('Q')],
+        'condition': [], 'permute': [[0, 1]], 'target': [[0, 1]],
+        'linear': {'alpha': last['linear']['alpha'], 'add': False}})
+    return d
+
+
+#: The descriptions made here, beside `test_multi_element`'s.
+DESCRIPTIONS = {'diagonal-star': _diagonal_star_description,
+                'copied': _copied_description}
+
+
 def _descrs(shape='volume', order=4, precision='s'):
-    if shape != 'diagonal-star':
+    if shape not in DESCRIPTIONS:
         return me._descrs(shape, order, precision)
     from tensorforge.frontend.yateto import DescriptionReader
     return DescriptionReader(None, {}).read(
-        _diagonal_star_description(order, precision))[0]
+        DESCRIPTIONS[shape](order, precision))[0]
 
 
 def _plan(shape='volume', order=4, precision='s', arch='sm_90', **options):
@@ -195,11 +223,15 @@ def test_a_stored_diagonal_keeps_the_own_term_and_zeroes_the_rest():
 def test_the_option_keeps_the_description_unreassociated():
     """`reassociate_products` would put the operator first and mix its
     intermediate after it, which the slot form does not take: the form
-    taken, as the lanes form, keeps the description as yateto wrote it."""
-    gen = me._generate(me._descrs('volume', 4, 's'), me._context(
+    taken, as the lanes form, keeps the description as yateto wrote it.
+    `localFlux`, whose face matrix has fewer rows than the element's
+    operand -- the volume's operators have more, and the rewrite leaves it
+    as it is anyway."""
+    gen = me._generate(me._descrs('localFlux', 4, 's'), me._context(
         'sm_90', 's', reassociate_products=True, **SLOTS))
     group = gen.built._element_group
-    assert group is not None and group.lanes.mapping is not None
+    assert group is not None and group.lanes is not None
+    assert group.lanes.mapping is not None
 
 
 def test_an_operator_section_takes_as_many_lanes_as_columns():
@@ -221,10 +253,9 @@ def test_the_slot_form_is_cudas(arch, backend):
 
 
 @pytest.mark.parametrize('shape,options,why', [
-    ('derivative', {}, 'no chained section yet'),
     ('volume', {'multi_element_values': 'table'}, 'reads no table'),
     ('chain', {}, 'an intermediate, is mixed'),
-], ids=['chained', 'table', 'mixed-intermediate'])
+], ids=['table', 'mixed-intermediate'])
 def test_what_the_slot_form_does_not_take_says_why(shape, options, why):
     context = me._context('sm_90', 's', **{**SLOTS, **options})
     section, _ = eg.classify(me._descrs(shape, 4, 's'))
@@ -239,9 +270,34 @@ def test_a_section_it_refuses_falls_back_to_the_warp_form():
     assert group is not None and group.lanes is None, why
 
 
-def test_the_derivative_is_refused_outright():
-    (group, why), _, _ = _plan('derivative', 4, 's')
-    assert group is None and 'no chained section yet' in why
+def test_the_derivative_takes_its_phases_in_each_warp():
+    """A chained section a phase after another in every warp: the copies
+    alone first, no plan of their own, then each order's mixing and
+    operator steps on the one lead -- L9, eight shuffles a row."""
+    (group, why), _, _ = _plan('derivative', 6, 'd')
+    assert group is not None, why
+    plans = group.lanes.phases
+    assert (group.elements, group.warps) == (12, 4) and plans[0] is None
+    assert len(plans) == 6 and all(
+        p.mapping == eg.split_mapping(9, 9, 32) and p.exchange.count == 8
+        for p in plans[1:])
+    assert [p.ranges for p in plans[1:]] == [
+        ((0, 35),), ((0, 20),), ((0, 10),), ((0, 4),), ((0, 1),)]
+
+
+def test_the_tuner_tries_the_slot_forms_register_caps():
+    """`min_blocks_per_sm` 1, 2 and 3 where the kernel takes the slot form
+    (255, 255 and 168 registers a thread of its block of four warps), and
+    no such knob where it does not."""
+    from tensorforge.generators import tuning
+    descrs = me._descrs('volume', 6, 's')
+    knobs = {k.name: k for k in tuning.space(
+        descrs, me._context('sm_90', 's', **SLOTS))}
+    assert list(knobs['min_blocks_per_sm'].values(
+        tuning.Candidate())) == [1, 2, 3]
+    assert 'min_blocks_per_sm' not in {k.name for k in tuning.space(
+        descrs, me._context('sm_90', 's', multi_element='force',
+                            multi_element_fma='lanes'))}
 
 
 def test_only_a_group_on_the_lanes_has_a_lane_map():
@@ -399,6 +455,62 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision):
         scale = np.abs(want[e]).max() or 1.0
         error = np.abs(got[e] - want[e]).max() / scale
         assert error <= tolerance, (e, error)
+
+
+CHAINED = [('derivative', 4, 's'), ('derivative', 4, 'd'),
+           ('derivative', 6, 's'), ('plConvertToNodal', 4, 's'),
+           ('copied', 4, 's'), ('copied', 4, 'd')]
+
+
+@pytest.mark.parametrize('shape,order,precision', CHAINED,
+                         ids=[f'{s}-o{o}{p}' for s, o, p in CHAINED])
+def test_a_chained_section_on_the_oracle(shape, order, precision):
+    """A chained section's phases on the host oracle over a group and seven
+    elements more: the derivative -- the time integral and every order's
+    derivative, each order's mixing reading back the order before -- a copy
+    added to a product's output after it, and an output that accumulated
+    copied from the column the lane holds; every output against NumPy."""
+    import numpy as np
+    descrs = _descrs(shape, order, precision)
+    gen = me._generate(descrs, me._context('sm_90', precision, **SLOTS))
+    group = gen.built._element_group
+    assert group.lanes is not None and group.lanes.mapping is not None
+    assert group.lanes.phases
+    count = group.elements + 7
+    tensors, inputs, scalars, after = me._on_the_oracle(gen, count)
+    want = me._reference_all(descrs)(inputs, scalars)
+    tolerance = 1e-12 if precision == 'd' else 1e-6
+    for alias in want:
+        got = after(tensors[alias])
+        for e in range(count):
+            scale = np.abs(want[alias][e]).max() or 1.0
+            error = np.abs(got[e] - want[alias][e]).max() / scale
+            assert error <= tolerance, (alias, e, error)
+
+
+@pytest.mark.parametrize('order,precision', [
+    (4, 's'), (6, 's'), (4, 'd'), (6, 'd')])
+def test_the_slot_forms_derivative_computes_on_the_gpu(
+        order, precision, target, cache_root, tensorforge_include):
+    """The derivative in the slot form built and run on the local GPU
+    against NumPy, over a batch whose last group is partial and which gives
+    a block of the persistent grid several trips: the time integral, which
+    sums every order, and the last order's derivative, the chain's end."""
+    from harness.runner import run_case
+    if (target.backend, target.vendor) not in eg.SLOT_TARGETS:
+        pytest.skip(f'the slot form is not written for {target.backend} on '
+                    f'{target.vendor}')
+    group = eg.plan(me._descrs('derivative', order, precision),
+                    me._context(target.arch, precision,
+                                backend=target.backend, **SLOTS))
+    assert group is not None and group.lanes.phases
+    for output in ('I', f'dQ({order - 1})'):
+        result = run_case(
+            me._derivative_case(order, precision, output, SLOTS,
+                                name='multi_element_slots'),
+            target, cache_root, tensorforge_include)
+        assert result.passed, (output, result.max_abs_err,
+                               result.max_rel_err, result.detail)
 
 
 SLOT_CASES = [

@@ -3289,25 +3289,60 @@ def slots_plan(section: GroupSection,
     that` elements a warp (`split_mapping`) -- SeisSol's L9, 27 of 32 lanes
     -- and `SLOT_WARPS` warps a block, each its own elements.
 
-    It takes what the lanes form takes but a chained section (not yet):
-    one output; mixing products of the element's own operands, whose
-    columns are the output's; operators that carry their numbers, as
-    literals or read from memory (`lane_values`; not the `table`, read a
-    warp's width at a time as a lane's element)."""
+    It takes what the lanes form takes: one output, or a chained section
+    a phase at a time (`_chained_slots`); mixing products of the element's
+    own operands, whose columns are the output's; operators that carry
+    their numbers, as literals or read from memory (`lane_values`; not the
+    `table`, read a warp's width at a time as a lane's element)."""
     target = context.target
     vendor = getattr(target.hw, 'vendor', None)
     if (target.backend, vendor) not in SLOT_TARGETS:
         return None, (f'the slot form is written for CUDA on NVIDIA, whose '
                       f'shuffle takes a source lane a lane, not '
                       f'{target.backend} on {vendor}')
-    if section.chained:
-        return None, 'the slot form takes no chained section yet'
-    if len(section.outputs) != 1:
-        return None, (f'the slot form writes one output, not '
-                      f'{len(section.outputs)}')
     if lane_values(context) == 'table':
         return None, ('the slot form reads no table of numbers a warp\'s '
                       'width at a time (`multi_element_values`)')
+    if section.chained:
+        return _chained_slots(section, context)
+    return _slots_plan(section, context)
+
+
+def _chained_slots(section: GroupSection,
+                   context) -> Tuple[Optional[Lanes], str]:
+    """The slot form's plan of a chained section: every phase's own
+    (`_slots_plan`), the phases one after another in each warp -- a lane
+    reads back the column of the order before as it wrote it, and the
+    other columns from the lanes that wrote them, by the phase's shuffles
+    -- the copies alone of a phase each lane its columns of.  One lead for
+    every phase: their outputs' columns are one quantity axis."""
+    plans: List[Optional[Lanes]] = []
+    for phase in section.phases():
+        if not phase.main:
+            plans.append(None)
+            continue
+        plan, why = _slots_plan(section.phase_section(phase), context)
+        if plan is None:
+            return None, (f'the phase into {phase.main[-1].dest.alias}: '
+                          f'{why}')
+        plans.append(plan)
+    taken = [p for p in plans if p is not None]
+    if not taken:
+        return None, 'a chained section of copies alone'
+    if len({p.mapping for p in taken}) > 1:
+        return None, ('phases of other columns, which no one lead lays '
+                      'out')
+    first = taken[0]
+    return Lanes(1, first.ranges, max(p.registers for p in taken), 1,
+                 tuple(plans), first.mapping, first.exchange, SLOT_WARPS), ''
+
+
+def _slots_plan(section: GroupSection,
+                context) -> Tuple[Optional[Lanes], str]:
+    """The slot form's plan of a section of one output (`slots_plan`)."""
+    if len(section.outputs) != 1:
+        return None, (f'the slot form writes one output, not '
+                      f'{len(section.outputs)}')
     cones = Cones(section)
     first, last = cones.cols
     quantities = last - first

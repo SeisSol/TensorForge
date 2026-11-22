@@ -4043,19 +4043,59 @@ def _slot_column(trip) -> None:
                           else b.op('add', fp, old, part, hint='q'))
     trip.tiles = {}
     _write(trip, tensor, rows, values)
+    # What a scaled copy of the output then reads where the pass holds it
+    # (`_scaled`): the column as written.
+    trip.acc = values
 
 
 def _slots(trip) -> None:
     """A trip of the slot form: each lane its element's column of the
     output at the plan's one range of rows (`element_group.slots_plan`),
     the warps of the block each its own elements -- no loop over columns,
-    no guard of a share."""
+    no guard of a share -- and in a chained section's phase the scaled
+    copies after it (`_slot_chained`)."""
     plan = trip.group.lanes
     trip.rows = plan.ranges[0]
     trip.need = trip.cones.need(range(*trip.rows))
     trip.cols, trip.slot = [trip.column], 0
     trip.small = {}
-    _slot_column(trip)
+    if trip.computes:
+        _slot_column(trip)
+    for step in trip.fused:
+        _scaled(trip, step)
+
+
+def _slot_chained(builder, context, group, symbols) -> list:
+    """A trip of a chained section in the slot form
+    (`element_group.Lanes.phases`): its phases one after another in each
+    warp, a lane its column of each -- reading back its column of the order
+    before as it wrote it, and the other columns by the phase's shuffles of
+    theirs -- the scaled copies of a phase's output from the column the
+    lane holds, and a phase of copies alone each lane its columns of them.
+    The phases' trips, for their tables."""
+    from tensorforge.generators import element_group
+    section = group.section
+    trips = []
+    for phase, plan in zip(section.phases(), group.lanes.phases):
+        if phase.main:
+            sub = dataclasses.replace(
+                group, section=section.phase_section(phase), lanes=plan)
+        else:
+            outputs = []
+            for step in phase.scales:
+                if not any(o is step.dest for o in outputs):
+                    outputs.append(step.dest)
+            copies = dataclasses.replace(section, steps=phase.scales,
+                                         outputs=tuple(outputs))
+            rows = element_group.Cones(copies).rows
+            sub = dataclasses.replace(group, section=copies, lanes=(
+                dataclasses.replace(group.lanes, ranges=(rows,),
+                                    phases=())))
+        trip = _SlotTrip(builder, context, sub, symbols)
+        trip.fused = tuple(phase.scales)
+        _slots(trip)
+        trips.append(trip)
+    return trips
 
 
 #: Each step's lowering (`element_group.Step.lowering`).
@@ -4150,9 +4190,13 @@ class MultiElementSection(AbstractInstruction):
             # (`_lanes`) -- a chained section's phases one after another
             # (`_chained`); its slot form a lane a column (`_slots`).
             if self._group.lanes.mapping is not None:
-                trips = [_SlotTrip(builder, self._context, self._group,
-                                   self._symbols)]
-                _slots(trips[0])
+                if self._group.lanes.phases:
+                    trips = _slot_chained(builder, self._context,
+                                          self._group, self._symbols)
+                else:
+                    trips = [_SlotTrip(builder, self._context, self._group,
+                                       self._symbols)]
+                    _slots(trips[0])
             elif self._group.lanes.phases:
                 trips = _chained(builder, self._context, self._group,
                                  self._symbols)

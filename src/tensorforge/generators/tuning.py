@@ -279,7 +279,28 @@ def space(descrs, context: Context) -> List[Knob]:
     if any(widths(Candidate(lanes=g)) for g in geometries):
         knobs.append(Knob('matrix_columns',
                           lambda c: (0,) + widths(c) if widths(c) else ()))
+    if _slot_form(descrs, context):
+        knobs.append(Knob('min_blocks_per_sm', lambda c: SLOT_MIN_BLOCKS))
     return knobs
+
+
+#: The register caps the slot form's kernel is tried at
+#: (`Options.min_blocks_per_sm`, the second argument of its
+#: `__launch_bounds__`): its block of four warps held to what one, two or
+#: three blocks an SM leave a thread -- 255, 255 and 168 registers.  The
+#: lanes prototype's L9 ran the o6 volume 11-12 % faster in F32 on GH200
+#: capped at 168 (12 warps an SM against 8), where at o4 the cap does not
+#: bind and at o6 in F64 it would spill.
+SLOT_MIN_BLOCKS = (1, 2, 3)
+
+
+def _slot_form(descrs, context: Context) -> bool:
+    """Whether the list takes the multi-element layout's slot form
+    (`element_group.slots_plan`): only there is the cap the tuner's."""
+    from tensorforge.generators import element_group
+    group = element_group.plan(_flat(descrs), context)
+    return (group is not None and group.lanes is not None
+            and group.lanes.mapping is not None)
 
 
 def _stackable(descrs) -> bool:
