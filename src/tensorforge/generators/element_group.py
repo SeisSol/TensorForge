@@ -1745,13 +1745,19 @@ def register_budgets(group: 'ElementGroup') -> Optional[Tuple[int, int,
     moves them (`GroupSection.registers`): the producer's warpgroup gives
     what it does not keep to the element warps' (`setmaxnreg`, a multiple
     of eight from 24 to 256).  None where nothing moves, or where the
-    element warps would gain nothing."""
+    element warps would gain nothing.
+
+    What the moves draw on is the block's own allocation, `entry`
+    registers a thread of it, and not the SM's: the pool `setmaxnreg`
+    moves registers within is the block's and zero-sum, and an `inc` past
+    it waits forever.  So the element warps share what the block holds at
+    its entry less what the producer keeps."""
     keep = group.section.registers
     if not keep or not group.section.ring:
         return None
     threads = 32 * group.warps
     entry = min(255, SM_REGISTERS // threads // 8 * 8)
-    gained = (SM_REGISTERS - 32 * group.producers * keep) // (
+    gained = (entry * threads - 32 * group.producers * keep) // (
         32 * group.elements) // 8 * 8
     elements = min(256, gained)
     if keep >= entry or elements <= entry or entry < 24:
