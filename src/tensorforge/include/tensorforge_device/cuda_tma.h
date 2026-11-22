@@ -218,18 +218,6 @@ tmaReduceAdd(const CUtensorMap *map, const void *src, int c0, int c1, int c2) {
 #endif
 }
 
-/// At most `Pending` of this thread's bulk groups still reading their
-/// sources (PTX ISA, "cp.async.bulk.wait_group": `.read`): the boxes of the
-/// others may be written again.  A thread that issued none waits for
-/// nothing.
-template <int Pending> __device__ __forceinline__ void bulkWaitRead() {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(Pending) : "memory");
-#elif defined(__CUDA_ARCH__)
-  __trap();
-#endif
-}
-
 /// The driver's `cuTensorMapEncodeTiled`, as the runtime hands it out.
 using TensorMapEncoder = CUresult (*)(CUtensorMap *, CUtensorMapDataType,
                                       cuuint32_t, void *, const cuuint64_t *,

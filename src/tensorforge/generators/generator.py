@@ -4547,7 +4547,8 @@ class Generator:
           double=planned.doubled > 0, ring=planned.ring,
           registers=planned.registers,
           halves=element_group.halves(planned),
-          prepared=element_group.prepared(planned), star=planned.star)
+          prepared=element_group.prepared(planned), star=planned.star,
+          output=element_group.output_of(planned))
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
@@ -5213,6 +5214,9 @@ class Generator:
       for note in element_group.star_notes(self._element_group.section,
                                            self._context):
         writer(f'// star step: {note}')
+      for note in element_group.output_notes(self._element_group.section,
+                                             self._context):
+        writer(f'// output: {note}')
     groups = self._launch_groups()
     if len(groups) > 1:
       writer(f'// launches: {len(groups)}, cut at the grid barriers, one after '

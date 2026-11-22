@@ -2593,6 +2593,49 @@ class IRBuilder:
         self._token_engine[tok.id] = 'tma_reduce'
         return tok
 
+    def reduce_bulk(self, dst: Any, src: Value, *, elems: int,
+                    issue: Value, dst_index: Sequence[Operand] = (),
+                    src_index: Sequence[Operand] = (),
+                    hint: str = 'br') -> Value:
+        """Add `elems` elements of the shared buffer `src`, from `src_index`
+        on, into the global buffer `dst` from `dst_index` on, by the bulk
+        copy engine's reduction (`bulk_reduce`); returns its token.  No tensor
+        map: a run of contiguous elements, both starts on sixteen bytes and
+        the run a multiple of sixteen bytes long -- the caller's to keep, the
+        bytes checked here.  As `reduce_tma`'s: what the threads wrote to
+        `src` they fence for the async proxy ahead of the barrier that shows
+        it to the thread `issue` picks, which issues the reduction and closes
+        it into a bulk group of its own; its wait (`wait`) is that thread's
+        wait on its bulk groups, behind which `src` may be written again."""
+        elem = getattr(getattr(src, 'type', None), 'elem', None)
+        elem = getattr(elem, 'base', elem)
+        if elem not in engines.BULK_REDUCE_TYPES:
+            raise IRError(f'a bulk reduction of {elem}: it adds '
+                          f'{", ".join(map(str, engines.BULK_REDUCE_TYPES))}')
+        if (int(elems) * elem.size()) % 16:
+            raise IRError(f'a bulk reduction of {elems} x {elem}, not a '
+                          f'multiple of sixteen bytes')
+        accesses = (Access(Effect.READ, self._space_of(src),
+                           self.alias_root(src)),
+                    Access(Effect.WRITE, self._space_of(dst),
+                           self.alias_root(dst)))
+        tok = self.value(TokenType(engines.completes_of('bulk_reduce')),
+                         hint=hint)
+        attrs = (('ndst', len(tuple(dst_index))), ('elems', int(elems)),
+                 ('engine', 'bulk_reduce'),
+                 ('completes', engines.completes_of('bulk_reduce')),
+                 ('width', int(elems) * elem.size()), ('shape', (int(elems),)),
+                 ('reduce', 'add'))
+        self._emit_op(Op.COPY_ASYNC, (tok,),
+                      (dst, src) + tuple(dst_index) + tuple(src_index),
+                      pure=False, movable=True, predicate=issue,
+                      effect=Effect.READ | Effect.WRITE | Effect.ASYNC,
+                      accesses=accesses, attrs=attrs)
+        self._token_accesses[tok.id] = accesses
+        self._token_results[tok.id] = ()
+        self._token_engine[tok.id] = 'bulk_reduce'
+        return tok
+
     def load_async(self, base: Any, *indices: Operand, type_=None,
                    hint: str = 'ld', space: Optional[MemSpace] = None,
                    predicate: Optional[Value] = None,

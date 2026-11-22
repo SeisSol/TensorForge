@@ -247,6 +247,18 @@ def parse_matrix_star(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_output` takes.
+MATRIX_OUTPUT = ('red', 'bulk', 'box')
+
+
+def parse_matrix_output(text: str) -> str:
+  """`red`, `bulk` or `box` (`Options.matrix_output`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_OUTPUT:
+    raise ValueError(f'expected one of {MATRIX_OUTPUT}, got {text!r}')
+  return value
+
+
 def parse_matrix_ring_rows(text: str) -> int:
   """A positive multiple of 8 (`Options.matrix_ring_rows`)."""
   value = int(str(text).strip())
@@ -2701,6 +2713,30 @@ declare('matrix_star',
             'descriptors read -- through a ring of slots, so that A is never '
             'in shared memory as values (`element_group.fuse_refusal` says '
             'where a section cannot, and it takes `halves` there).')
+
+declare('matrix_output',
+        default='red',
+        env='TF_MATRIX_OUTPUT',
+        parse=parse_matrix_output,
+        doc='How a matrix step of the multi-element layout adds its D into '
+            'the element\'s output (`generators.element_group`).  `red`, the '
+            'default: a reduction a cell (`red.global.add`) through the '
+            'pointer of the row\'s element, from the accumulators -- or, on '
+            'tcgen05, from a stage of D in shared memory.  `bulk`: D staged in '
+            'shared memory a column of the element\'s output at a time, the '
+            'rows the step writes rounded out to sixteen bytes, and each '
+            'column added into the output by a bulk reduction '
+            '(`cp.reduce.async.bulk .add`, F32 and F64) that the element\'s '
+            'warp issues, a lane a column, through its own pointer -- the '
+            'output never read by the SM, one reduction a column instead of '
+            'one a cell.  `box`: the same over the output\'s whole box, one '
+            'reduction an element.  Either adds exactly +0.0 to what the '
+            'step\'s windows leave out within its span -- a -0.0 there '
+            'becomes +0.0 -- and is refused, with its reason, where two steps '
+            'add into one output (their reductions would land in an order of '
+            'their own), where the step assigns, and where the output\'s '
+            'columns are not on sixteen bytes (`element_group.'
+            'output_refusal`).')
 
 declare('matrix_ring_rows',
         default=16,

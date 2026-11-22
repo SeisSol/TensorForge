@@ -475,6 +475,16 @@ TRANSFER_ENGINES: Dict[str, TransferEngine] = {e.name: e for e in (
                    'a barrier behind the wait shows that to the other '
                    'threads; sm_90 and newer',
                    waited_on='bulk_group', one_to_one=True),
+    TransferEngine('bulk_reduce', (Op.COPY_ASYNC,), Completion.COUNTER,
+                   'the bulk copy engine\'s reduction of a run of shared '
+                   'memory into global memory (`cp.reduce.async.bulk`, '
+                   '`.add`, F32 and F64): no tensor map, the destination an '
+                   'address and the length bytes -- both addresses on '
+                   'sixteen bytes and the length a multiple of sixteen -- by '
+                   'one thread, each closed into a bulk group of that '
+                   'thread\'s own and waited for as `tma_reduce`\'s are; '
+                   'sm_90 and newer',
+                   waited_on='bulk_group', one_to_one=True),
     TransferEngine('tdm', (Op.COPY_ASYNC,), Completion.COUNTER,
                    "gfx1250's tensor data mover (`tensor_load_to_lds`): a "
                    'tile of `shape` rows a `pitch` apart into the LDS, row '
@@ -521,6 +531,16 @@ def counter_of(engine: str) -> str:
     (`Stmt.counter`): derived from how the engine completes, which is the
     one fact a wait has to know about it."""
     return _COUNTER_OF[TRANSFER_ENGINES[engine].completes]
+
+
+#: The engines that add shared memory into global memory, a thread's bulk
+#: groups counting them (`tma_reduce`, `bulk_reduce`).
+REDUCE_ENGINES = ('tma_reduce', 'bulk_reduce')
+
+#: The element types the bulk reduction adds (`bulk_reduce`; PTX ISA,
+#: "cp.reduce.async.bulk": `.add` takes `.f32` and `.f64`, besides the
+#: integers and the halves this does not issue).
+BULK_REDUCE_TYPES = (Datatype.F32, Datatype.F64)
 
 
 def completes_of(engine: str) -> Completion:

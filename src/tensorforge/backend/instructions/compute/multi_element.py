@@ -763,6 +763,9 @@ class _Trip:
         #: The shared memory of wgmma's folded star step's ring of A, by the
         #: step's `id` (`_wgmma_star`).
         self.stars: Dict[int, object] = {}
+        #: The staged columns of a step's output for its bulk reductions,
+        #: by the step's `id` (`_output_box`).
+        self.boxes: Dict[int, object] = {}
         #: Whom the lowerings' barriers meet: the block, or the element
         #: warps' role where a producer fills the inputs (`_ring`).
         self.meet = Participants.BLOCK
@@ -1450,6 +1453,14 @@ def _matrix(trip, step) -> None:
             if M % m_:
                 live = b.op('and', BOOL, live,
                             b.op('lt', BOOL, m, M, hint='in'), hint='in')
+            if box is not None:
+                # Into the staged columns of the output its bulk reductions
+                # add (`_bulk_output`): the element's mask is theirs.
+                _output_put(trip, step, box, b.op(
+                    'select', INDEX, live, m, 0, hint='m'), b.op(
+                    'select', INDEX, live, n, 0, hint='n'), accs[slot],
+                    live)
+                continue
             if target is None:
                 # The row's element's pointer and its column; a row past
                 # the group reads the first entry and writes nothing.
@@ -1475,6 +1486,10 @@ def _matrix(trip, step) -> None:
                 value = b.op('add', fp, b.load(target, at, type_=fp,
                                                hint='q'), value, hint='q')
             b.store(target, value, at, predicate=live)
+
+    # The staged columns of the output where the step adds D by bulk
+    # reductions (`_bulk_output`), ahead of the walk that fills them.
+    box = _output_box(trip, step) if step.output else None
 
     # A warp's units in turn; a unit's M tiles `together` at a time, D of
     # them and of its slots' N tiles in registers; a product's entries, A
@@ -1561,6 +1576,8 @@ def _matrix(trip, step) -> None:
                         epilogue(accs[(q, s)],
                                  b.op('mul', INDEX, mq, m_, hint='m'),
                                  b.op('mul', INDEX, nts[s], n_, hint='n'))
+    if box is not None:
+        _bulk_output(trip, step, box)
 
 
 def _group_index(b, m, width, buffer, col_lo, row):
@@ -2084,6 +2101,9 @@ def _wgmma(trip, step) -> None:
     layouts = (nvidia.wgmma_a_fragment_bits(), None,
                nvidia.wgmma_d_fragment_bits(n))
     write = _d_writer(trip, step)
+    # The staged columns of the output where the step adds D by bulk
+    # reductions (`_bulk_output`), ahead of the tiles that fill it.
+    box = _output_box(trip, step) if step.output else None
     with b.for_(0, passes, 1, hint='t', uniform=Uniformity.BLOCK) as loop:
         tile = b.op('add', INDEX, wg, b.op('mul', INDEX, loop.induction,
                                            groups, hint='t'), hint='t')
@@ -2160,7 +2180,18 @@ def _wgmma(trip, step) -> None:
             col = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2,
                                           hint='n'), 8 * (i // 4) + i % 2,
                        hint='n')
+            if box is not None:
+                live = b.op('lt', BOOL, col, height, hint='in')
+                if padded:
+                    live = b.op('and', BOOL, live, b.op(
+                        'lt', BOOL, m, M, hint='in'), hint='in')
+                _output_put(trip, step, box, b.op(
+                    'select', INDEX, live, m, 0, hint='m'), col, accs[i],
+                    live)
+                continue
             write(m, col, accs[i], ('w', r), padded)
+    if box is not None:
+        _bulk_output(trip, step, box)
 
 
 def _wgmma_ring(trip, step, ring, pass_, accs, lm, lcol, layouts,
@@ -2851,9 +2882,15 @@ def _tcgen05_resident(trip, step, cursor, issue, n, M) -> None:
 
 def _tcgen05_epilogue(trip, step, holds, row, live) -> None:
     """`_tcgen05`'s D, the products done: from tensor memory into the
-    trip's stage of it, then to the destination by every element warp."""
+    trip's stage of it, then to the destination by every element warp --
+    or, where the step adds it by bulk reductions (`element_group.Step.
+    output`), into the staged columns of the output those take
+    (`_bulk_output`)."""
     from tensorforge.backend.pir.engines import FenceKind
     b = trip.builder
+    if step.output:
+        _tcgen05_output(trip, step, holds, row, live)
+        return
     fp = trip.fp
     tmem = trip.tmem
     height = step.rows[1] - step.rows[0]
@@ -2896,6 +2933,128 @@ def _tcgen05_epilogue(trip, step, holds, row, live) -> None:
             'mul', INDEX, row, stride, hint='d'), col, 'd'), type_=fp,
             hint='d')
         write(row, col, value, 'cell', False)
+
+
+def _tcgen05_output(trip, step, holds, row, live) -> None:
+    """`_tcgen05_epilogue` where the step adds D by bulk reductions
+    (`element_group.Step.output`): each lane-holding thread its row of D --
+    a column of an element's output -- from tensor memory into the staged
+    columns, sixteen bytes a store over the whole span the reductions add,
+    zeros outside the step's windows.  A warp's stores reach eight rows of
+    the group a phase, an odd number of sixteen bytes apart under `bulk`
+    (`element_group.output_geometry`): on distinct banks."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import output_geometry
+    b = trip.builder
+    box = _output_box(trip, step)
+    lo, hi, stride = output_geometry(trip.section, step)
+    shift = step.rows[0] - int(step.dest.bbox.lower()[0]) - lo
+    height = step.rows[1] - step.rows[0]
+    unit = 16 // trip.section.dtype.size()
+    vector = ScalarType(trip.section.dtype, unit)
+    with b.if_(holds):
+        staged = {}
+        c0, end = 0, _round_up(height, 8)
+        while c0 < end:
+            count = 1 << (min(TMEM_CHUNK, end - c0).bit_length() - 1)
+            for j, value in enumerate(b.tmem_ld(trip.tmem, c0, count)):
+                if c0 + j < height:
+                    staged[shift + c0 + j] = value
+            c0 += count
+        zero = b.const(0.0, trip.fp)
+        base = b.op('mul', INDEX, row, stride, hint='d')
+        for r in range(0, hi - lo, unit):
+            b.store(box, b.pack(vector, *(staged.get(r + i, zero)
+                                          for i in range(unit)), hint='y'),
+                    _index(b, 'add', base, r, 'd'), predicate=live,
+                    align=16)
+    # The block's next use of the tensor memory is behind the barrier
+    # between the engine's fences that `_bulk_output` meets on.
+    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
+    _bulk_output(trip, step, box, zeroed=True)
+
+
+def _output_box(trip, step):
+    """The trip's staged columns of a step's output for its bulk
+    reductions (`element_group.Step.output`): for each row of the group --
+    a column of an element's output -- the rows the reductions add, `stride`
+    apart (`element_group.output_geometry`); one a step.  On the sixteen
+    bytes every shared buffer starts on (`pir.allocate.SHARED_ALIGN_BYTES`),
+    which the reductions need and the plan counts (`shared_bytes`)."""
+    from tensorforge.generators.element_group import output_geometry
+    boxes = trip.boxes
+    found = boxes.get(id(step))
+    if found is None:
+        _, _, stride = output_geometry(trip.section, step)
+        rows = trip.group.elements * (step.cols[1] - step.cols[0])
+        found = boxes[id(step)] = trip.builder.alloc(
+            trip.fp.base, (rows * stride,), MemSpace.SHARED,
+            arena=GeneralLexicon.TOTAL_SHR_MEM, hint='dbox')
+    return found
+
+
+def _output_put(trip, step, box, m, n, value, live) -> None:
+    """D's cell `(m, n)` -- row `m` of the group, the step's row `n` --
+    into the staged columns of the output (`_output_box`): row `m`'s
+    column, the step's first row `rows[0]` where the column holds it."""
+    from tensorforge.generators.element_group import output_geometry
+    b = trip.builder
+    lo, _, stride = output_geometry(trip.section, step)
+    shift = step.rows[0] - int(step.dest.bbox.lower()[0]) - lo
+    at = _index(b, 'add', b.op('mul', INDEX, m, stride, hint='d'),
+                _index(b, 'add', n, shift, 'd'), 'd')
+    b.store(box, value, at, predicate=live)
+
+
+def _bulk_output(trip, step, box, zeroed: bool = False) -> None:
+    """A step's D added into its output by bulk reductions
+    (`element_group.Step.output`), D's cells already in the staged columns
+    (`_output_put`): each element warp zeroes the rows of its element's
+    columns the step's windows leave out -- they add exactly +0.0; where
+    the columns were written whole, those zeros among them, `zeroed`
+    (`_tcgen05_output`), it does not -- and fences its stores for the
+    async proxy; the element warps meet; then
+    each warp adds its own element's columns through its own pointer --
+    `bulk` a lane a column, `box` its first lane the element's whole box --
+    nothing where the element is masked, and waits for the reductions to
+    have read the staged columns, which the next trip writes again.  One
+    reduction a column (or an element) a launch: the only step that adds
+    into the output (`element_group.output_refusal`)."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import output_geometry
+    b, fp = trip.builder, trip.fp
+    tensor = step.dest
+    width = step.cols[1] - step.cols[0]
+    lo, hi, stride = output_geometry(trip.section, step)
+    first = int(tensor.bbox.lower()[0])
+    begin, end = step.rows[0] - first - lo, step.rows[1] - first - lo
+    zero = b.const(0.0, fp)
+    lane, mine = trip.lane, b.op('lt', BOOL, trip.lane, width, hint='col')
+    column = b.op('add', INDEX, b.op('mul', INDEX, trip.slot, width,
+                                     hint='c'), lane, hint='c')
+    if not zeroed:
+        with b.if_(mine):
+            base = b.op('mul', INDEX, column, stride, hint='c')
+            for r in list(range(0, begin)) + list(range(end, hi - lo)):
+                b.store(box, zero, _index(b, 'add', base, r, 'z'))
+    b.fence(FenceKind.PROXY)
+    b.barrier(trip.meet)
+    pointer = _bound(b, trip.symbols[id(tensor)])
+    if step.output == 'box':
+        issue = b.op('eq', BOOL, lane, 0, hint='first')
+        elems, src = width * stride, b.op('mul', INDEX, trip.slot,
+                                           width * stride, hint='c')
+        dst = _address(b, tensor, first, step.cols[0])
+    else:
+        issue, elems = mine, hi - lo
+        src = b.op('mul', INDEX, column, stride, hint='c')
+        dst = _address(b, tensor, first + lo, _index(
+            b, 'add', lane, step.cols[0], 'j'))
+    if trip.mask is not None:
+        issue = b.op('and', BOOL, issue, trip.mask, hint='issue')
+    token = b.reduce_bulk(pointer, box, elems=elems, issue=issue,
+                          dst_index=(dst,), src_index=(src,))
+    b.wait(token)
 
 
 def d_stage_stride(height: int) -> int:

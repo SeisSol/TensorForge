@@ -727,13 +727,15 @@ def test_every_transfer_engine_completes_one_way_and_is_counted_by_it():
     completes: commit groups, a counter, a barrier."""
     assert set(engines.TRANSFER_ENGINES) == {
         'scalar', 'vector', 'cp_async', 'lds_dma', 'bulk', 'load', 'buffer', 'async_lds',
-        'tdm', 'tma', 'tma_reduce', 'ldmatrix', 'stmatrix', 'block', 'block2d'}
+        'tdm', 'tma', 'tma_reduce', 'bulk_reduce', 'ldmatrix', 'stmatrix', 'block',
+        'block2d'}
     assert engines.counter_of('cp_async') == 'copy'
     assert engines.counter_of('lds_dma') == 'load'
     assert engines.counter_of('load') == 'load'
     assert engines.counter_of('bulk') == 'bulk'
     assert engines.counter_of('tma') == 'bulk'
     assert engines.counter_of('tma_reduce') == 'load'
+    assert engines.counter_of('bulk_reduce') == 'load'
     for name, engine in engines.TRANSFER_ENGINES.items():
         assert all(op in Op.KNOWN for op in engine.ops), name
 

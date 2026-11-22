@@ -4035,7 +4035,7 @@ GROUPS = {
          sub(TENSORS, '                out.append(made)\n', '', 1)),
         ('the waits dropped where the copies a lane are loads',
          sub(EMIT, '        if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None\n'
-                   "                and s.attr('engine') not in ('tdm', 'tma_reduce')\n"
+                   "                and s.attr('engine') not in ('tdm',) + engines.REDUCE_ENGINES\n"
                    '                and retires(s)):\n',
              '        if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None\n'
              '                and retires(s)):\n', 1)),
@@ -4390,8 +4390,8 @@ GROUPS = {
          sub(BUILD, '            if not placed or placed % align:\n',
              '            if False:\n', 1)),
         ('the wait of a body without copies dropped',
-         sub(EMIT, "                and s.attr('engine') not in ('tdm', 'tma_reduce')\n                and retires(s)):\n",
-             "                and s.attr('engine') not in ('tdm', 'tma_reduce')):\n", 1)),
+         sub(EMIT, "                and s.attr('engine') not in ('tdm',) + engines.REDUCE_ENGINES\n                and retires(s)):\n",
+             "                and s.attr('engine') not in ('tdm',) + engines.REDUCE_ENGINES):\n", 1)),
         ('plain sm_90 taken for sm_90a',
          sub(TARGET, "        return (self.backend == 'cuda' and self.arch_specific()\n",
              "        return (self.backend == 'cuda'\n", 1)),
@@ -4429,7 +4429,8 @@ GROUPS = {
              '', 1)),
         ('the wait helper leaving one group more in flight',
          sub(Path('src/tensorforge/include/tensorforge_device/cuda.h'),
-             '"n"(Pending) : "memory");\n', '"n"(Pending + 1) : "memory");\n', 1)),
+             'wgmma.wait_group.sync.aligned %0;" ::"n"(Pending) : "memory");\n',
+             'wgmma.wait_group.sync.aligned %0;" ::"n"(Pending + 1) : "memory");\n', 1)),
     ]),
     # tcgen05 on the matrix op (engines phase 3b, part 2): the product of the
     # 5th generation tensor core on sm_100a, D in tensor memory -- the
@@ -4656,13 +4657,13 @@ GROUPS = {
          sub(BUILD, '                          pure=False, movable=True, predicate=issue,\n',
              '                          pure=False, movable=True, predicate=None,\n', 1)),
         ('the wait for a reduction dropped with the copies',
-         sub(EMIT, "                and s.attr('engine') not in ('tdm', 'tma_reduce')\n",
-             "                and s.attr('engine') != 'tdm'\n", 1)),
+         sub(EMIT, "                and s.attr('engine') not in ('tdm',) + engines.REDUCE_ENGINES\n",
+             "                and s.attr('engine') not in ('tdm', 'bulk_reduce')\n", 1)),
         ("the reduction's coordinates outermost first",
          sub(EMIT, '                               for c in reversed(s.copy_dst_index))\n',
              '                               for c in s.copy_dst_index)\n', 1)),
         ('a reduction deciding the copies of cp.async',
-         sub(EMIT, "        copies = [c for c in copies if c.counter != 'bulk'\n                  and c.attr('engine') != 'tma_reduce']\n",
+         sub(EMIT, "        copies = [c for c in copies if c.counter != 'bulk'\n                  and c.attr('engine') not in engines.REDUCE_ENGINES]\n",
              "        copies = [c for c in copies if c.counter != 'bulk']\n", 1)),
         ('a drain leaving the reductions reading',
          sub(EMIT, "            if cls == 'all' and self._reductions:\n",
@@ -4671,8 +4672,10 @@ GROUPS = {
          sub(ORACLE, '                dst[at] = dst[at] + value\n',
              '                dst[at] = value\n', 1)),
         ('the interpreter letting the box go at the issue',
-         sub(ORACLE, '            tracker.reduce_issue(tracker.lane, slots)\n',
-             '            pass\n', 1)),
+         sub(ORACLE, '                dst[at] = dst[at] + value\n        tracker = self.mem.tracker\n'
+                     '        if tracker is not None:\n            tracker.reduce_issue(tracker.lane, slots)\n',
+             '                dst[at] = dst[at] + value\n        tracker = self.mem.tracker\n'
+             '        if tracker is not None:\n            pass\n', 1)),
         ('the interpreter taking a write over a box read',
          sub(ORACLE, '        if slot in self._reduce_flight:\n',
              '        if False:\n', 1)),
@@ -4821,7 +4824,7 @@ GROUPS = {
          sub(Path('src/tensorforge/generators/element_group.py'), '                       if s.terms is not None)\n                 + ring_volume(section))\n',
              '                       if s.terms is not None))\n', 1)),
         ('B whole tried before its stream',
-         sub(Path('src/tensorforge/generators/element_group.py'), '            tilings.append(lower(section, context, split=True,\n                                 streamed=True, prepared=asked, star=star))\n',
+         sub(Path('src/tensorforge/generators/element_group.py'), '            tilings.append(lower(section, context, split=True,\n                                 streamed=True, prepared=asked, star=star,\n                                 output=output))\n',
              '', 1)),
         ('a streamed stage staged whole besides',
          sub(Path('src/tensorforge/generators/element_group.py'), '        if self.streamed:\n            return 0\n',
@@ -6210,7 +6213,8 @@ GROUPS = {
              "    if False:\n        return ('B is read whole", 1)),
         ('no unfolded tiling behind the fold',
          sub(ME_GROUP, '            tilings += [lower(section, context, split=True,\n'
-                       '                              streamed=streamed(t), prepared=asked)\n'
+                       '                              streamed=streamed(t), prepared=asked,\n'
+                       '                              output=output)\n'
                        '                        for t in list(tilings) if t.star]\n', '', 1)),
         ("the star's numbers of the next column",
          sub(ME_SECTION, "    column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),\n"
@@ -6219,6 +6223,81 @@ GROUPS = {
              "    column = _index(b, 'add', b.op('rem', INDEX, _index(b, 'add', row, 1, 'p'), width, hint='p'),\n"
              "                    step.cols[0], 'p')\n"
              "    inband = ", 1)),
+    ]),
+    # A matrix step's D added into the element's output by bulk reductions
+    # (`Options.matrix_output`, `element_group.output_refusal`,
+    # `multi_element._bulk_output`).
+    'opbulk': ('tests/test_bulk_output.py::test_every_matrix_lowering_takes_the_bulk_output '
+               'tests/test_bulk_output.py::test_a_target_without_the_bulk_copy_keeps_the_reductions '
+               'tests/test_bulk_output.py::test_the_refusals_say_why '
+               'tests/test_bulk_output.py::test_the_bulk_output_costs_no_group_size '
+               'tests/test_bulk_output.py::test_the_staged_columns '
+               'tests/test_bulk_output.py::test_f64_columns_are_sixteen_bytes_too '
+               'tests/test_bulk_output.py::test_the_kernel_adds_by_bulk_reductions '
+               'tests/test_bulk_output.py::test_every_element_of_two_trips_on_the_oracle '
+               'tests/test_bulk_output.py::test_the_reductions_own_wait_and_barrier_on_the_oracle '
+               'tests/test_bulk_output.py::test_a_staged_column_written_again_before_the_wait_is_a_race '
+               'tests/test_bulk_output.py::test_a_body_whose_one_copy_is_a_bulk_reduction_keeps_its_wait '
+               'tests/test_bulk_output.py::test_the_window_is_bit_for_bit_and_the_rest_gets_plus_zero', [
+        ('the staged columns not fenced for the async proxy',
+         sub(ME_SECTION, '    b.fence(FenceKind.PROXY)\n'
+                         '    b.barrier(trip.meet)\n'
+                         '    pointer = _bound(b, trip.symbols[id(tensor)])\n',
+             '    b.barrier(trip.meet)\n'
+             '    pointer = _bound(b, trip.symbols[id(tensor)])\n', 1)),
+        ('the reductions issued before the element warps meet',
+         sub(ME_SECTION, '    b.fence(FenceKind.PROXY)\n'
+                         '    b.barrier(trip.meet)\n'
+                         '    pointer = _bound(b, trip.symbols[id(tensor)])\n',
+             '    b.fence(FenceKind.PROXY)\n'
+             '    pointer = _bound(b, trip.symbols[id(tensor)])\n', 1)),
+        ('the staged columns written again before the reductions read them',
+         sub(ME_SECTION, '                          dst_index=(dst,), src_index=(src,))\n'
+                         '    b.wait(token)\n',
+             '                          dst_index=(dst,), src_index=(src,))\n', 1)),
+        # tma's mutations of the interpreter's and the emitter's reductions,
+        # on the bulk reduction's own lines.
+        ("the interpreter letting a bulk reduction's run go at the issue",
+         sub(ORACLE, '            dst[di + k] = dst[di + k] + value\n        tracker = self.mem.tracker\n'
+                     '        if tracker is not None:\n            tracker.reduce_issue(tracker.lane, slots)\n',
+             '            dst[di + k] = dst[di + k] + value\n        tracker = self.mem.tracker\n'
+             '        if tracker is not None:\n            pass\n', 1)),
+        ('the wait for a bulk reduction dropped with the copies',
+         sub(EMIT, "                and s.attr('engine') not in ('tdm',) + engines.REDUCE_ENGINES\n",
+             "                and s.attr('engine') not in ('tdm', 'tma_reduce')\n", 1)),
+        ('the rows outside the windows left as they were',
+         sub(ME_SECTION, '        for r in list(range(0, begin)) + list(range(end, hi - lo)):\n',
+             '        for r in []:\n', 1)),
+        ("D's cells a row down in the staged columns",
+         sub(ME_SECTION, "    at = _index(b, 'add', b.op('mul', INDEX, m, stride, hint='d'),\n"
+                         "                _index(b, 'add', n, shift, 'd'), 'd')\n",
+             "    at = _index(b, 'add', b.op('mul', INDEX, m, stride, hint='d'),\n"
+             "                _index(b, 'add', n, shift + 1, 'd'), 'd')\n", 1)),
+        ("tcgen05's rows of D from the span's first row",
+         sub(ME_SECTION, '                    staged[shift + c0 + j] = value\n',
+             '                    staged[c0 + j] = value\n', 1)),
+        ("the box's last column left out",
+         sub(ME_SECTION, '        elems, src = width * stride, ',
+             '        elems, src = (width - 1) * stride, ', 1)),
+        ('a masked element adding into the output',
+         sub(ME_SECTION, '    if trip.mask is not None:\n'
+                         "        issue = b.op('and', BOOL, issue, trip.mask, hint='issue')\n"
+                         '    token = b.reduce_bulk(',
+             '    token = b.reduce_bulk(', 1)),
+        ("the staged columns an even number of sixteen bytes apart",
+         sub(ME_GROUP, '    if (stride // unit) % 2 == 0:\n        stride += unit\n', '', 1)),
+        ("two steps' reductions into one output",
+         sub(ME_GROUP, '    if writers > 1:\n', '    if writers > 2:\n', 1)),
+        ('the bulk output where a step reads the output',
+         sub(ME_GROUP, '    if any(sub.tensor is tensor for s in section.steps for p in s.products\n',
+             '    if False and any(sub.tensor is tensor for s in section.steps for p in s.products\n', 1)),
+        ('an output on eight bytes',
+         sub(ME_GROUP, '    if align < 16:\n', '    if align < 8:\n', 1)),
+        ('the staged columns left out of the room',
+         sub(ME_GROUP, '    operators += output_volume(section, elements)\n', '', 1)),
+        ('the bulk output at the cost of the group',
+         sub(ME_GROUP, '        lowerings[:] = [twin for t in lowerings\n'
+                       '                        for twin in _output_twins(t)]\n', '', 1)),
     ]),
 }
 

@@ -641,6 +641,11 @@ _TMA_REDUCE = re.compile(
     r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,(?P<coords>.+)\)$')
 _BULK_WAIT_READ = re.compile(
     r'^tensorforge::bulkWaitRead\s*<\s*(?P<pending>\d+)\s*>\s*\(\s*\)$')
+#: A run of shared memory added into global memory without a map
+#: (`tensorforge::bulkReduceAdd`): the destination, the source, the bytes.
+_BULK_REDUCE = re.compile(
+    r'^tensorforge::bulkReduceAdd\s*\(\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
+    r'\s*&\s*(?P<src>\w+)\s*\[(?P<si>[^\]]*)\]\s*,\s*(?P<bytes>\d+)\s*\)$')
 
 
 #: Scalar type -> bytes, for turning a copy's byte count into element slots.
@@ -3011,6 +3016,40 @@ class Interp:
         if tracker is not None:
             tracker.reduce_issue(tracker.lane, slots)
 
+    def _bulk_reduce(self, br, stmt: str) -> None:
+        """A run of shared memory added into global memory (PTX ISA,
+        "cp.reduce.async.bulk", `.add`), by the lane that reaches it -- the
+        one its guard picks: both starts on sixteen bytes, the run a multiple
+        of sixteen, every element added.  Added here; the run is read until
+        that lane's wait on its bulk groups retires the reduction
+        (`Races.reduce_issue`), as a box's (`_tma_reduce`)."""
+        dst = self.env.get(br.group('dst'))
+        src = self.env.get(br.group('src'))
+        if not isinstance(dst, Ptr) or not isinstance(src, Ptr):
+            raise Abort(f'a bulk reduction between unknown buffers: {stmt!r}')
+        width = self.widths.get(br.group('src'))
+        if width is None or self.widths.get(br.group('dst'), width) != width:
+            raise Abort(f'a bulk reduction between elements of '
+                        f'{self.widths.get(br.group("dst"))!r} and {width!r} '
+                        f'bytes: {stmt!r}')
+        nbytes = int(br.group('bytes'))
+        di = int(self.ev(br.group('di')))
+        si = int(self.ev(br.group('si')))
+        if (nbytes % 16 or (dst.off + di) * width % 16
+                or (src.off + si) * width % 16):
+            raise Abort(f'a bulk reduction of {nbytes} B from element '
+                        f'{src.off + si} into {dst.off + di}: not on sixteen '
+                        f'bytes: {stmt!r}')
+        slots = []
+        arena = Ptr(self.mem, src.base)
+        for k in range(nbytes // width):
+            value = arena[src.off + si + k]
+            slots.append(src.off + si + k)
+            dst[di + k] = dst[di + k] + value
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.reduce_issue(tracker.lane, slots)
+
     def _tma_load(self, tl, stmt: str) -> None:
         """A box through a tensor map, by the leader of the cursor for the
         lanes it is for, as a bulk copy (PTX ISA, "cp.async.bulk.tensor",
@@ -3253,6 +3292,10 @@ class Interp:
         tr = _TMA_REDUCE.match(stmt)
         if tr:
             self._tma_reduce(tr, stmt)
+            return
+        br = _BULK_REDUCE.match(stmt)
+        if br:
+            self._bulk_reduce(br, stmt)
             return
         bw = _BULK_WAIT_READ.match(stmt)
         if bw:

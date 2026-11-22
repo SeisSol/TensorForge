@@ -308,6 +308,11 @@ class Step:
     products: Tuple[Product, ...]
     lowering: str
     terms: Optional[Terms] = None
+    #: How a matrix step adds D into its output where not by a reduction a
+    #: cell: `bulk`, a bulk reduction a column of the element's output;
+    #: `box`, one over its whole box (`Options.matrix_output`,
+    #: `output_refusal`); '' by a reduction a cell.
+    output: str = ''
 
     @property
     def kind(self) -> Kind:
@@ -653,7 +658,7 @@ class GroupSection:
                              None if p.second is None
                              else p.second.tensor.alias,
                              p.rows, p.cols, p.depth) for p in s.products),
-                      s.terms)
+                      s.terms, s.output)
                      for s in self.steps)
 
 
@@ -1564,7 +1569,8 @@ def lower(section: GroupSection, context, matrix: bool = True,
           engine: Optional[str] = None, streamed: bool = False,
           double: bool = True, ring: int = 0,
           registers: int = 0, halves: int = 0,
-          prepared: bool = False, star: str = '') -> GroupSection:
+          prepared: bool = False, star: str = '',
+          output: str = 'red') -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
@@ -1582,7 +1588,9 @@ def lower(section: GroupSection, context, matrix: bool = True,
     where its operators carry their numbers (`Stage.prepared`), streamed
     through the prepared ring of the options' slots and rows where
     `streamed` asks.  `star` `engine`: the star step folded into each
-    asynchronous step that can take it (`fuse`).
+    asynchronous step that can take it (`fuse`).  `output` `bulk` or `box`:
+    D added into the output by bulk reductions where a matrix step can
+    (`output_refusal`).
     The matrix tiling is NVIDIA's: elsewhere every step takes an FMA form,
     as below sm_80."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
@@ -1606,6 +1614,11 @@ def lower(section: GroupSection, context, matrix: bool = True,
                      split, sparse, streamed=streamed, prepared=prepared)
     if star == 'engine':
         staged = fuse(staged)
+    if output in ('bulk', 'box'):
+        staged = dataclasses.replace(staged, steps=tuple(
+            dataclasses.replace(s, output=output)
+            if output_refusal(staged, s, context) is None else s
+            for s in staged.steps))
     if any(st.prepared and st.streamed for st in staged.stages):
         options = context.get_user_options()
         staged = dataclasses.replace(
@@ -1960,6 +1973,143 @@ def star_notes(section: GroupSection, context) -> List[str]:
     return notes
 
 
+def output_asked(context) -> str:
+    """How the options ask a matrix step to add D into its output
+    (`Options.matrix_output`): `red`, `bulk` or `box`."""
+    return context.get_user_options().matrix_output
+
+
+def output_refusal(section: GroupSection, step: Step, context) -> Optional[str]:
+    """Why a matrix step cannot add D into its output by bulk reductions
+    (`Step.output`), or None: it adds -- a store would be a bulk copy, not
+    built -- into an output of the element that no other step of the
+    section writes (two steps' reductions into one region would land in an
+    order of their own, and a check bit for bit would see it) nor reads (the
+    kernel waits for the reductions to have read the staged columns, not
+    for their writes to land), stored dense,
+    on a target with the bulk copy (sm_90 on), its columns on sixteen bytes
+    -- the operand promising them (`alignment`) and its column's rows a
+    multiple of sixteen bytes -- and the step's columns at most a warp's
+    lanes, a lane issuing each."""
+    if step.lowering not in MATRIX_LOWERINGS:
+        return f'{step.lowering} writes no D'
+    tensor = step.dest
+    if tensor.is_tmp:
+        return f'D goes to the intermediate {tensor.alias}'
+    if step.assigns:
+        return f'the step assigns {tensor.alias}'
+    writers = sum(1 for s in section.steps if s.dest is tensor)
+    if writers > 1:
+        return (f'{writers} steps add into {tensor.alias}: their reductions '
+                f'would land in an order of their own')
+    if any(sub.tensor is tensor for s in section.steps for p in s.products
+           for sub in p.operands):
+        return (f'a step reads {tensor.alias}: the reductions\' writes land '
+                f'behind the wait for their reads only')
+    if not context.target.bulk_copy_path():
+        return 'no bulk copy on the target'
+    if not tensor.is_dense():
+        return f'{tensor.alias} is stored sparse'
+    size = section.dtype.size()
+    align = int(getattr(tensor, 'alignment', 0) or 0)
+    if align < 16:
+        return (f'{tensor.alias} promises {align} bytes of alignment, the '
+                f'bulk reduction 16')
+    ld = int(tensor.bbox.sizes()[0])
+    if (ld * size) % 16:
+        return (f'a column of {tensor.alias} is {ld * size} bytes, not a '
+                f'multiple of 16')
+    if step.cols[1] - step.cols[0] > WARP_LANES:
+        return (f'{step.cols[1] - step.cols[0]} columns, more than a warp\'s '
+                f'lanes issue')
+    return None
+
+
+def output_geometry(section: GroupSection, step: Step) -> Tuple[int, int, int]:
+    """`(lo, hi, stride)` of a step's D staged for its bulk reductions
+    (`Step.output`): the rows of the output's column a reduction adds, from
+    `lo` to `hi` in its storage (from the bounding box's first row), and the
+    elements between two columns staged -- `bulk`: the step's rows rounded
+    out to sixteen bytes, the stride an odd number of sixteen bytes, so that
+    a warp's lanes, a column each, store on distinct banks; `box`: the whole
+    column, the stride the output's own, so that an element's columns are
+    one contiguous box."""
+    tensor = step.dest
+    unit = 16 // section.dtype.size()
+    ld = int(tensor.bbox.sizes()[0])
+    first = int(tensor.bbox.lower()[0])
+    if step.output == 'box':
+        return 0, ld, ld
+    lo = (step.rows[0] - first) // unit * unit
+    hi = min(ld, _round(step.rows[1] - first, unit))
+    stride = _round(hi - lo, unit)
+    if (stride // unit) % 2 == 0:
+        stride += unit
+    return lo, hi, stride
+
+
+def output_volume(section: GroupSection, elements: int) -> int:
+    """Elements of shared memory the steps' staged D takes for their bulk
+    reductions in a group of `elements` (`Step.output`), past what tcgen05
+    stages anyway (`shared_bytes`)."""
+    total = 0
+    for step in section.steps:
+        if not step.output:
+            continue
+        _, _, stride = output_geometry(section, step)
+        total += elements * (step.cols[1] - step.cols[0]) * stride
+    return total
+
+
+def output_of(section: GroupSection) -> str:
+    """How the section's matrix steps add D into their output: `bulk` or
+    `box` where one takes the bulk reductions (`Step.output`), `red`
+    where none does."""
+    return next((s.output for s in section.steps if s.output), 'red')
+
+
+def _output_twins(section: GroupSection) -> Tuple[GroupSection, ...]:
+    """The section, and where a step of it adds D by bulk reductions the
+    same section adding it a cell at a time (`fill`)."""
+    if not any(s.output for s in section.steps):
+        return (section,)
+    return (section, dataclasses.replace(section, steps=tuple(
+        dataclasses.replace(s, output='') for s in section.steps)))
+
+
+def output_notes(section: GroupSection, context) -> List[str]:
+    """What the kernel's comment says of its matrix steps' output where
+    the options ask for bulk reductions (`Options.matrix_output`): the rows
+    each reduction adds and the +0.0 they add outside the step's windows, or
+    why a step keeps its reduction a cell."""
+    asked = output_asked(context)
+    if asked == 'red':
+        return []
+    notes = []
+    for step in section.steps:
+        if step.lowering not in MATRIX_LOWERINGS or step.dest.is_tmp:
+            continue
+        if not step.output:
+            why = output_refusal(section, step, context)
+            if why is None:
+                # A step that takes them, the fill rule's choice: the
+                # group's size, or another of its lowering's choices.
+                why = ('its staged columns do not fit beside the group '
+                       'the fill rule chose -- its size and its lowering\'s '
+                       'other choices kept')
+            notes.append(f'matrix_output={asked} declined for '
+                         f'{step.dest.alias}: {why}; a reduction a cell')
+            continue
+        lo, hi, _ = output_geometry(section, step)
+        first = int(step.dest.bbox.lower()[0])
+        what = ('a bulk reduction a column of the element' if step.output ==
+                'bulk' else 'one bulk reduction over the element\'s box')
+        notes.append(f'{step.dest.alias} += D by {what}, rows {first + lo} '
+                     f'to {first + hi}: the rows the products\' windows leave '
+                     f'out there receive exactly +0.0 (a -0.0 becomes +0.0)')
+    return notes
+
+
 def _step_stages(section: GroupSection, step: Step) -> List[Stage]:
     """The stages a matrix step reads, a product each, in its order."""
     return [section.stage(p.first.tensor, (p.rows, p.depth))
@@ -2169,10 +2319,13 @@ def shared_bytes(section: GroupSection, elements: int) -> int:
                      if s.lowering == 'tcgen05' and folded(section, s))
     # tcgen05's D staged in shared memory for every element warp to write
     # (`compute.multi_element._tcgen05`): the widest step's rows of the
-    # element, an odd number of floats apart.
+    # element, an odd number of floats apart -- for bulk reductions, the
+    # columns of the output they add (`output_geometry`), past the others.
     per_element += max(((s.cols[1] - s.cols[0]) * ((s.rows[1] - s.rows[0]) | 1)
-                        for s in section.steps if s.lowering == 'tcgen05'),
+                        for s in section.steps if s.lowering == 'tcgen05'
+                        and not s.output),
                        default=0)
+    operators += output_volume(section, elements)
     return (size * (operators + elements * per_element)
             + POINTER_BYTES * elements * len(section.pointer_tables))
 
@@ -2812,29 +2965,34 @@ def fill(section: GroupSection, context,
     # prepared ring in place of the converting one.
     asked = ring_asked(context)
     star = star_asked(context)
+    output = output_asked(context)
     tilings = [lower(section, context, split=True, prepared=asked,
-                     star=star)]
+                     star=star, output=output)]
     if not tiled(tilings[0]):
         tilings = []
     elif split(tilings[0]):
         if asynchronous(tilings[0]):
             # B's halves streamed through a ring ahead of B whole.
             tilings.append(lower(section, context, split=True,
-                                 streamed=True, prepared=asked, star=star))
+                                 streamed=True, prepared=asked, star=star,
+                                 output=output))
             # Where the star step folded, the same tilings without the fold
             # behind them: B's halves before the fold, where only the
             # unfolded ones leave the group room -- B whole is B in TF32
             # on these engines (`multi_element._terms`), which the fold
             # does not take (`fuse_refusal`).
             tilings += [lower(section, context, split=True,
-                              streamed=streamed(t), prepared=asked)
+                              streamed=streamed(t), prepared=asked,
+                              output=output)
                         for t in list(tilings) if t.star]
-        tilings.append(lower(section, context, star=star))
+        tilings.append(lower(section, context, star=star, output=output))
     candidates = [(tilings, None)] if tilings else []
     if tilings and asynchronous(tilings[0]):
-        held = [lower(section, context, split=True, engine='mma_sync')]
+        held = [lower(section, context, split=True, engine='mma_sync',
+                      output=output)]
         if split(held[0]):
-            held.append(lower(section, context, engine='mma_sync'))
+            held.append(lower(section, context, engine='mma_sync',
+                              output=output))
         candidates.append((held, 'mma_sync'))
     candidates.append(([lower(section, context, matrix=False)], None))
     # Each again with the inputs in one stage, where the options ask for a
@@ -2843,7 +3001,8 @@ def fill(section: GroupSection, context,
         lowerings += [lower(section, context, matrix=tiled(t),
                             split=split(t), engine=engine,
                             streamed=streamed(t), double=False,
-                            prepared=prepared(t), star=t.star)
+                            prepared=prepared(t), star=t.star,
+                            output=output)
                       for t in lowerings if t.doubled]
         # Each tiling on mma_sync again with A in TF32 halves (`_halved`)
         # where the layout's switch takes them (`HALVES`), in as many of its
@@ -2867,9 +3026,17 @@ def fill(section: GroupSection, context,
         rings = [lower(section, context, matrix=tiled(first),
                        split=split(first), engine=engine,
                        streamed=streamed(first), ring=slots, registers=keep,
-                       prepared=prepared(first), star=first.star)
+                       prepared=prepared(first), star=first.star,
+                       output=output)
                  for slots in PRODUCER_SLOTS]
         lowerings[:0] = [r for r in rings if r.ring]
+        # Each with D added by bulk reductions where the options ask
+        # (`Options.matrix_output`), then as it was: the staged columns
+        # take room the reductions a cell do not, and where they would cost
+        # the group its size -- or another of its lowering's choices --
+        # the group keeps them, and its comment says why (`output_notes`).
+        lowerings[:] = [twin for t in lowerings
+                        for twin in _output_twins(t)]
     candidates = [lowerings for lowerings, _ in candidates]
     for lowerings in candidates:
         elements = table_elements(lowerings[0])
@@ -2971,6 +3138,8 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
            'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
            'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
+           'output_asked', 'output_geometry', 'output_notes', 'output_of',
+           'output_refusal', 'output_volume',
            'star_mixes', 'star_notes', 'star_volume',
            'SHARED_RESERVE',
            'SMALL_EXTENT', 'Stage', 'Step', 'TARGETS', 'TCGEN05_ROWS',

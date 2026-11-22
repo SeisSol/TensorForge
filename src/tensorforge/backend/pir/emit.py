@@ -909,10 +909,10 @@ class Emitter:
                               f'issued: {why}')
         # A reduction of a box is one thread's, counted in its own bulk
         # groups, which nothing else counts.
-        self._reductions = any(c.attr('engine') == 'tma_reduce'
+        self._reductions = any(c.attr('engine') in engines.REDUCE_ENGINES
                                for c in copies)
         copies = [c for c in copies if c.counter != 'bulk'
-                  and c.attr('engine') != 'tma_reduce']
+                  and c.attr('engine') not in engines.REDUCE_ENGINES]
         # Nor is a tensor copy: one instruction a wave over a whole tile,
         # counted on a counter nothing else counts -- and refused where it
         # cannot be issued rather than lowered as loads and stores, which a
@@ -1700,7 +1700,7 @@ class Emitter:
             return
 
         if (op == Op.WAIT_COUNTER and s.args and self._async_lex is None
-                and s.attr('engine') not in ('tdm', 'tma_reduce')
+                and s.attr('engine') not in ('tdm',) + engines.REDUCE_ENGINES
                 and retires(s)):
             # The wait for copies the body writes as loads and stores
             # (`_decide_async`): nothing of theirs is in flight.  A tensor
@@ -1980,6 +1980,18 @@ class Emitter:
             w(f'tensorforge::tmaLoad{policy}({self.name(s.attr("object"))}, '
               f'{dst}, &{s.attr("map").name}, {self._copy_bytes(s)}, '
               f'{coords});')
+            return
+
+        if op == Op.COPY_ASYNC and s.attr('engine') == 'bulk_reduce':
+            # A run of shared memory added into global memory, no map:
+            # under the predicate of the thread that issues it, which
+            # `_emit_stmt` wrote around this.
+            w(f'tensorforge::bulkReduceAdd('
+              f'&{self.base_name(s.copy_dst)}'
+              f'[{self.address(s.copy_dst, s.copy_dst_index)}], '
+              f'&{self.base_name(s.copy_src)}'
+              f'[{self.address(s.copy_src, s.copy_src_index)}], '
+              f'{self._copy_bytes(s)});')
             return
 
         if op == Op.COPY_ASYNC and s.attr('engine') == 'tma_reduce':

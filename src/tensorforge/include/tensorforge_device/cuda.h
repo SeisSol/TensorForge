@@ -1075,6 +1075,55 @@ __device__ __forceinline__ void tcgen05CommitOn(void *barrier, bool issue) {
 #endif
 }
 
+/// `bytes` of shared memory from `src` added into global memory at `dst`,
+/// both on sixteen bytes and `bytes` a multiple of sixteen (PTX ISA,
+/// "cp.reduce.async.bulk": `.add`, completing by `.bulk_group`; sm_90 and
+/// newer), closed into a bulk async-group of the issuing thread's own, which
+/// `bulkWaitRead` counts.  Issued by one thread: what the others wrote to
+/// `src` through the generic proxy, they fenced for the async one ahead of
+/// the barrier that shows it to this thread.  No tensor map: a run of
+/// contiguous elements.  Every element of the run is added, an element the
+/// writers left zero adding exactly +0.0.
+__device__ __forceinline__ void bulkReduceAdd(float *dst, const float *src,
+                                              uint32_t bytes) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32 "
+               "[%0], [%1], %2;" ::"l"(dst),
+               "r"(bulk_shared_address(src)), "r"(bytes)
+               : "memory");
+  asm volatile("cp.async.bulk.commit_group;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The same over doubles.
+__device__ __forceinline__ void bulkReduceAdd(double *dst, const double *src,
+                                              uint32_t bytes) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64 "
+               "[%0], [%1], %2;" ::"l"(dst),
+               "r"(bulk_shared_address(src)), "r"(bytes)
+               : "memory");
+  asm volatile("cp.async.bulk.commit_group;" ::: "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// At most `Pending` of this thread's bulk groups still reading their
+/// sources (PTX ISA, "cp.async.bulk.wait_group": `.read`): the boxes of the
+/// others may be written again.  A thread that issued none waits for
+/// nothing.  Here rather than in `cuda_tma.h`, which includes this: the
+/// bulk reductions without a map (`bulkReduceAdd`) wait on it too.
+template <int Pending> __device__ __forceinline__ void bulkWaitRead() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(Pending) : "memory");
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// The 19-bit E8M10 the tensor cores multiply, as its bit pattern.
 ///
 /// A typedef and not a wrapper struct, and the reason is the constraint
