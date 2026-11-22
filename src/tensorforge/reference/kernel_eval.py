@@ -210,14 +210,19 @@ _BULK_WAIT = re.compile(r'^tensorforge::bulk_wait\s*\(\s*(?P<cursor>\w+)\s*\)$')
 #: A ring of mbarriers (`cuda.h`, `IRBuilder.mbarrier_ring`): a barrier set up
 #: for a count of arrivals a phase, a wait for the parity of a phase, an
 #: arrival -- announcing bytes, or not -- and the copies that complete bytes
-#: on one without arriving.  The barrier is `&ring[i]`.
+#: on one without arriving.  The barrier is `&ring[i]`.  AMD's ring of LDS
+#: counters (`hip.h`, `ldsRingInit`, `ldsRingWait`, `ldsRingArrive`) is the
+#: same protocol without the bytes, and the same model.
 _MB = r'&\s*(?P<bar>\w+)\s*\[(?P<bi>[^\]]*)\]'
 _MB_INIT = re.compile(
-    rf'^tensorforge::mbarrierInit\s*\(\s*{_MB}\s*,(?P<count>.+)\)$')
+    rf'^tensorforge::(?:mbarrier|ldsRing)Init\s*\(\s*{_MB}\s*,'
+    r'(?P<count>.+)\)$')
 _MB_WAIT = re.compile(
-    rf'^tensorforge::mbarrierWait\s*\(\s*{_MB}\s*,(?P<parity>.+)\)$')
+    rf'^tensorforge::(?:mbarrier|ldsRing)Wait\s*\(\s*{_MB}\s*,'
+    r'(?P<parity>.+)\)$')
 _MB_ARRIVE = re.compile(
-    rf'^tensorforge::mbarrierArrive\s*\(\s*{_MB}\s*,(?P<issue>.+)\)$')
+    rf'^tensorforge::(?:mbarrier|ldsRing)Arrive\s*\(\s*{_MB}\s*,'
+    r'(?P<issue>.+)\)$')
 _MB_EXPECT = re.compile(
     rf'^tensorforge::mbarrierExpect\s*\(\s*{_MB}\s*,\s*(?P<bytes>\d+)u?\s*,'
     r'(?P<issue>.+)\)$')
@@ -796,6 +801,7 @@ class Races:
         r'^(?:__syncthreads|__syncwarp|__builtin_amdgcn_s_barrier)\s*\('
         r'|^asm\s+volatile\s*\(\s*"(?:barrier|bar)\.sync'
         r'|^tensorforge::(?:sync|join)NamedBarrier\b'
+        r'|^tensorforge::joinRoleBarriers\b'
         r'|^cooperative_groups::this_grid\(\)\.sync\('
         r'|.*\blaunchCursor\d+\.next\s*\(')
     #: The first half of a rendezvous: an arrival at a named barrier that
@@ -2207,7 +2213,8 @@ class Interp:
         and a role waiting there hands over to the other (`Lockstep._arms`).
         Reads nothing a race is about; a barrier nobody set up is the wait's
         own to refuse."""
-        if not stmt.startswith('tensorforge::mbarrierWait'):
+        if not stmt.startswith(('tensorforge::mbarrierWait',
+                                'tensorforge::ldsRingWait')):
             return False
         m = _MB_WAIT.match(stmt)
         if m is None:
@@ -3288,7 +3295,8 @@ class Interp:
             self.env[ls.group('name')].start(self.ev(ls.group('queue')))
             return
         if stmt.startswith(('tensorforge::mbarrier', 'tensorforge::bulkCopyOn',
-                            'tensorforge::tmaLoadOn')):
+                            'tensorforge::tmaLoadOn',
+                            'tensorforge::ldsRing')):
             self._ring_statement(stmt)
             return
         bm = _BULK_ARM.match(stmt)
@@ -3537,6 +3545,7 @@ _NO_VALUE = re.compile(
     r'|s_wait_asynccnt|s_wait_tensorcnt)|__threadfence_block'
     r'|__atomic_signal_fence'
     r'|tensorforge::(?:sync|arrive|join)NamedBarrier(?:<[^>]*>)?'
+    r'|tensorforge::joinRoleBarriers<[^>]*>'
     r'|tensorforge::gridDependencyWait'
     r'|tensorforge::prefetch(?:Runs)?(?:L1|L2|Hinted)(?:<[^>]*>)?)\s*\(')
 

@@ -6546,8 +6546,8 @@ GROUPS = {
          sub(ENGINES, '        if not 1 <= int(self.hold) <= int(self.slots):\n',
              '        if not 1 <= int(self.hold):\n', 1)),
         ("a ring's hold not carried to its description",
-         sub(BUILD, '                                engines.SyncKind.MBARRIER, scope, int(hold))\n',
-             '                                engines.SyncKind.MBARRIER, scope)\n', 1)),
+         sub(BUILD, '                                kind, scope, int(hold), tuple(waiters),\n',
+             '                                kind, scope, 1, tuple(waiters),\n', 1)),
         ("wgmma's slot given back a chunk past the one its wait retired",
          sub(ME_SECTION, '            ring.release(trip, i - ring.hold + 1, base)\n',
              '            ring.release(trip, i - ring.hold + 2, base)\n', 1)),
@@ -6572,6 +6572,87 @@ GROUPS = {
         ("wgmma's folded star holding B past A's slots",
          sub(ME_GROUP, '        if folded(section, step) and hold > STAR_SLOTS[step.lowering]:\n',
              '        if False:\n', 1)),
+    ]),
+    # The roles and rings on AMD and Intel (`pir.roles.roles_refusal`,
+    # `engines.ring_kind`): gfx1250's role objects and the rings of LDS
+    # counters on the host oracle, CDNA's and SPMD's refusals, PVC's named
+    # barriers in the text.
+    'roleslower': ('tests/test_roles_lowerings.py -n 6', [
+        ("every role of gfx1250 meeting on the first object",
+         sub(ENGINES, "            return (f'tensorforge::syncNamedBarrier(&{ROLE_OBJECTS}'\n"
+                      "                    f'[{obj.ident}]);')\n",
+             "            return (f'tensorforge::syncNamedBarrier(&{ROLE_OBJECTS}'\n"
+             "                    f'[0]);')\n", 1)),
+        ("an LDS ring's empty side counting the full side's arrivals",
+         sub(ENGINES, "        f'    tensorforge::ldsRingInit(&{ring}[{obj.slots} + r], '\n"
+                      "        f'{s.attr(\"empty\")});',\n",
+             "        f'    tensorforge::ldsRingInit(&{ring}[{obj.slots} + r], '\n"
+             "        f'{s.attr(\"full\")});',\n", 1)),
+        ("an LDS ring's wait for the first phase's parity always",
+         sub(ENGINES, "        return Lowered((f'tensorforge::ldsRingWait({_ring_barrier(s, env)}, '\n"
+                      "                        f'{env.name(s.args[1])});',))\n",
+             "        return Lowered((f'tensorforge::ldsRingWait({_ring_barrier(s, env)}, '\n"
+             "                        f'0);',))\n", 1)),
+        ("an LDS ring's arrival with bytes let through",
+         sub(ENGINES, "        if s.attr('tx'):\n"
+                      "            raise IRError(f'{s.op} of {s.attr(\"tx\")} bytes on a ring of LDS '\n",
+             "        if False:\n"
+             "            raise IRError(f'{s.op} of {s.attr(\"tx\")} bytes on a ring of LDS '\n", 1)),
+        ("the roles' objects counted in the split's order, not their ids'",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '    ordered = sorted(split.roles, key=lambda r: r.warps[0])\n',
+             '    ordered = list(split.roles)\n', 1)),
+        ("a second split's objects let through on gfx1250",
+         sub(BUILD, '        elif self._role_objects != split.ident:\n',
+             '        elif False:\n', 1)),
+        ('CDNA refusing roles for want of objects alone',
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "        if str(hw.model).startswith('gfx9'):\n"
+             "            return CDNA_REFUSAL\n", '', 1)),
+        ("a PVC ring's empty sides on its full sides' ids",
+         sub(ENGINES, "    return obj.ring.ident + (obj.slots if side == 'empty' else 0)\n",
+             '    return obj.ring.ident\n', 1)),
+        ("the consumers' first release on the full sides",
+         sub(ENGINES, "    return _stmt(Op.ARRIVE, (('object', ring), ('side', 'empty'),\n",
+             "    return _stmt(Op.ARRIVE, (('object', ring), ('side', 'full'),\n", 1)),
+        ("PVC's roles named by the split's id of each thread, a value",
+         sub(BUILD, '                split, first=self._named_take(len(split.roles)),\n'
+                    '                constant=True)\n',
+             '                split, first=self._named_take(len(split.roles)))\n', 1)),
+        ("every role's constant id the first role's",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '            r._replace(ident=str(self.id_of(r.name)) if self.constant\n',
+             '            r._replace(ident=str(self.first) if self.constant\n', 1)),
+        ("PVC's named barriers let through whatever the IGC",
+         sub(ENGINES, 'PVC_NAMED_BARRIERS: Optional[bool] = None\n',
+             'PVC_NAMED_BARRIERS: Optional[bool] = True\n', 1)),
+        ("a PVC role split let through where its barriers hang",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             '        why = engines.pvc_named_refusal()\n        if why is not None:\n            return why\n',
+             '', 1)),
+        ("no IGC to ask taken for one that writes the gateway message",
+         sub(ENGINES, '    return PVC_UNPROBED if form is None else PVC_REFUSAL\n',
+             '    return None if form is None else PVC_REFUSAL\n', 1)),
+        ("IGC 1.0.15468's signal taken for the gateway message",
+         sub(Path('src/tensorforge/toolchain.py'), "        return 'flag-producers'\n",
+             "        return 'gateway'\n", 1)),
+        ("a PVC ring's helper told one slot more",
+         sub(ENGINES, "    at = (f'{named_ring_id(obj, side)}, {obj.slots}, {counts[0]}, '\n",
+             "    at = (f'{named_ring_id(obj, side)}, {obj.slots + 1}, {counts[0]}, '\n", 1)),
+        ("a PVC ring's side counted as the other side",
+         sub(ENGINES, "    counts = ((spec.full, full) if side == 'full' else (spec.empty, empty))\n",
+             "    counts = ((spec.empty, empty) if side == 'full' else (spec.full, full))\n", 1)),
+        ("the kernel's named barriers never counted",
+         sub(BUILD, '        if self._named:\n', '        if False:\n', 1)),
+        ("SPMD refused for no reason of its own",
+         sub(Path('src/tensorforge/backend/pir/roles.py'),
+             "    if fam == 'sycl':\n        return SPMD_REFUSAL\n", '', 1)),
+        ('a ring of mbarriers below sm_90 let through',
+         sub(ENGINES, '        if level is None or level < 90:\n', '        if False:\n', 1)),
+        ("the oracle's arms never handing over at an LDS ring's wait",
+         sub(ORACLE, "        if not stmt.startswith(('tensorforge::mbarrierWait',\n"
+                     "                                'tensorforge::ldsRingWait')):\n",
+             "        if not stmt.startswith('tensorforge::mbarrierWait'):\n", 1)),
     ]),
 }
 

@@ -75,11 +75,98 @@ NAMED_IDS = 16
 def first_id(count: int) -> int:
     """The first of the ids `count` roles take on NVIDIA: the top ones,
     apart from the multiplications' -- `14` for two roles, as the
-    multi-element producer has always taken them."""
+    multi-element producer has always taken them.  Elsewhere the builder
+    gives a split its ids (`IRBuilder.split_roles`): gfx1250's an index
+    into the roles' objects from 0, PVC's named barriers from 1 on."""
     if not 2 <= int(count) < NAMED_IDS:
         raise IRError(f'{count} roles, where a block has {NAMED_IDS - 1} '
                       f'named barriers besides its own')
     return NAMED_IDS - int(count)
+
+
+#: Why CDNA (gfx9: gfx90a, gfx942, gfx950) runs no roles (`roles_refusal`).
+CDNA_REFUSAL = (
+    'CDNA runs no roles: its registers are allocated per kernel -- a '
+    'producer wave holds a compute wave\'s VGPRs, and there is no setmaxnreg '
+    'to give them back -- its matrix cores run in the wave that issues '
+    'them, with no asynchronous engine to hand work to, and its one '
+    'barrier is the work-group\'s, so a role\'s would be a spin loop on an '
+    'LDS counter.  Its measured form of specialization is the 8-wave '
+    'ping-pong -- two waves a SIMD alternating their compute and memory '
+    'phases, -2 to -11 % on MI300A -- a schedule, with its own option, '
+    'not roles.  The rings of LDS counters compile for CDNA too '
+    '(`tensorforge::ldsRing*`, hip.h): a later CDNA producer, the LDS-DMA '
+    'filling a ring\'s slots, has them to start from.')
+
+#: Why SYCL's SPMD lowering runs no roles (`roles_refusal`).
+SPMD_REFUSAL = (
+    'SYCL\'s SPMD lowering runs no roles: it has no barrier over part of a '
+    'work-group -- a role\'s would be the whole work-group\'s, which the '
+    'other roles never reach -- and no object with phases to hand a ring\'s '
+    'slots over on; the work-group\'s split barrier '
+    '(SPV_INTEL_split_barrier, not enabled by DPC++ by default) is the '
+    'whole work-group\'s, a phase at a time.')
+
+#: The named barriers of a PVC work-group, id 0 the work-group's own.
+ESIMD_NAMED_IDS = 32
+
+
+def roles_refusal(target: Any, count: int) -> Optional[str]:
+    """Why a block of `target` cannot run `count` roles, or None: NVIDIA's
+    named barriers (`bar.sync id, n`), gfx1250's objects (one a role, which
+    a wave joins), PVC's named barriers under ESIMD where the IGC behind
+    the build writes their signal right (`engines.pvc_named_refusal`); not
+    CDNA
+    (`CDNA_REFUSAL`), an AMD device without objects, or SYCL's SPMD
+    lowering (`SPMD_REFUSAL`)."""
+    from .engines import family
+    fam = family(target)
+    count = int(count)
+    if fam in ('', 'cuda'):
+        if count >= NAMED_IDS:
+            return (f'{count} roles, where a block has {NAMED_IDS - 1} '
+                    f'named barriers besides its own')
+        return None
+    if fam == 'hip':
+        hw = target.hw
+        objects = int(getattr(hw, 'named_barriers', 0) or 0)
+        if objects:
+            if count > objects:
+                return (f'{count} roles, where a block of {hw.model} has '
+                        f'{objects} objects')
+            return None
+        if str(hw.model).startswith('gfx9'):
+            return CDNA_REFUSAL
+        return (f'{hw.model} has no named barriers: a role\'s barrier would '
+                f'be the work-group\'s, which the other roles never reach')
+    if fam == 'esimd':
+        from . import engines
+        if str(target.hw.model) != 'pvc':
+            return f'named barriers are PVC\'s, not {target.hw.model}\'s'
+        why = engines.pvc_named_refusal()
+        if why is not None:
+            return why
+        if count >= ESIMD_NAMED_IDS:
+            return (f'{count} roles, where a PVC work-group has '
+                    f'{ESIMD_NAMED_IDS - 1} named barriers besides its own')
+        return None
+    if fam == 'sycl':
+        return SPMD_REFUSAL
+    return f'no roles on {fam}'
+
+
+def setup(split: 'RoleSplit', wave: int):
+    """The statement that sets the roles' objects of `split` up at the
+    kernel's head, where the target keeps them as state (gfx1250's,
+    `engines.role_setup`): one a role, in the order of the ids the roles'
+    threads compute -- the lowest range's first -- each of its role's
+    waves."""
+    from .engines import role_setup, sync_object
+    ordered = sorted(split.roles, key=lambda r: r.warps[0])
+    waves = [max(1, r.threads // max(1, wave)) for r in ordered]
+    first = ordered[0]
+    return role_setup(sync_object(Participants.ROLE, wave, first.threads,
+                                  split.ident), waves, split.ident)
 
 
 @dataclass(frozen=True)
@@ -92,18 +179,28 @@ class RoleSplit:
     multi-element layout; `first` the first named barrier id the roles take.
 
     The ranges are disjoint and cover the warps from 0 on, in any order of
-    the roles; each role comes out with its `ident` (`ident`)."""
+    the roles; each role comes out with its `ident` -- the split's, which
+    every thread computes as its own role's id (`ident`), or, `constant`,
+    the role's own id as a number (`id_of`): where a barrier's id has to be
+    a compile-time constant, as PVC's under IGC 1.0.15468 (`IRBuilder.
+    split_roles`), and a role's barrier stands in its role's region alone,
+    which `verify` holds it to."""
 
     roles: Tuple[Role, ...]
     warp: str = 'threadIdx.y'
     axis: str = 'y'
-    first: int = NAMED_IDS - 2
+    first: Optional[int] = None
+    constant: bool = False
 
     def __post_init__(self):
         roles = tuple(self.roles)
         if len(roles) < 2:
             raise IRError(f'a split of {len(roles)} role(s): a block in roles '
                           f'has two or more')
+        if self.first is None:
+            # NVIDIA's top ids, which a target of other ids replaces
+            # (`IRBuilder.split_roles`).
+            object.__setattr__(self, 'first', first_id(len(roles)))
         names = [r.name for r in roles]
         if len(set(names)) != len(names):
             raise IRError(f'two roles of one name in {names}')
@@ -122,8 +219,9 @@ class RoleSplit:
         if self.first < 0:
             raise IRError(f'a first barrier id of {self.first}')
         ident = self.ident
-        object.__setattr__(self, 'roles',
-                           tuple(r._replace(ident=ident) for r in roles))
+        object.__setattr__(self, 'roles', tuple(
+            r._replace(ident=str(self.id_of(r.name)) if self.constant
+                       else ident) for r in roles))
 
     @property
     def warps(self) -> int:
@@ -390,7 +488,9 @@ def emit_budgets(b, split: RoleSplit, budgets: Mapping[str, int],
                 b.emit(register_budget(count, 'inc'))
 
 
-__all__ = ['ENTRY_REGISTERS', 'MOST_REGISTERS', 'NAMED_IDS', 'Role',
+__all__ = ['CDNA_REFUSAL', 'ENTRY_REGISTERS', 'ESIMD_NAMED_IDS',
+           'MOST_REGISTERS', 'NAMED_IDS', 'Role', 'SPMD_REFUSAL',
+           'roles_refusal', 'setup',
            'RoleSplit', 'SM_REGISTERS', 'SplitHandle', 'WARPGROUP_WARPS',
            'budget_refusal', 'chain', 'chain_refusal', 'emit_budgets',
            'first_id', 'is_split', 'rebuild', 'register_budgets', 'regions',

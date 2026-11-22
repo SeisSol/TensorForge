@@ -350,6 +350,14 @@ class IRBuilder:
         #: The operation of a shared body being built, where its operands are
         #: to be taken over only within it (`begin_operation`); None otherwise.
         self._operation: Optional[int] = None
+        #: The named barriers the roles and rings of this body took on PVC
+        #: under ESIMD (`_named_take`), counted from id 1 on: the kernel's
+        #: count, which `finish` sets up at its head.
+        self._named = 0
+        #: The barrier id text of the split whose objects this body set up
+        #: on gfx1250 (`split_roles`): a wave joins one, so a body sets up
+        #: one split's.
+        self._role_objects: Optional[str] = None
 
     def begin_operation(self, force: bool = False) -> None:
         """An operation joins this body: from here on, until the next one
@@ -2285,21 +2293,61 @@ class IRBuilder:
         are every round's, the `scope` its statements order, and how many
         of their groups the consumers hold a slot for, `hold` -- where they
         give it back (`Ring.hold`)."""
+        return self._ring(name, slots, full=full, empty=empty, leader=leader,
+                          arena=arena, producer=producer, consumers=consumers,
+                          tx=tx, scope=scope, kind=engines.SyncKind.MBARRIER,
+                          hold=hold)
+
+    def ring(self, name: str, slots: int, *, full: int, empty: int,
+             leader: str, arena: Optional[str] = None,
+             producer: Optional[str] = None, consumers: Sequence[str] = (),
+             tx: int = 0, waiters: Tuple[int, int] = (0, 0),
+             scope: 'engines.SyncScope' = engines.SyncScope.BLOCK,
+             hold: int = 1) -> Optional[Ring]:
+        """`mbarrier_ring`'s ring as the target keeps one
+        (`engines.ring_kind`), refused with the reason where it keeps none:
+        mbarriers under CUDA, LDS counters on AMD (`hip.h`, `ldsRing*`),
+        named barriers on PVC under ESIMD -- a pair a slot, taken from the
+        kernel's (`_named_take`), which count the threads that wait on each
+        side as well, `waiters`."""
+        kind = engines.ring_kind(getattr(self.context, 'target', None))
+        return self._ring(name, slots, full=full, empty=empty, leader=leader,
+                          arena=arena, producer=producer, consumers=consumers,
+                          tx=tx, scope=scope, kind=kind, waiters=waiters,
+                          hold=hold)
+
+    def _ring(self, name: str, slots: int, *, full: int, empty: int,
+              leader: str, arena: Optional[str], producer: Optional[str],
+              consumers: Sequence[str], tx: int,
+              scope: 'engines.SyncScope', kind: 'engines.SyncKind',
+              waiters: Tuple[int, int] = (0, 0),
+              hold: int = 1) -> Optional[Ring]:
         if self._arena is None:
             return None
+        named = kind is engines.SyncKind.NAMED
         spec = engines.RingSpec(int(slots), int(full), int(empty),
                                 producer, tuple(consumers), int(tx),
-                                engines.SyncKind.MBARRIER, scope, int(hold))
+                                kind, scope, int(hold), tuple(waiters),
+                                self._named_take(2 * int(slots)) if named
+                                else 0)
         start = len(self._prologue)
         b = self.scratch()
-        per = max(1, 8 // self._fptype.size())
-        storage = b.alloc(self._fptype, (2 * int(slots) * per,),
-                          MemSpace.SHARED, hint=f'{name}Ring',
-                          place_align=per, lifetime='body', arena=arena)
-        obj = self.new_object(engines.mbarrier_ring(slots, spec),
-                              hint=f'{name}_ring')
-        b.emit(engines.ring_init(obj, storage, full=full, empty=empty,
-                                 leader=leader, extern=f'{name}_ring'))
+        if named:
+            # Its barriers are the kernel's: no storage, and nothing to set
+            # up but their count (`finish`).
+            obj = self.new_object(engines.mbarrier_ring(slots, spec),
+                                  hint=f'{name}_ring')
+            b.emit(engines.named_ring_init(obj, leader=leader,
+                                           extern=f'{name}_ring'))
+        else:
+            per = max(1, 8 // self._fptype.size())
+            storage = b.alloc(self._fptype, (2 * int(slots) * per,),
+                              MemSpace.SHARED, hint=f'{name}Ring',
+                              place_align=per, lifetime='body', arena=arena)
+            obj = self.new_object(engines.mbarrier_ring(slots, spec),
+                                  hint=f'{name}_ring')
+            b.emit(engines.ring_init(obj, storage, full=full, empty=empty,
+                                     leader=leader, extern=f'{name}_ring'))
         b.barrier(Participants.BLOCK)
         self._prologue += list(b.finish())
 
@@ -2339,6 +2387,17 @@ class IRBuilder:
                                    self.alias_root(x)) for x in reads))
         return self.emit(engines.ring_wait(ring.object, side, slot, parity,
                                            accesses))
+
+    def ring_prime(self, ring: Ring, issue: Operand) -> Optional[Stmt]:
+        """The consumers' first release of every slot of `ring`, by the
+        threads `issue` picks, ahead of their first round -- where the ring
+        needs one: a ring of named barriers (PVC), whose hardware has no
+        phase before the first to find complete (`engines.ring_prime`).
+        None, and nothing written, for a ring whose waits name a parity."""
+        spec = ring.spec
+        if spec is None or spec.kind is not engines.SyncKind.NAMED:
+            return None
+        return self.emit(engines.ring_prime(ring.object, issue))
 
     def ring_acquire(self, ring: Ring, slot: Operand, parity: Operand, *,
                      writes: Sequence[Any] = (),
@@ -2929,10 +2988,64 @@ class IRBuilder:
         roles are the statement `roles` builds.  Inside a role's region
         the role is the block, as there: its barriers are its own
         (`Participants.ROLE`), and the roles meet on rings alone."""
+        split = self._split_ids(split)
         warp = self.thread_id(split.axis)
         conds = [split.member(self, role.name, warp)
                  for role in split.roles[:-1]]
         return SplitHandle(self, split, conds)
+
+    def _split_ids(self, split: RoleSplit) -> RoleSplit:
+        """`split` with the barrier ids the target's roles take, refused
+        where the target runs no roles (`roles.roles_refusal`): NVIDIA's as
+        the split names them; gfx1250's an index into the roles' objects
+        from 0, which the kernel sets up at its head (`roles.setup`, one
+        split's a body); PVC's named barriers under ESIMD, taken from the
+        kernel's (`_named_take`), each role's its own constant
+        (`RoleSplit.constant`): IGC 1.0.15468 takes no named barrier whose
+        id is a value.  Without a target, as the split names them."""
+        import dataclasses
+        from .roles import roles_refusal, setup
+        target = getattr(self.context, 'target', None)
+        if target is None:
+            return split
+        why = roles_refusal(target, len(split.roles))
+        if why is not None:
+            raise IRError(f'no roles on {target.hw.model}: {why}')
+        fam = engines.family(target)
+        if fam == 'esimd':
+            return dataclasses.replace(
+                split, first=self._named_take(len(split.roles)),
+                constant=True)
+        if fam != 'hip':
+            return split
+        if split.first != 0:
+            split = dataclasses.replace(split, first=0)
+        if self._role_objects is None:
+            self._role_objects = split.ident
+            start = len(self._prologue)
+            self._prologue.append(setup(split, self._wave()))
+
+            def undo():
+                self._role_objects = None
+                del self._prologue[start:]
+            self.on_rollback(undo)
+        elif self._role_objects != split.ident:
+            raise IRError('a second split into roles in one body on '
+                          f'{target.hw.model}: a wave joins one object, and '
+                          f'the body set up those of {self._role_objects}')
+        return split
+
+    def _named_take(self, count: int) -> int:
+        """The first of `count` named barriers this body takes for its roles
+        or a ring on PVC (`_named`), id 0 the work-group's own."""
+        from .roles import ESIMD_NAMED_IDS
+        first = self._named + 1
+        self._named += int(count)
+        if self._named >= ESIMD_NAMED_IDS:
+            raise IRError(f'{self._named} named barriers taken, where a PVC '
+                          f'work-group has {ESIMD_NAMED_IDS - 1} besides its '
+                          f'own')
+        return first
 
     def _wave(self) -> int:
         """The target's wave, or 1 for a body built without one."""
@@ -3739,6 +3852,10 @@ class IRBuilder:
         if len(self._stack) != 1:
             raise IRError(f'{len(self._stack) - 1} scope(s) left open')
         body = tuple(self._prologue) + tuple(self._stack[0].body)
+        if self._named:
+            # The named barriers the roles and rings took (PVC, ESIMD),
+            # set up ahead of everything (`engines.named_barriers`).
+            body = (engines.named_barriers(self._named),) + body
         self._check_swizzles_are_total(body)
         return body
 

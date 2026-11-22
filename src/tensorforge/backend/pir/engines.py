@@ -204,7 +204,10 @@ class FenceKind(Enum):
 #: the objects a body creates may be at any scope.
 _KIND_SCOPES = {
     SyncKind.IMPLICIT: (SyncScope.WARP, SyncScope.BLOCK, SyncScope.GRID),
-    SyncKind.NAMED: (SyncScope.MULT, SyncScope.ROLE),
+    # A ring's (`RingSpec`) at the block's or a cluster's scope: Intel's named
+    # barriers, a pair a slot.
+    SyncKind.NAMED: (SyncScope.MULT, SyncScope.ROLE, SyncScope.BLOCK,
+                     SyncScope.CLUSTER),
     SyncKind.MBARRIER: tuple(SyncScope),
     SyncKind.LDS_ARRIVE: tuple(SyncScope),
 }
@@ -345,7 +348,13 @@ class RingSpec:
     would wait for a round no slot is free for.  What the consumers do with
     it, and how far ahead a producer in their program order fills the slots
     they give back, is the code's that drains the ring; the default, 1, is
-    the release of every ring without a later group to wait for."""
+    the release of every ring without a later group to wait for.
+
+    A ring of named barriers (PVC) counts the threads that wait as well as
+    the ones that arrive, a phase: `waiters`, the threads that wait on a
+    slot's full side and on its empty side, and `ident` the first of its
+    barriers' ids -- the full sides from it on, the empty sides behind them
+    (`named_ring_id`).  Unused by every other kind."""
 
     slots: int
     full: int
@@ -356,6 +365,8 @@ class RingSpec:
     kind: SyncKind = SyncKind.MBARRIER
     scope: SyncScope = SyncScope.BLOCK
     hold: int = 1
+    waiters: Tuple[int, int] = (0, 0)
+    ident: int = 0
 
     def __post_init__(self):
         if int(self.slots) < 1:
@@ -379,6 +390,14 @@ class RingSpec:
         if self.producer is not None and self.producer in consumers:
             raise IRError(f'the role {self.producer} fills a ring it drains')
         object.__setattr__(self, 'consumers', consumers)
+        waiters = tuple(int(w) for w in self.waiters)
+        if len(waiters) != 2 or min(waiters) < 0:
+            raise IRError(f'a ring waited on by {self.waiters} threads')
+        object.__setattr__(self, 'waiters', waiters)
+        if self.kind is SyncKind.NAMED and (int(self.ident) < 1
+                                            or not all(waiters)):
+            raise IRError('a ring of named barriers names its first id and '
+                          'the threads that wait on each side')
 
     def role_refusal(self, role: Optional[str], side: str,
                      waits: bool) -> Optional[str]:
@@ -2048,9 +2067,27 @@ def _combined(obj: SyncObjectType, env: Spelling) -> Optional[str]:
     if obj.participants is Participants.ROLE:
         # The role's own named barrier, `threads` of them arriving (PTX
         # ISA, "barrier"): the id each thread computes is its role's.
+        # gfx1250's: the object of the role the wave joined at the kernel's
+        # head (`roles.SETUP`); PVC's under ESIMD: a signal and a wait of
+        # the role's threads, the work-items.
+        if env.family == 'hip':
+            _role_objects(env)
+            return (f'tensorforge::syncNamedBarrier(&{ROLE_OBJECTS}'
+                    f'[{obj.ident}]);')
+        if env.family == 'esimd':
+            # The role's own id, a constant (`RoleSplit.constant`): IGC
+            # 1.0.15468 takes no named barrier whose id is a value.
+            if not str(obj.ident).isdigit():
+                raise IRError(f'a role\'s barrier on PVC names its id as a '
+                              f'value ({obj.ident}): it is a constant, the '
+                              f'role\'s own (`RoleSplit.constant`)')
+            return (f'tensorforge::namedBarrierSync<{obj.ident}, '
+                    f'{obj.threads}>();')
         if env.family not in ('cuda', ''):
+            from .roles import roles_refusal
             raise IRError(f'a role\'s barrier has no spelling on '
-                          f'{env.family}')
+                          f'{env.family}: '
+                          f'{roles_refusal(env.target, 2) or "no roles"}')
         return (f'asm volatile("barrier.sync %0, %1;" :: "r"({obj.ident}), '
                 f'"r"({obj.threads}) : "memory");')
     lex = env.lexic
@@ -2103,7 +2140,7 @@ def _lower_wait_phase(s: Stmt, env: Spelling) -> Lowered:
     holds the phase the wait is for.
     """
     obj = object_of(s)
-    if obj.kind is SyncKind.MBARRIER and obj.slots:
+    if obj.slots:
         return _wait_ring(s, env)
     if obj.kind is SyncKind.MBARRIER:
         return _wait_mbarrier(s, env)
@@ -2111,15 +2148,21 @@ def _lower_wait_phase(s: Stmt, env: Spelling) -> Lowered:
     return Lowered(() if text is None else (text,))
 
 
-def _ring_barrier(s: Stmt, env: Spelling) -> str:
-    """The barrier of a ring's statement: its side's of the slot it names,
-    the full barriers first and the empty ones behind them (`mbarrier_ring`).
-    The block's alone: a statement at a cluster's scope, which every wait
-    and arrival on a ring states (`RingSpec.scope`), has no spelling yet."""
+def _ring_barrier_scope(s: Stmt) -> None:
+    """Refuse a ring's statement at a cluster's scope, which every wait and
+    arrival on a ring states (`RingSpec.scope`): no spelling yet."""
     scope = s.attr('scope')
     if scope is not None and scope is not SyncScope.BLOCK:
         raise IRError(f'{s.op} on a ring at {scope.value} scope: a ring is '
                       f'the block\'s until clusters are built')
+
+
+def _ring_barrier(s: Stmt, env: Spelling) -> str:
+    """The barrier of a ring's statement: its side's of the slot it names,
+    the full barriers first and the empty ones behind them (`mbarrier_ring`).
+    The block's alone: a statement at a cluster's scope has no spelling yet
+    (`_ring_barrier_scope`)."""
+    _ring_barrier_scope(s)
     obj = object_of(s)
     slot = env.name(s.args[0])
     offset = obj.slots if s.attr('side') == 'empty' else 0
@@ -2129,10 +2172,93 @@ def _ring_barrier(s: Stmt, env: Spelling) -> str:
 
 def _wait_ring(s: Stmt, env: Spelling) -> Lowered:
     """The wait of a ring's role for its round of the slot: the parity of
-    the phase it waits to complete (`tensorforge::mbarrierWait`)."""
+    the phase it waits to complete (`tensorforge::mbarrierWait`; on AMD's
+    LDS counters `tensorforge::ldsRingWait`) -- on PVC's named barriers the
+    hardware's next phase of the slot's side, whose order the protocol
+    keeps (`tensorforge::namedRingWait`)."""
+    obj = object_of(s)
+    if obj.kind is SyncKind.LDS_ARRIVE:
+        _spelled_lds_ring(s, env)
+        return Lowered((f'tensorforge::ldsRingWait({_ring_barrier(s, env)}, '
+                        f'{env.name(s.args[1])});',))
+    if obj.kind is SyncKind.NAMED:
+        return _named_ring(s, env, waits=True)
     _spelled_mbarrier(s, env, object_value(s))
     return Lowered((f'tensorforge::mbarrierWait({_ring_barrier(s, env)}, '
                     f'{env.name(s.args[1])});',))
+
+
+#: The array of a kernel's role objects on gfx1250 (`roles.SETUP`): the
+#: element a role's waves joined, at the index their barrier id is.
+ROLE_OBJECTS = 'tfRoles'
+
+
+def _role_objects(env: Spelling) -> None:
+    """Refuse a role's object where the target has none: gfx1250's are what
+    a role meets on under HIP (`roles_refusal`)."""
+    if not getattr(env.hw, 'named_barriers', 0) or not env.amd:
+        from .roles import roles_refusal
+        raise IRError(f'a role\'s barrier has no spelling on '
+                      f'{env.model or "no target"}: '
+                      f'{roles_refusal(env.target, 2) or "no objects"}')
+
+
+def _spelled_lds_ring(s: Stmt, env: Spelling) -> None:
+    """Refuse a ring of LDS counters where the target has no LDS atomics to
+    spell it with: AMD's under HIP alone."""
+    if env.family != 'hip' or not env.amd:
+        raise IRError(f'a ring of LDS counters has no spelling on '
+                      f'{env.family or "no target"}')
+
+
+def named_ring_id(obj: SyncObjectType, side: str) -> int:
+    """The named barrier of slot 0's side `side` of a ring of named
+    barriers, the slots' sides of that kind the ids from it on: the full
+    sides from the ring's first id on, the empty sides behind them
+    (`RingSpec.ident`)."""
+    return obj.ring.ident + (obj.slots if side == 'empty' else 0)
+
+
+def _named_ring(s: Stmt, env: Spelling, waits: bool) -> Lowered:
+    """A ring's wait or arrival on PVC's named barriers (`RingSpec` of kind
+    `named`), under ESIMD: a slot's side is a barrier of its own, whose
+    producers are the side's arrivals and whose consumers its waiters
+    (`RingSpec.waiters`) -- an arrival signals as a producer and goes on
+    (`tensorforge::namedRingArrive`), a wait signals as a consumer and waits
+    (`namedRingWait`).  The hardware keeps a barrier's phases in their
+    order, which the protocol keeps too: the parity a wait names is not
+    spelled.  A consumers' first release of every slot (`prime`) signals
+    each empty side once, so that the producer's first round finds them
+    free.  No transaction count: the producer's copies are its own stores,
+    fenced by the signal.
+
+    Every id and count is a template argument, a compile-time constant:
+    IGC 1.0.15468 (SNG2's under oneAPI 2025.2.1) refuses a named barrier
+    whose id is a value.  The slot, a value -- the round's -- picks its
+    side's barrier in the helper, a branch a slot each naming its barrier
+    as a constant (`namedRingArrive<First, Slots, ...>(slot, ...)`)."""
+    if env.family != 'esimd':
+        raise IRError(f'a ring of named barriers has no spelling on '
+                      f'{env.family or "no target"}')
+    _ring_barrier_scope(s)
+    obj = object_of(s)
+    spec = obj.ring
+    side = s.attr('side')
+    full, empty = spec.waiters
+    counts = ((spec.full, full) if side == 'full' else (spec.empty, empty))
+    if s.attr('tx'):
+        raise IRError(f'{s.op} of {s.attr("tx")} bytes on a ring of named '
+                      f'barriers: they count no transactions')
+    at = (f'{named_ring_id(obj, side)}, {obj.slots}, {counts[0]}, '
+          f'{counts[1]}')
+    if s.attr('prime'):
+        return Lowered((f'tensorforge::namedRingPrime<{at}>'
+                        f'({env.name(s.args[0])});',))
+    if waits:
+        return Lowered((f'tensorforge::namedRingWait<{at}>'
+                        f'({env.name(s.args[0])});',))
+    return Lowered((f'tensorforge::namedRingArrive<{at}>'
+                    f'({env.name(s.args[0])}, {env.name(s.args[1])});',))
 
 
 def _wait_mbarrier(s: Stmt, env: Spelling) -> Lowered:
@@ -2180,8 +2306,21 @@ def _lower_arrive_cuda(s: Stmt, env: Spelling) -> Lowered:
 
 def _lower_arrive_hip(s: Stmt, env: Spelling) -> Lowered:
     """The signal of the multiplication's object, without the wait
-    (`tensorforge::arriveNamedBarrier`), where the device has objects."""
+    (`tensorforge::arriveNamedBarrier`), where the device has objects.
+
+    On a ring of LDS counters (`RingSpec`, kind `lds_arrive`), one arrival
+    at its side of the slot by the thread its operand picks
+    (`tensorforge::ldsRingArrive`): no bytes announced -- a producer waits
+    for its copies ahead of it (`hip.h`)."""
     obj = object_of(s)
+    if obj.slots and obj.kind is SyncKind.LDS_ARRIVE:
+        _spelled_lds_ring(s, env)
+        if s.attr('tx'):
+            raise IRError(f'{s.op} of {s.attr("tx")} bytes on a ring of LDS '
+                          f'counters: they count no transactions, the '
+                          f'producer waits for its copies ahead of it')
+        return Lowered((f'tensorforge::ldsRingArrive('
+                        f'{_ring_barrier(s, env)}, {env.name(s.args[1])});',))
     if obj.kind in (SyncKind.MBARRIER, SyncKind.LDS_ARRIVE):
         raise _phase1(Op.ARRIVE, obj)
     lex = env.lexic
@@ -2194,7 +2333,11 @@ def _lower_arrive_hip(s: Stmt, env: Spelling) -> Lowered:
 
 
 def _lower_arrive_other(s: Stmt, env: Spelling) -> Lowered:
+    """On PVC's named barriers under ESIMD, a ring's arrival
+    (`_named_ring`); nothing else splits there."""
     obj = object_of(s)
+    if obj.slots and obj.kind is SyncKind.NAMED:
+        return _named_ring(s, env, waits=False)
     if obj.kind in (SyncKind.MBARRIER, SyncKind.LDS_ARRIVE):
         raise _phase1(Op.ARRIVE, obj)
     raise _no_split(Op.ARRIVE, obj, env)
@@ -2214,8 +2357,22 @@ def _lower_sync_init(s: Stmt, env: Spelling) -> Lowered:
     obj = object_of(s)
     if obj.kind is SyncKind.MBARRIER:
         return _init_mbarrier(s, env)
+    if obj.slots and obj.kind is SyncKind.LDS_ARRIVE:
+        return _init_lds_ring(s, env)
+    if obj.slots and obj.kind is SyncKind.NAMED:
+        # Nothing to set up: the kernel's count of named barriers holds the
+        # ring's (`named_barriers`), and the consumers' first release frees
+        # its slots (`ring_prime`).
+        if env.family != 'esimd':
+            raise IRError(f'a ring of named barriers has no spelling on '
+                          f'{env.family or "no target"}')
+        return Lowered()
     if obj.kind is SyncKind.LDS_ARRIVE:
         raise _phase1(Op.SYNC_INIT, obj)
+    if obj.participants is Participants.ROLE:
+        return _init_roles(s, env)
+    if s.attr('named') is not None:
+        return _init_named(s, env)
     if not obj.per_mult or env.lexic is None or env.hw is None:
         return Lowered()
     count = s.attr('count', obj.threads)
@@ -2250,6 +2407,59 @@ def _init_mbarrier(s: Stmt, env: Spelling) -> Lowered:
     return Lowered((f'tensorforge::BulkCursor {env.name(s.target[0])} = '
                     f'tensorforge::bulk_arm({env.name(s.args[0])}, '
                     f'{s.attr("leader")});',))
+
+
+def _init_lds_ring(s: Stmt, env: Spelling) -> Lowered:
+    """A ring of LDS counters (`RingSpec`, kind `lds_arrive`): its storage
+    as the 64-bit barriers they are, under the ring's name, and the thread
+    `leader` names setting each slot's pair up -- the full barrier for
+    `full` arrivals a phase, the empty one for `empty`
+    (`tensorforge::ldsRingInit`), as an mbarrier ring's are set up."""
+    _spelled_lds_ring(s, env)
+    obj = object_of(s)
+    ring = env.name(s.target[0])
+    return Lowered((
+        f'uint64_t * {ring} = reinterpret_cast<uint64_t *>('
+        f'&{env.name(s.args[0])}[0]);',
+        f'if ({s.attr("leader")}) {{',
+        f'  for (int r = 0; r < {obj.slots}; ++r) {{',
+        f'    tensorforge::ldsRingInit(&{ring}[r], {s.attr("full")});',
+        f'    tensorforge::ldsRingInit(&{ring}[{obj.slots} + r], '
+        f'{s.attr("empty")});',
+        '  }',
+        '}'))
+
+
+def _init_roles(s: Stmt, env: Spelling) -> Lowered:
+    """The objects of a kernel's roles on gfx1250 (`roles.setup`): the
+    array, one object a role in the order of their ids, and every wave
+    setting each role's count of waves and joining its own role's
+    (`tensorforge::joinRoleBarriers`) -- at the kernel's head, where every
+    wave of the block arrives, as the prologue holds the block's barrier.
+    Nothing on NVIDIA, whose `bar.sync` names its id at the instruction."""
+    if env.family in ('cuda', ''):
+        return Lowered()
+    if env.family != 'hip':
+        from .roles import roles_refusal
+        raise IRError(f'roles on {env.family}: '
+                      f'{roles_refusal(env.target, 2) or "no objects"}')
+    _role_objects(env)
+    waves = ', '.join(str(int(w)) for w in s.attr('waves'))
+    return Lowered((
+        f'__shared__ __amdgpu_named_workgroup_barrier_t '
+        f'{ROLE_OBJECTS}[{len(s.attr("waves"))}];',
+        f'tensorforge::joinRoleBarriers<{waves}>({ROLE_OBJECTS}, '
+        f'{s.attr("ident")});'))
+
+
+def _init_named(s: Stmt, env: Spelling) -> Lowered:
+    """The named barriers a kernel's roles and rings take on PVC under ESIMD
+    (`named_barriers`), its first statement: their count, the work-group's
+    own barrier besides (`tensorforge::namedBarriersInit`)."""
+    if env.family != 'esimd':
+        raise IRError(f'named barriers have no spelling on '
+                      f'{env.family or "no target"}')
+    return Lowered((f'tensorforge::namedBarriersInit<{s.attr("named")}>();',))
 
 
 #: vISA's software fence: a barrier to the scheduler that emits nothing
@@ -3864,7 +4074,10 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     OpSpec(Op.SYNC_INIT, operands=(_OBJECT, Slot('count', _INT, False),
                                    Slot('objects', _INT, False),
                                    Slot('leader', (str,), False),
-                                   Slot('extern', (str,), False)),
+                                   Slot('extern', (str,), False),
+                                   Slot('waves', (tuple,), False),
+                                   Slot('ident', (str,), False),
+                                   Slot('named', _INT, False)),
            results=(), effect=_SYNC, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other', lower={'*': _lower_sync_init},
@@ -4382,6 +4595,151 @@ def ring_arrive(ring: Value, side: str, slot: Operand, issue: Operand, *,
     return _stmt(Op.ARRIVE, attrs, args=(slot, issue) + tuple(tokens))
 
 
+def named_ring_init(ring: Value, *, leader: str, extern: str) -> Stmt:
+    """The setup of a ring of named barriers (`RingSpec` of kind `named`,
+    PVC): nothing on the device -- its barriers are the kernel's
+    (`named_barriers`) -- but the statement that defines `ring`, which
+    `extern` names, as a ring's setup does (`ring_init`)."""
+    return _stmt(Op.SYNC_INIT, (('leader', leader), ('extern', extern)),
+                 target=(ring,))
+
+
+def ring_prime(ring: Value, issue: Operand) -> Stmt:
+    """The consumers' first release of every slot of the ring `ring`, by
+    the threads `issue` picks, ahead of their first round: what a ring of
+    named barriers needs (`_named_ring`), whose hardware keeps its phases
+    in order and has no phase before the first to find complete -- an
+    mbarrier's and an LDS counter's parity protocol finds the slots free
+    without it, and no such ring takes one (`IRBuilder.ring_prime`)."""
+    return _stmt(Op.ARRIVE, (('object', ring), ('side', 'empty'),
+                             ('scope', _ring_scope(ring)), ('prime', True)),
+                 args=(issue,))
+
+
+def role_setup(obj: SyncObjectType, waves: Sequence[int], ident: str
+               ) -> Stmt:
+    """The objects of a block's roles set up at the kernel's head
+    (`roles.setup`): one a role, `waves[k]` waves of the role whose
+    barrier id is `k`, every wave joining the object of its role, the
+    one `ident` computes -- gfx1250's (`_init_roles`); nothing on NVIDIA.
+    `obj` is a role's object, which names the kind."""
+    return _stmt(Op.SYNC_INIT, (('object', obj),
+                                ('waves', tuple(int(w) for w in waves)),
+                                ('ident', ident)))
+
+
+def named_barriers(count: int) -> Stmt:
+    """The count of named barriers a kernel's roles and rings take, at its
+    head (PVC under ESIMD, `_init_named`)."""
+    return _stmt(Op.SYNC_INIT, (('object', SyncObjectType(
+        SyncScope.BLOCK, SyncKind.NAMED, Participants.BLOCK)),
+        ('named', int(count))))
+
+
+#: Why roles and rings are refused on PVC (`ring_refusal`, `roles.roles_refusal`).
+#: On the PVC they were tested on -- SNG2: oneAPI 2025.2.1, IGC 1.0.15468, driver
+#: 23.43.27642; jobs 564774, 564780 and 564782 (~/tf-probe/roles/sng2-ring,
+#: sng2-diag, sng2-diag2) -- every kernel hangs at its first named barrier,
+#: Intel's own pattern of them included (intel/llvm's sycl/test-e2e/ESIMD/
+#: named_barriers/single_wg.cpp, which the protocol here follows: init with id 0
+#: the unnamed barrier's, flag 1 a producer, 2 a consumer, the counts the
+#: producers' and the consumers').  That IGC writes a signal,
+#: `llvm.genx.nbarrier.arrive(id, flag, producers, consumers)`, as vISA's
+#: `nbarrier.signal <flag> <producers>`: the flag in the barrier id's place, the
+#: consumers' count dropped -- every signal reaches barrier 0, 1 or 2 by its
+#: flag, and no wait completes.  IGC 2.7.11 and 2.41.5 write the whole message
+#: to the gateway (`raw_sends.3`), and under 2.41.5 the same PVC, runtime and
+#: driver run every case (job 564784, ~/tf-probe/roles/sng2-igc241): Intel's
+#: pattern in all its forms, these helpers' signals and waits, and the ring as
+#: the lowering writes it -- two and three slots, two to eight consumers, 64
+#: and 2048 rounds over 512 work-groups, no value of up to 134M differing.
+#: So the lowering asks the IGC the build will run how it writes a signal
+#: (`pvc_named_refusal`, `toolchain.intel_named_barrier_signal`) and refuses
+#: PVC where it writes the old form, or where there is none to ask.
+PVC_REFUSAL = ('named barriers hang where IGC writes a signal from the wrong '
+               'operands (vISA `nbarrier.signal <flag> <producers>`), as IGC '
+               '1.0.15468 does -- SNG2: oneAPI 2025.2.1, driver 23.43.27642; '
+               'jobs 564774, 564780, 564782, Intel\'s own pattern included -- '
+               'and the IGC behind this build writes it so '
+               '(`toolchain.intel_named_barrier_signal`): roles and rings on '
+               'PVC refused')
+
+#: Why roles and rings are refused on PVC where no IGC can be asked.
+PVC_UNPROBED = ('no icpx and ocloc to ask how their IGC writes a named '
+                'barrier\'s signal (`toolchain.intel_named_barrier_signal`), '
+                'which IGC 1.0.15468 writes so that every wait hangs: roles '
+                'and rings on PVC refused')
+
+#: Lowers roles and rings on PVC (True) or refuses them (False) whatever the
+#: IGC behind the build; None asks it (`pvc_named_refusal`).
+PVC_NAMED_BARRIERS: Optional[bool] = None
+
+
+def pvc_named_refusal() -> Optional[str]:
+    """Why roles and rings are refused on PVC, or None: the IGC behind an
+    ahead-of-time build must write a named barrier's signal as the whole
+    gateway message (`toolchain.intel_named_barrier_signal`); its old form
+    hangs every wait (`PVC_REFUSAL`), and with no IGC to ask, the answer is
+    no (`PVC_UNPROBED`).  `PVC_NAMED_BARRIERS` overrides the question."""
+    if PVC_NAMED_BARRIERS is not None:
+        return None if PVC_NAMED_BARRIERS else PVC_REFUSAL
+    from tensorforge.toolchain import intel_named_barrier_signal
+    form = intel_named_barrier_signal()
+    if form == 'gateway':
+        return None
+    return PVC_UNPROBED if form is None else PVC_REFUSAL
+
+
+def ring_kind(target: Any) -> SyncKind:
+    """What a ring's barriers are on `target` (`RingSpec.kind`): mbarriers
+    under CUDA (and without a target), LDS counters on AMD, named barriers
+    on PVC under ESIMD -- refused, with the reason, elsewhere
+    (`ring_refusal`)."""
+    why = ring_refusal(target)
+    if why is not None:
+        raise IRError(f'no ring on {family(target) or "no target"}: {why}')
+    fam = family(target)
+    if fam == 'hip':
+        return SyncKind.LDS_ARRIVE
+    if fam == 'esimd':
+        return SyncKind.NAMED
+    return SyncKind.MBARRIER
+
+
+def ring_refusal(target: Any) -> Optional[str]:
+    """Why `target` has no ring, or None.  CUDA's mbarriers wait for a
+    phase's parity from sm_90 on (`mbarrier.try_wait.parity`); AMD's rings
+    are LDS counters, which every AMD device has the atomics for; PVC's
+    under ESIMD named barriers, where the IGC behind the build writes their
+    signal right (`pvc_named_refusal`).  SYCL's SPMD lowering has no barrier
+    over part of a work-group, nor an object with phases: none."""
+    fam = family(target)
+    if fam == '':
+        return None
+    if fam == 'cuda':
+        level = target.hw.sm_level() if getattr(
+            target.hw, 'vendor', None) == 'nvidia' else None
+        if level is None or level < 90:
+            return (f'a ring\'s waits are mbarriers\' for a phase\'s parity '
+                    f'(mbarrier.try_wait.parity), from sm_90 on, not '
+                    f'{target.hw.model}')
+        return None
+    if fam == 'hip':
+        return None if getattr(target.hw, 'vendor', None) == 'amd' else (
+            'a ring of LDS counters is AMD\'s')
+    if fam == 'esimd':
+        if str(target.hw.model) != 'pvc':
+            return f'named barriers are PVC\'s, not {target.hw.model}\'s'
+        return pvc_named_refusal()
+    if fam == 'sycl':
+        return ('SYCL\'s SPMD lowering has no barrier over part of a '
+                'work-group and no object with phases to hand a slot over '
+                'on -- the work-group\'s split barrier '
+                '(SPV_INTEL_split_barrier, not enabled by default) is the '
+                'whole work-group\'s, a phase at a time')
+    return f'no ring on {fam}'
+
+
 def sync_init_value(obj: Value, storage: Value, *, leader: str,
                     extern: Optional[str] = None,
                     count: int = 1) -> Stmt:
@@ -4666,6 +5024,10 @@ __all__ = [
     'lds_dma_refusal', 'mbarrier', 'mbarrier_ring', 'movable_of',
     'object_value', 'on_ring', 'ring_arrive', 'ring_init', 'ring_wait',
     'RING_SIDES', 'RING_KINDS', 'RING_SCOPES', 'RingSpec', 'ring_spec',
+    'ROLE_OBJECTS', 'named_barriers', 'named_ring_id', 'named_ring_init',
+    'ring_kind', 'PVC_NAMED_BARRIERS', 'PVC_REFUSAL', 'PVC_UNPROBED',
+    'pvc_named_refusal',
+    'ring_prime', 'ring_refusal', 'role_setup',
     'one_to_one', 'sync_init_value', 'waited_on', 'width_of',
     'PRIORITY_WAVES', 'REGISTRY', 'Slot', 'Spelling', 'SyncKind',
     'SyncObjectType', 'SyncScope', 'arrival_of', 'arrive', 'barrier',

@@ -791,3 +791,83 @@ def intel_dpas_tf32(device: str = 'pvc',
             answer = None
         _DPAS_TF32[key] = answer
     return _DPAS_TF32[key]
+
+
+#: A named barrier's signal and wait under ESIMD, for the IGC behind an
+#: ahead-of-time build to write (`intel_named_barrier_signal`).
+_NAMED_SIGNAL_PROBE = r'''#include <sycl/sycl.hpp>
+#include <sycl/ext/intel/esimd.hpp>
+void probe(sycl::queue &q) {
+  q.parallel_for(sycl::nd_range<1>(2, 2), [=](sycl::nd_item<1>) SYCL_ESIMD_KERNEL {
+    sycl::ext::intel::esimd::named_barrier_init<2>();
+    sycl::ext::intel::esimd::named_barrier_signal(1, 1, 1, 1);
+    sycl::ext::intel::esimd::named_barrier_wait(1);
+  });
+}
+'''
+
+_NAMED_SIGNAL: Dict[Tuple[str, str], Optional[str]] = {}
+
+
+def named_barrier_signal_form(visa: str) -> Optional[str]:
+    """How a vISA listing writes a named barrier's signal: `gateway` -- the
+    whole message to the gateway, id, flag and both counts in its payload
+    (`raw_sends.3`), as IGC 2.7.11 and 2.41.5 write it; `flag-producers` --
+    vISA's `nbarrier.signal <flag> <producers>`, the flag in the barrier
+    id's place and the consumers' count dropped, as IGC 1.0.15468 writes
+    `llvm.genx.nbarrier.arrive(id, flag, producers, consumers)`, whose waits
+    never complete; None where the listing has neither."""
+    if re.search(r'^\s*nbarrier\.signal\b', visa, re.M):
+        return 'flag-producers'
+    if re.search(r'^\s*raw_sends?\.3\b', visa, re.M):
+        return 'gateway'
+    return None
+
+
+def intel_named_barrier_signal(device: str = 'pvc',
+                               icpx: Optional[str] = None) -> Optional[str]:
+    """How the IGC behind an ahead-of-time ESIMD build -- `icpx` (the one
+    `COMPILERS['esimd']` finds) and the `ocloc` on PATH it runs -- writes a
+    named barrier's signal for `device` (`named_barrier_signal_form`), or
+    None where there is no toolchain to ask or its listing says neither.
+
+    Asked by building a kernel that signals, IGC writing its listings
+    (`IGC_ShaderDumpEnable`), since nothing else says so: the runtime and
+    the driver are not the compiler, and IGC 1.0.15468 reports "Build
+    succeeded" for a signal that hangs every wait (SNG2, jobs 564780 and
+    564782).  Asked once per `icpx`, `ocloc` and device, in a directory of
+    its own."""
+    import subprocess
+    import tempfile
+    path = icpx or COMPILERS['esimd'].find()
+    ocloc = shutil.which('ocloc')
+    if path is None or ocloc is None:
+        return None
+    key = (path, ocloc, device)
+    if key not in _NAMED_SIGNAL:
+        answer: Optional[str] = None
+        try:
+            with tempfile.TemporaryDirectory() as cwd:
+                with open(os.path.join(cwd, 'probe.cpp'), 'w') as f:
+                    f.write(_NAMED_SIGNAL_PROBE)
+                listing = os.path.join(cwd, 'listing')
+                env = {**os.environ, 'IGC_ShaderDumpEnable': '1',
+                       'IGC_DumpToCustomDir': listing}
+                p = subprocess.run(
+                    [path, '-fsycl', '-fsycl-targets=spir64_gen',
+                     '-Xsycl-target-backend', f'-device {device}', '-O2',
+                     '-shared', '-fPIC', 'probe.cpp', '-o', 'probe.so'],
+                    cwd=cwd, env=env, capture_output=True, text=True,
+                    timeout=600)
+                if p.returncode == 0 and os.path.isdir(listing):
+                    visa = ''
+                    for name in sorted(os.listdir(listing)):
+                        if name.endswith('.visaasm'):
+                            with open(os.path.join(listing, name),
+                                      errors='replace') as f:
+                                visa += f.read()
+                    answer = named_barrier_signal_form(visa)
+        except (OSError, subprocess.SubprocessError):
+            answer = None
+        _NAMED_SIGNAL[key] = answer
+    return _NAMED_SIGNAL[key]

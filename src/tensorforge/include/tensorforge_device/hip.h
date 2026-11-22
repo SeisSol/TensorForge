@@ -1835,5 +1835,87 @@ __device__ __forceinline__ void arriveNamedBarrier(Barrier *barrier) {
 #endif
 }
 
+/// What a kernel in roles opens with (`pir.roles`): the objects of the
+/// roles, `barriers`, one a role, each given its role's count of waves
+/// `Waves` -- every wave sets every count, before anyone may signal, as
+/// `joinNamedBarrier` sets its multiplication's -- then the block's own
+/// barrier, then each wave's membership of its own role's object, `role`.
+/// A wave waits on the object it joined last and on no other, so a kernel in
+/// roles takes no multiplication's objects.  A role's rendezvous is then
+/// `syncNamedBarrier(&barriers[role])`, of the role's waves alone.
+template <unsigned... Waves, typename Barrier>
+__device__ __forceinline__ void joinRoleBarriers(Barrier *barriers,
+                                                 unsigned role) {
+#if defined(__gfx1250__) || defined(__gfx1251__)
+  unsigned object = 0;
+  ((__builtin_amdgcn_s_barrier_init(&barriers[object++], Waves)), ...);
+  __syncthreads();
+  __builtin_amdgcn_s_barrier_join(&barriers[role]);
+#elif defined(__HIP_DEVICE_COMPILE__)
+  static_assert(sizeof(Barrier) == 0,
+                "named barriers exist on gfx1250 and gfx1251 only");
+#endif
+}
+
+#if defined(__HIP_PLATFORM_AMD__)
+
+// -- rings of LDS counters (AMD) ----------------------------------------------
+//
+// A ring's barrier (`IRBuilder.mbarrier_ring`, `engines.RingSpec` of kind
+// `lds_arrive`): one 64-bit word in the LDS, the arrivals a phase counts in
+// its low half and the arrivals so far in its high half.  The leader sets the
+// count once, and a block barrier behind it shows the word to every wave
+// (`ldsRingInit`); an arrival adds one to the high half, a release at the
+// work-group's scope of what the arriving thread wrote ahead of it
+// (`ldsRingArrive`); a wait for the phase of parity `parity` polls, an
+// acquire, until the phases completed so far -- the arrivals over the count
+// -- have the other parity, asleep between the polls (`ldsRingWait`).  The
+// parity protocol of an mbarrier (`cuda.h`, `mbarrierWait`): a wait for the
+// parity before the first phase returns at once, which is how a producer's
+// first round finds the slots free.
+//
+// No transaction count: a producer waits for its own copies -- the tensor
+// data mover's on `tensorcnt`, the asynchronous loads into the LDS on
+// `asynccnt` -- ahead of its arrival.  gfx1250's own LDS barrier
+// (DS_ATOMIC_BARRIER_ARRIVE, which the tensor data mover can arrive on as a
+// copy completes) is the later form: the width of its phase field is
+// configurable, and where that is set the CDNA 5 ISA guide does not say,
+// which the wait has to decode.  Written from the ISA's atomics and
+// `s_sleep`; compiled for gfx1250 and for CDNA, run on no device.
+
+/// Set the barrier at `barrier` up for `count` arrivals a phase.
+__device__ __forceinline__ void ldsRingInit(std::uint64_t *barrier,
+                                            std::uint32_t count) {
+  *barrier = count;
+}
+
+/// One arrival at the barrier at `barrier`, by the thread `issue` picks.
+__device__ __forceinline__ void ldsRingArrive(std::uint64_t *barrier,
+                                              bool issue) {
+  if (issue) {
+    __hip_atomic_fetch_add(barrier, std::uint64_t(1) << 32, __ATOMIC_RELEASE,
+                           __HIP_MEMORY_SCOPE_WORKGROUP);
+  }
+}
+
+/// Wait until the phase of parity `parity` of the barrier at `barrier` has
+/// completed: what the arrivals of that phase wrote ahead of them is visible
+/// behind this.
+__device__ __forceinline__ void ldsRingWait(std::uint64_t *barrier,
+                                            std::uint32_t parity) {
+  while (true) {
+    const std::uint64_t word = __hip_atomic_load(barrier, __ATOMIC_ACQUIRE,
+                                                 __HIP_MEMORY_SCOPE_WORKGROUP);
+    const std::uint32_t phases = static_cast<std::uint32_t>(word >> 32) /
+                                 static_cast<std::uint32_t>(word);
+    if ((phases & 1u) != (parity & 1u)) {
+      break;
+    }
+    __builtin_amdgcn_s_sleep(1);
+  }
+}
+
+#endif // __HIP_PLATFORM_AMD__
+
 } // namespace tensorforge
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_HIP_H_
