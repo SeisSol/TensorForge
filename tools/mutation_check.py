@@ -4732,7 +4732,7 @@ GROUPS = {
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '                for ia, ib in terms:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0 if first else 1, layouts=layouts)\n',
              '                for ia, ib in terms:\n                    b.wgmma(n, halves[ia], bs[ib], accs,\n                            scale_d=0, layouts=layouts)\n', 1)),
         ("the products without A's lower half",
-         sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), '    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))\n',
+         sub(Path('src/tensorforge/generators/element_group.py'), '    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))\n',
              '    return ((0, 0), (0, 1)) if stage.split else ((0, 0),)\n', 1)),
         ('no wait for the products',
          sub(Path('src/tensorforge/backend/instructions/compute/multi_element.py'), "    b.matrix_wait('wgmma', keep, registers=registers,\n                  reads=[x for _, reads in done for x in reads])\n",
@@ -6298,6 +6298,32 @@ GROUPS = {
         ('the bulk output at the cost of the group',
          sub(ME_GROUP, '        lowerings[:] = [twin for t in lowerings\n'
                        '                        for twin in _output_twins(t)]\n', '', 1)),
+    ]),
+    # F32's accuracy first in the multi-element plans: no asynchronous
+    # engine reads an operand in TF32 alone unless the options let it
+    # (`element_group.tf32_refusal`, `prefer_mma_sync`, `async_terms`).
+    'opprec': ('tests/test_precision_first.py', [
+        ('the check passing every plan',
+         sub(ME_GROUP, '    full = set(nvidia.TF32_TERMS)\n    for step in section.steps:\n',
+             '    return None\n    full = set(nvidia.TF32_TERMS)\n    for step in section.steps:\n', 1)),
+        ("a whole B's two terms taken for 3xTF32's three",
+         sub(ME_GROUP, '    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))\n',
+             '    return nvidia.TF32_TERMS\n', 1)),
+        ('the option ignored',
+         sub(ME_GROUP, "    return bool(getattr(context.get_user_options(), 'matrix_tf32_operands',\n",
+             "    return False and bool(getattr(context.get_user_options(), 'matrix_tf32_operands',\n", 1)),
+        ('the asynchronous engine whatever group mma_sync holds',
+         sub(ME_GROUP, '    return min(mma_elements, cap) > asynchronous_elements\n',
+             '    return False\n', 1)),
+        ("mma_sync's group not held to the engine's lane limit",
+         sub(ME_GROUP, '    return min(mma_elements, cap) > asynchronous_elements\n',
+             '    return mma_elements > asynchronous_elements\n', 1)),
+        ("the generator's check of the plan dropped",
+         sub(GEN, '    if refused is not None:\n      raise InternalError(',
+             '    if False:\n      raise InternalError(', 1)),
+        ("the kernel's comment silent on the engine declined",
+         sub(ME_GROUP, '    notes = [section.engine_note] if section.engine_note else []\n',
+             '    notes = []\n', 1)),
     ]),
     # The host oracle's arms of an `if` as coroutines that hand over at a
     # pending ring wait (`kernel_eval.Lockstep._arms`, `COROUTINE_ARMS`).

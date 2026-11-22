@@ -4552,6 +4552,12 @@ class Generator:
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
+    # An F32 plan reads every operand in both TF32 halves, unless the options
+    # let it trade (`element_group.tf32_refusal`).
+    refused = element_group.tf32_refusal(section, self._context)
+    if refused is not None:
+      raise InternalError(f'a multi-element plan reads an operand in TF32 '
+                          f'alone: {refused}')
     # The stages the plan sized as prepared and streamed, and no others.
     staged = [[(st.tensor.alias, st.window, st.prepared, st.streamed)
                for st in s.stages]
@@ -5214,6 +5220,9 @@ class Generator:
       for note in element_group.star_notes(self._element_group.section,
                                            self._context):
         writer(f'// star step: {note}')
+      for note in element_group.precision_notes(
+          self._element_group.section, self._context):
+        writer(f'// matrix engine: {note}')
       for note in element_group.output_notes(self._element_group.section,
                                              self._context):
         writer(f'// output: {note}')

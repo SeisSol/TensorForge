@@ -557,6 +557,10 @@ class GroupSection:
     #: those steps compute A themselves, a block of K of every product at a
     #: time, into the engine's operand memory (`Buffer.held`).
     star: str = ''
+    #: Why the fill rule took mma_sync over the target's asynchronous
+    #: engine, for the kernel's comment (`precision_notes`); '' where it
+    #: did not.
+    engine_note: str = ''
 
     @property
     def chained(self) -> bool:
@@ -1456,6 +1460,65 @@ def _halves_order(lowerings: Sequence[GroupSection]) -> List[GroupSection]:
     return out
 
 
+def async_terms(stage) -> Tuple[Tuple[int, int], ...]:
+    """The products a step of K of an asynchronous engine (wgmma, tcgen05)
+    issues for an F32 product, as `(A's half, B's half)`: 3xTF32's three
+    (`nvidia.TF32_TERMS`) where B is staged in its halves; A's two halves
+    by B's one where B is staged whole -- B read in TF32 alone, which only
+    `Options.matrix_tf32_operands` lets a plan do (`tf32_refusal`).  A is
+    always in both halves: split where it is read, or written so."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))
+
+
+def tf32_operands(context) -> bool:
+    """Whether the options let an F32 plan read an operand in TF32 alone
+    (`Options.matrix_tf32_operands`)."""
+    return bool(getattr(context.get_user_options(), 'matrix_tf32_operands',
+                        False))
+
+
+def tf32_refusal(section: GroupSection, context) -> Optional[str]:
+    """Why a plan of an F32 section is refused for reading an operand in
+    TF32 alone -- an asynchronous step whose products are not 3xTF32's
+    three (`async_terms`), B staged whole -- or None: the plan keeps F32's
+    accuracy, the section is not F32, or the options let it trade
+    (`Options.matrix_tf32_operands`).  The fill rule takes no plan this
+    refuses, and the generator checks the plan it lowers again: a change
+    of the fill cannot bring the trade back without the option."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    if section.dtype is not Datatype.F32 or tf32_operands(context):
+        return None
+    full = set(nvidia.TF32_TERMS)
+    for step in section.steps:
+        if step.lowering not in ASYNC_LOWERINGS:
+            continue
+        for p in step.products:
+            if p.kind is not Kind.OPERATOR:
+                continue
+            stage = section.stage(p.first.tensor, (p.rows, p.depth))
+            if set(async_terms(stage)) != full:
+                return (f'{step.lowering} would read {p.first.tensor.alias} '
+                        f'in TF32 alone, two of 3xTF32\'s three products '
+                        f'(about 2^-11 relative a product against 2^-22): '
+                        f'it needs Options.matrix_tf32_operands')
+    return None
+
+
+def prefer_mma_sync(asynchronous_elements: int, mma_elements: int,
+                    cap: int) -> bool:
+    """Whether the fill rule takes mma_sync's group over the asynchronous
+    engine's, both keeping F32's accuracy: where mma_sync holds the larger
+    group -- counted to at most `cap`, the most the asynchronous engine
+    takes of the section at all (`engine_elements`: tcgen05's 128 lanes,
+    wgmma's whole warpgroups), so that its lane limit alone does not give
+    a section to mma_sync.  A rule of thumb standing in for the cost
+    model, which is to replace this function: what the asynchronous
+    engine at a smaller group costs against mma_sync at a larger one is
+    measured nowhere yet (11-21)."""
+    return min(mma_elements, cap) > asynchronous_elements
+
+
 def matrix_enabled(context) -> bool:
     """Whether operator steps are tiled on the matrix engines:
     `Options.tensor_cores` where it is set, `MATRIX` where it is not."""
@@ -1938,6 +2001,25 @@ def star_volume(section: GroupSection, elements: int) -> int:
         total += (groups * STAR_SLOTS['wgmma'] * 64 * STAR_ROWS * 2
                   * len(step.products))
     return total
+
+
+def precision_notes(section: GroupSection, context) -> List[str]:
+    """What the kernel's comment says of the matrix engine the fill rule
+    chose for an F32 section, where it is not the target's asynchronous one
+    for the accuracy it keeps (`GroupSection.engine_note`), or of the
+    reduced precision the options let it take (`tf32_operands`)."""
+    notes = [section.engine_note] if section.engine_note else []
+    if section.dtype is Datatype.F32 and tf32_operands(context):
+        whole = sorted({p.first.tensor.alias for step in section.steps
+                        if step.lowering in ASYNC_LOWERINGS
+                        for p in step.products if p.kind is Kind.OPERATOR
+                        and not section.stage(p.first.tensor,
+                                              (p.rows, p.depth)).split})
+        if whole:
+            notes.append(f'{", ".join(whole)} read in TF32 alone, two of '
+                         f'3xTF32\'s three products (about 2^-11 relative a '
+                         f'product): Options.matrix_tf32_operands')
+    return notes
 
 
 def star_notes(section: GroupSection, context) -> List[str]:
@@ -2985,7 +3067,12 @@ def fill(section: GroupSection, context,
                               streamed=streamed(t), prepared=asked,
                               output=output)
                         for t in list(tilings) if t.star]
-        tilings.append(lower(section, context, star=star, output=output))
+        if not asynchronous(tilings[0]) or tf32_operands(context):
+            # B whole: mma_sync splits it where it reads it; the
+            # asynchronous engines read it in TF32 alone, which only the
+            # option lets a plan do (`tf32_refusal`).
+            tilings.append(lower(section, context, star=star,
+                                 output=output))
     candidates = [(tilings, None)] if tilings else []
     if tilings and asynchronous(tilings[0]):
         held = [lower(section, context, split=True, engine='mma_sync',
@@ -3037,8 +3124,14 @@ def fill(section: GroupSection, context,
         # the group keeps them, and its comment says why (`output_notes`).
         lowerings[:] = [twin for t in lowerings
                         for twin in _output_twins(t)]
-    candidates = [lowerings for lowerings, _ in candidates]
-    for lowerings in candidates:
+        # No plan that reads an operand of an F32 section in TF32 alone,
+        # unless the options let it (`tf32_refusal`).
+        lowerings[:] = [t for t in lowerings
+                        if tf32_refusal(t, context) is None]
+    candidates = [(lowerings, engine) for lowerings, engine in candidates
+                  if lowerings]
+
+    def first_fit(lowerings):
         elements = table_elements(lowerings[0])
         while True:
             for lowered in lowerings:
@@ -3057,10 +3150,51 @@ def fill(section: GroupSection, context,
                                  if lowered.registers else PRODUCER_WARPS)
                 if (need <= budget
                         and 32 * warps <= hw.max_threads_per_block):
-                    return ElementGroup(taken, lowered, need), ''
+                    return ElementGroup(taken, lowered, need)
             if elements <= MIN_ELEMENTS:
-                break
+                return None
             elements = max(MIN_ELEMENTS, elements // 2)
+
+    for i, (lowerings, engine) in enumerate(candidates):
+        group = first_fit(lowerings)
+        if group is None:
+            continue
+        held = (candidates[i + 1] if i + 1 < len(candidates)
+                and candidates[i + 1][1] == 'mma_sync' else None)
+        if engine is None and held is not None \
+                and asynchronous(group.section):
+            # The target's asynchronous engine with every operand in both
+            # halves, against mma_sync, which splits B where it reads it:
+            # the larger group (`prefer_mma_sync`, the cost model's to
+            # replace), up to the engine's own lane limit.
+            other = first_fit(held[0])
+            # The most the engine takes of the section in the lowering the
+            # fill rule chose -- its lanes, and whole warpgroups where a
+            # producer moves registers (`Options.element_registers`).
+            chosen = group.section
+            cap = engine_elements(chosen, table_elements(chosen)) or 0
+            if chosen.registers:
+                cap -= cap % WARPGROUP_WARPS
+            if other is not None and prefer_mma_sync(
+                    group.elements, other.elements, cap):
+                engines = sorted({s.lowering for s in group.section.steps
+                                  if s.lowering in ASYNC_LOWERINGS})
+                note = (f'{"/".join(engines)} declined: with every operand '
+                        f'in both TF32 halves it holds a group of '
+                        f'{group.elements}, mma_sync -- B split where it '
+                        f'reads it -- {other.elements} (prefer_mma_sync)')
+                if not tf32_operands(context):
+                    whole = first_fit([lower(section, context, star=star,
+                                             output=output)])
+                    if whole is not None and whole.elements > \
+                            group.elements:
+                        note += (f'; B read whole, in TF32 alone, would '
+                                 f'hold {whole.elements} '
+                                 f'(Options.matrix_tf32_operands)')
+                return dataclasses.replace(other, section=dataclasses.replace(
+                    other.section, engine_note=note)), ''
+        return group, ''
+    candidates = [lowerings for lowerings, _ in candidates]
     return None, (f'the operators and a group of {MIN_ELEMENTS} take '
                   f'{shared_bytes(candidates[-1][0], MIN_ELEMENTS)} B of '
                   f'shared memory, more than the {budget} B a block has: the '
@@ -3138,6 +3272,8 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
            'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
            'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
+           'async_terms', 'precision_notes', 'prefer_mma_sync',
+           'tf32_operands', 'tf32_refusal',
            'output_asked', 'output_geometry', 'output_notes', 'output_of',
            'output_refusal', 'output_volume',
            'star_mixes', 'star_notes', 'star_volume',

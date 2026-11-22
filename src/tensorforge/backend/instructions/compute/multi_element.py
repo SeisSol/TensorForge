@@ -1656,12 +1656,10 @@ def _round_up(value: int, step: int) -> int:
 
 def _terms(stage):
     """The products of a step of K on an asynchronous engine, as `(A's
-    half, B's half)`: 3xTF32's three where B is split (`TF32_TERMS`); A's
-    two halves by B's one where it is not, as mma_sync's tiling takes a B
-    staged whole -- the operator then read in TF32, where its halves would
-    not leave the group room."""
-    from tensorforge.backend.instructions.compute.primitives import nvidia
-    return nvidia.TF32_TERMS if stage.split else ((0, 0), (1, 0))
+    half, B's half)` (`element_group.async_terms`, which the plan's check
+    of F32's accuracy reads too, `tf32_refusal`)."""
+    from tensorforge.generators.element_group import async_terms
+    return async_terms(stage)
 
 
 def _ring(trip, step, stages):

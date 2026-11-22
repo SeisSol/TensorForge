@@ -2694,6 +2694,23 @@ declare('matrix_ring_slots',
             'converting ring\'s two of thirty-two, so that the group keeps '
             'its size.')
 
+declare('matrix_tf32_operands',
+        default=False,
+        env='TF_MATRIX_TF32_OPERANDS',
+        parse=parse_bool,
+        doc='Lets a multi-element plan of an F32 section have an asynchronous '
+            'engine (wgmma, tcgen05) read an operator whole, in TF32 alone: '
+            'B staged as floats and multiplied as A\'s two halves by B\'s '
+            'one, two of 3xTF32\'s three products -- B rounded to TF32\'s '
+            'ten bits of mantissa, about 2^-11 relative a product against '
+            '3xTF32\'s 2^-22 -- where B\'s halves would cost the group its '
+            'size.  Off, the default: an F32 plan reads every operand in '
+            'both halves (`element_group.tf32_refusal`, which refuses any '
+            'other); where B\'s halves do not fit the engine\'s group, the '
+            'fill rule takes a smaller group, or mma_sync, which splits B at '
+            'the read, or the FMA forms, and the kernel\'s comment says '
+            'which and why.  For experiments; never a silent trade.')
+
 declare('matrix_star',
         default='buffer',
         env='TF_MATRIX_STAR',

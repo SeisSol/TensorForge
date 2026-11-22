@@ -127,13 +127,18 @@ def test_b_keeps_its_halves_ahead_of_a():
     """On the asynchronous engines B whole is B in TF32
     (`multi_element._terms`), while A's halves spare work: `halves` takes
     them only behind B's -- localFluxAll at o6 on sm_90a, B's halves and one
-    buffer of A's at a group of eight, where B whole held all three -- and
-    the folded star never reads B whole (`fuse_refusal`): at o4 the fold
-    does not leave a group of sixteen room for B's halves, and the unfolded
-    tiling takes A's halves there instead."""
-    group, _ = _group(6, 'sm_90a', shape='localFluxAll', matrix_star='halves')
-    assert eg.split(group.section) and group.elements == 8
-    assert eg.halves(group.section) == 1
+    buffer of A's at a group of eight, where B whole held all three.  The
+    order decides it where the options let a plan read B in TF32
+    (`Options.matrix_tf32_operands`); where they do not, F32's accuracy
+    check refuses B whole besides (`tf32_refusal`).  And the folded star
+    never reads B whole (`fuse_refusal`): at o4 the fold does not leave a
+    group of sixteen room for B's halves, and the unfolded tiling takes A's
+    halves there instead."""
+    for trade in (False, True):
+        group, _ = _group(6, 'sm_90a', shape='localFluxAll',
+                          matrix_star='halves', matrix_tf32_operands=trade)
+        assert eg.split(group.section) and group.elements == 8
+        assert eg.halves(group.section) == 1
     group, context = _group(4, 'sm_90a', shape='localFluxAll',
                             matrix_star='engine')
     assert eg.split(group.section) and group.elements == 16

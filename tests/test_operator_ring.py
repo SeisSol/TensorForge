@@ -203,7 +203,8 @@ def test_the_table_holds_what_the_converting_ring_puts(arch):
     """Every piece of the table, chunk after chunk, is the slot the element
     warps would have put for it -- its window's numbers split, zeros past
     the window's rows and contraction, the canonical layout over its rows."""
-    group, _ = _group('volume', 8, arch, matrix_ring_rows=32)
+    group, _ = _group('volume', 8, arch, matrix_ring_slots=2,
+                      matrix_ring_rows=32)
     step = _step(group)
     stages = _stages(group)
     name, numbers, offsets = eg.prepared_table(group.section, step, 90)
@@ -223,7 +224,8 @@ def test_the_table_is_zero_outside_the_windows(monkeypatch):
     contraction, so they cannot tell -- gives a table that is zero past each
     product's window, its rows and its contraction both: the tilings'
     padded steps of K multiply an input's padding by it (`Stage`)."""
-    group, _ = _group('volume', 8, 'sm_100a', matrix_ring_rows=32)
+    group, _ = _group('volume', 8, 'sm_100a', matrix_ring_slots=2,
+                      matrix_ring_rows=32)
     step = _step(group)
     stages = _stages(group)
     rng = np.random.default_rng(3)
@@ -276,7 +278,8 @@ def test_the_table_is_named_after_its_numbers():
     define it once -- and another cut of the ring is another table."""
     first, _ = _group('volume', 8, 'sm_100a')
     again, _ = _group('volume', 8, 'sm_100a')
-    other, _ = _group('volume', 8, 'sm_100a', matrix_ring_rows=32)
+    other, _ = _group('volume', 8, 'sm_100a', matrix_ring_slots=2,
+                      matrix_ring_rows=32)
     name = eg.prepared_table(first.section, _step(first), 100)[0]
     assert name == eg.prepared_table(again.section, _step(again), 100)[0]
     assert name != eg.prepared_table(other.section, _step(other), 100)[0]
