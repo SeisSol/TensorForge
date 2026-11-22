@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: MIT
 from .spp import SparsityPattern, FullSPP, NonzeroSPP
 from .boundingbox import BoundingBox
-from .prepare import BF16_PARTS, TF32_PARTS, split_bf16, split_tf32
+from . import forms
+
 from functools import reduce
 from typing import List, Union
 
@@ -456,10 +457,10 @@ class Tensor:
 
         Where an element is spread over several slots (`storage_parts`), the
         slots hold arithmetic on the cell's value rather than the value, and
-        the arithmetic is done here: two parts of an F32 operand are the TF32
-        halves a matrix instruction multiplies, three the BF16 terms an
-        emulated product multiplies.  `None` without numbers, and for a
-        decomposition nothing computes yet.
+        the arithmetic is the derived form's (`forms.stored`): two parts of an
+        F32 operand are the TF32 halves a matrix instruction multiplies, three
+        the BF16 terms an emulated product multiplies.  `None` without
+        numbers, and for a decomposition nothing computes yet.
         """
         if not self.has_values():
             return None
@@ -483,18 +484,18 @@ class Tensor:
         # wants where a lane holds several neighbouring slots; adjacent is
         # right where one lane reads one element.
         planar = int(self.storage_elements()) if self.storage_planar else 0
-        split = split_tf32 if self.storage_parts == TF32_PARTS else split_bf16
-        return tuple(float(v) for v in split(np.asarray(out, dtype=np.float32),
-                                             planar=planar))
+        form = forms.stored(self.storage_parts)
+        return tuple(float(v) for v in form.store(
+            np.asarray(out, dtype=np.float32), planar=planar))
 
     def _prepares_parts(self):
         """Whether the decomposition this tensor is stored in can be produced.
 
-        The TF32 pair and the three BF16 terms, both of an F32 operand: the
-        count says which, since no target reads three TF32 halves or two BF16
-        terms.
+        The TF32 pair and the three BF16 terms, both of an F32 operand
+        (`forms.stored`): the count says which, since no target reads three
+        TF32 halves or two BF16 terms.
         """
-        return (self.storage_parts in (TF32_PARTS, BF16_PARTS)
+        return (forms.stored(self.storage_parts) is not None
                 and self.datatype == Datatype.F32)
 
     def storage_runs(self):

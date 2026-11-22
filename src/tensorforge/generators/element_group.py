@@ -2304,26 +2304,29 @@ def ring_notes(section: GroupSection, context) -> List[str]:
     return notes
 
 
-def prepared_table(section: GroupSection, step: Step, sm: int):
+def prepared_table(section: GroupSection, step: Step, sm: int, form=None):
     """`(name, numbers, offsets)`: a step's B prepared at generation
     (`Stage.prepared`) as the table of the generated file its bulk copies
-    read -- the TF32 halves of the description's numbers, split as
-    `splitFloatTF32` splits them on the target (`prepare.tf32_halves`) --
-    and where each piece starts in it, by `(product, k0)`.
+    read -- the description's numbers in the derived form `form`, by
+    default the TF32 halves as `splitFloatTF32` splits them on the target
+    (`forms.tf32_device_for`) -- and where each piece starts in it, by
+    `(product, k0)`.
 
     Streamed, the ring's chunks one after another (`ring_chunks`); resident,
     each product's stage whole, as `MultiElementOperators._canonical` lays
-    it out.  A piece: the upper halves of its rows of K in the canonical
-    K-major layout over those rows -- core matrices of eight rows of N by
-    four of K, 128 bytes apart along K and `rows` x 32 along N -- then the
-    lower halves the same way; `B(k, n)` the operator's `(n0 + n, k0' + k)`
-    inside the product's window and zero outside it, past its contraction
-    too (`Stage`).  Named after its numbers (`multilinear.
-    _module_table_name`): kernels of one file with the same B share it."""
+    it out.  A piece (`forms.lay`): the first part of its rows of K in the
+    canonical K-major layout over those rows (`forms.canonical_k_major`) --
+    core matrices of eight rows of N by four of K, 128 bytes apart along K
+    and `rows` x 32 along N -- then each further part the same way;
+    `B(k, n)` the operator's `(n0 + n, k0' + k)` inside the product's
+    window and zero outside it, past its contraction too (`Stage`).  Named
+    after its numbers (`multilinear._module_table_name`): kernels of one
+    file with the same B share it."""
     import numpy as np
     from tensorforge.backend.instructions.compute.multilinear import \
         _module_table_name
-    from tensorforge.common.matrix.prepare import tf32_halves
+    from tensorforge.common.matrix import forms
+    form = form if form is not None else forms.tf32_device_for(sm)
     stages = _step_stages(section, step)
     if not all(st.prepared for st in stages):
         raise ValueError(f'{step.dest.alias}: a step whose B is not prepared')
@@ -2346,19 +2349,13 @@ def prepared_table(section: GroupSection, step: Step, sm: int):
                 row = stage.n0 + n
                 if r0 <= row < r1:
                     block[k, n] = values[row, col]
-        upper, lower = tf32_halves(block.ravel(),
-                                   'even' if sm >= 90 else 'away')
-        laid = np.zeros(2 * rows * stage.width, dtype=np.float32)
-        for k in range(rows):
-            for n in range(stage.width):
-                slot = (n // 8) * rows * 8 + (k // 4) * 32 + (n % 8) * 4 + k % 4
-                laid[slot] = upper[k * stage.width + n]
-                laid[rows * stage.width + slot] = lower[k * stage.width + n]
+        laid = forms.lay(form, block,
+                         forms.canonical_k_major(rows, stage.width))
         offsets[(p, k0)] = at
         at += laid.size
         parts.append(laid)
     numbers = tuple(float(v) for v in np.concatenate(parts))
-    return _module_table_name('bk', Datatype.F32, numbers), numbers, offsets
+    return _module_table_name('bk', form.stored, numbers), numbers, offsets
 
 
 def split(section: GroupSection) -> bool:

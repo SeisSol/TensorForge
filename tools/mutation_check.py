@@ -6099,13 +6099,11 @@ GROUPS = {
          sub(ME_SECTION, '                      tx=self.volumes[j] * Datatype.F32.size(),\n',
              '                      tx=(self.volumes[j] - 4) * Datatype.F32.size(),\n', 1)),
         ("the table's halves swapped",
-         sub(ME_GROUP, '                laid[slot] = upper[k * stage.width + n]\n'
-                       '                laid[rows * stage.width + slot] = lower[k * stage.width + n]\n',
-             '                laid[slot] = lower[k * stage.width + n]\n'
-             '                laid[rows * stage.width + slot] = upper[k * stage.width + n]\n', 1)),
+         sub(Path('src/tensorforge/common/matrix/forms.py'), '        laid[p * size + slots] = parts[p]\n',
+             '        laid[p * size + slots] = parts[form.parts - 1 - p]\n', 1)),
         ("the table's core matrices along K packed",
-         sub(ME_GROUP, '                slot = (n // 8) * rows * 8 + (k // 4) * 32 + (n % 8) * 4 + k % 4\n',
-             '                slot = (n // 8) * rows * 8 + (k // 4) * 4 + (n % 8) * rows + k % 4\n', 1)),
+         sub(Path('src/tensorforge/common/matrix/forms.py'), '    return (n // 8) * rows * 8 + (k // 4) * 32 + (n % 8) * 4 + k % 4\n',
+             '    return (n // 8) * rows * 8 + (k // 4) * 4 + (n % 8) * rows + k % 4\n', 1)),
         ("the table's numbers past the window's contraction",
          sub(ME_GROUP, '            if col >= d1:\n                continue\n', '', 1)),
         ("wgmma's slot given back ahead of the wait for its products",
