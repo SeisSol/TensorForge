@@ -755,9 +755,9 @@ GROUPS = {
     'drivers': ('tests/test_tuning.py', [
         ('the tuner naming the generator',
          sub(Path('src/tensorforge/generators/tuning.py'),
-             "    ctx = candidate.context(base, autotune='off')\n",
+             "    ctx = candidate.context(base, **override)\n",
              "    from tensorforge.generators.generator import Generator  # noqa\n"
-             "    ctx = candidate.context(base, autotune='off')\n", 1)),
+             "    ctx = candidate.context(base, **override)\n", 1)),
         ('the lane search naming the generator',
          sub(Path('src/tensorforge/generators/lanes.py'),
              '    scores = {}\n    blocks = {}\n',
