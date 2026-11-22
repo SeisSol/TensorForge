@@ -102,7 +102,8 @@ class BatchLoop(AbstractInstruction):
                  wave_rows: int = 0,
                  count_index: Optional[int] = None,
                  trip: Trip = Trip.ELEMENT,
-                 producer_rows: int = 0):
+                 producer_rows: int = 0,
+                 lane_map: Optional[Tuple[int, int]] = None):
         super().__init__(context)
         self._section_index = section_index
         #: Whose element count and flags this loop runs over: its own
@@ -170,6 +171,16 @@ class BatchLoop(AbstractInstruction):
         #: trips without an element of their own, so the group starts at the
         #: block's first row and the block is the group's elements and them.
         self._producer_rows = int(producer_rows)
+        #: Where the group on the lanes takes several lanes an element
+        #: (`Trip.LANE_GROUP`, the slot form's `element_group.SlotMapping`):
+        #: `(elements, lanes)` -- each warp its own `elements`, on `lanes`
+        #: consecutive lanes each, the lanes past them idle.  None where a
+        #: lane is an element and every warp takes all of the group's.
+        self._lane_map = (None if lane_map is None
+                          else (int(lane_map[0]), int(lane_map[1])))
+        if self._lane_map is not None and trip is not Trip.LANE_GROUP:
+            raise InternalError(f'a lane map in a loop of {trip.value}: '
+                                f'only a group on the lanes has one')
         if producer_rows and trip is not Trip.ELEMENT_GROUP:
             raise InternalError(f'producer rows in a loop of {trip.value}: '
                                 f'only an element group has a producer')
@@ -262,6 +273,13 @@ class BatchLoop(AbstractInstruction):
 
     def _declare_lane(self, writer) -> None:
         lexic = self._context.target.lexic
+        if self._trip is Trip.LANE_GROUP and self._lane_map is not None:
+            # Several lanes an element, each warp its own elements: the
+            # warp's first, and the run of lanes the lane is in.
+            elements, lanes = self._lane_map
+            writer(f'const auto {self._lane()} = {elements} * '
+                   f'{lexic.thread_idx_y} + {lexic.thread_idx_x} / {lanes};')
+            return
         if self._trip is Trip.LANE_GROUP:
             # A lane an element: the lanes are the group.
             writer(f'const auto {self._lane()} = {lexic.thread_idx_x};')
@@ -279,6 +297,12 @@ class BatchLoop(AbstractInstruction):
         """
         raw = f'{self._group_batch()} + {self._lane()}'
         cond = f'{raw} < {self._stacks()}'
+        if self._lane_map is not None:
+            # The lanes past a warp's elements hold none: first, so that
+            # they read no flag of another warp's element.
+            elements, lanes = self._lane_map
+            lexic = self._context.target.lexic
+            cond = f'{lexic.thread_idx_x} < {elements * lanes} && {cond}'
         if self._flags is not FlagMode.ABSENT:
             flags = f'{GeneralLexicon.FLAGS_NAME}{self._count_index}'
             read = f'static_cast<bool>({flags}[{raw}])'

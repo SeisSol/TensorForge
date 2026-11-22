@@ -1727,7 +1727,8 @@ class Generator:
                                if self._element_group.lanes
                                else Trip.ELEMENT_GROUP),
                          producer_rows=(0 if self._element_group is None
-                                        else self._element_group.producers))
+                                        else self._element_group.producers),
+                         lane_map=self._lane_map())
 
         self._section.stream = (list(self._section.global_ir) + [loop]
                                 + list(self._section.post_ir))
@@ -3968,17 +3969,27 @@ class Generator:
     (`Options.reassociate_products`).  The rewrite puts the operator product
     first and mixes its intermediate after it, which a lane would hold
     whole -- the order the lanes form refuses, and AMD's default.  Under
-    `force` where the lanes form is asked for, and under `auto`, whose rule
-    takes the lanes form (`element_group.auto_takes`)."""
+    `force` where the lanes form or its slot form is asked for, and under
+    `auto`, whose rule takes the lanes form (`element_group.auto_takes`)."""
     options = context.get_user_options()
     if options.multi_element == 'force':
-      if element_group.fma_form(context) != 'lanes':
+      if element_group.fma_form(context) not in ('lanes', 'slots'):
         return False
     elif options.multi_element != 'auto':
       return False
     flat = [op for descr in self._descr_list for op in descr.operations()]
     group = element_group.plan(flat, context)
     return group is not None and group.lanes is not None
+
+  def _lane_map(self):
+    """The batch loop's lanes of an element where the multi-element
+    layout's slot form puts several on one (`element_group.SlotMapping`):
+    `(elements a warp, lanes an element)`, else None."""
+    group = self._element_group
+    if group is None or group.lanes is None or group.lanes.mapping is None:
+      return None
+    mapping = group.lanes.mapping
+    return mapping.elements, mapping.lanes
 
   def _deduce_num_threads(self):
     """Adopt the section's lane geometry: the caller's, or the deduced one --

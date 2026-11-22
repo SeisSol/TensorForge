@@ -178,11 +178,11 @@ def parse_multi_element(text: str) -> str:
 
 
 #: What `Options.multi_element_fma` takes.
-MULTI_ELEMENT_FMA = ('auto', 'warp', 'lanes')
+MULTI_ELEMENT_FMA = ('auto', 'warp', 'lanes', 'slots')
 
 
 def parse_multi_element_fma(text: str) -> str:
-  """`auto`, `warp` or `lanes` (`Options.multi_element_fma`)."""
+  """`auto`, `warp`, `lanes` or `slots` (`Options.multi_element_fma`)."""
   value = str(text).strip().lower()
   if value not in MULTI_ELEMENT_FMA:
     raise ValueError(f'expected one of {MULTI_ELEMENT_FMA}, got {text!r}')
@@ -2619,8 +2619,17 @@ declare('multi_element_fma',
             '(`multi_element_values`), the outputs '
             'split over the warps the group\'s elements share (`lane`) -- '
             'ahead of the matrix tiling, wherever the section fits it, and '
-            '`warp` where it does not.  `auto`: the target\'s rule, which is '
-            '`warp` everywhere until the measurements say otherwise.  Under '
+            '`warp` where it does not.  `slots`: the lanes form with a lane a '
+            'column of its element (`element_group.SlotMapping`) -- on CUDA '
+            'as many lanes an element as the output has columns, three '
+            'elements a warp for SeisSol\'s nine (L9), each warp its own -- '
+            'and the mixing\'s other columns brought by shuffles planned at '
+            'generation (`element_group.plan_exchange`), each lane reading '
+            'its coefficients from its element\'s small operand where it is '
+            'stored; on GH200 the lanes prototype of it ran the volume 43-59 '
+            '% faster than the default at o4 and o6.  `auto`: the target\'s '
+            'rule, which is `warp` everywhere until the measurements say '
+            'otherwise.  Under '
             '`multi_element` `auto` the form is that rule\'s, the lanes '
             'form, and `warp` declines it.')
 

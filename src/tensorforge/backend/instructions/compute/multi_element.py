@@ -52,7 +52,10 @@ lane its element, read and written through its own pointers -- 16 bytes of
 a column at a time where that is one aligned access -- the warps of the
 block each a share of the output, nothing staged and no barrier.  Every
 step's lowering there is `lane`, and a column is evaluated backwards from
-the output (`_LaneTrip`).
+the output (`_LaneTrip`).  Its slot form (`element_group.SlotMapping`,
+`_slots`) lays the lanes out by a lead instead: a lane one column of its
+element, several lanes an element, each warp its own elements, and a
+mixing product's other columns brought by shuffles (`_SlotTrip`).
 
 The instructions place their barriers themselves, as every builder does:
 the block's barrier after the operators' copy, one at the head of each trip
@@ -3854,6 +3857,207 @@ def _chained(builder, context, group, symbols) -> list:
     return trips
 
 
+class _SlotTrip(_LaneTrip):
+    """A trip of the lanes form's slot form (`element_group.Lanes.mapping`,
+    `Options.multi_element_fma` `slots`): a lane holds one column of its
+    element -- the output's, and the same quantity of the operands its
+    products mix -- and a mixing product's other columns come from the
+    lanes holding them, by the shuffles planned at generation
+    (`element_group.Exchange`, the `shfl` relayout): at each row of the
+    mixed operand, the lane's own entry, read from its element's memory,
+    and each shuffle of it from the lane the plan's table names.
+
+    A term's coefficient is the lane's own: its element's small operand at
+    (the quantity the term brings, the lane's column), read where the
+    operand is stored -- a dense box, or the cells SeisSol's GPU layout
+    keeps (`_sparse_read`) -- once a trip, held across the rows, and zero
+    where the lane receives nothing.  So the small operand reaches the
+    kernel as SeisSol stores it.  The rest is the lanes form's walk
+    (`_LaneTrip`): the operators' nonzeros as literals, the column's rows
+    sixteen bytes at a time, the output written back under the lane's
+    mask."""
+
+    def __init__(self, builder, context, group, symbols):
+        super().__init__(builder, context, group, symbols)
+        from tensorforge.generators.element_group import slot_terms
+        plan = group.lanes
+        self.mapping, self.exchange = plan.mapping, plan.exchange
+        self.slot_terms = slot_terms
+        b = builder
+        #: The lane, its quantity in its element and its element's first
+        #: lane; the output's first column, and the one the lane holds.
+        self.lane = b.thread_id('x')
+        self.quantity = b.op('rem', INDEX, self.lane, self.mapping.lanes,
+                             hint='q')
+        self.first = b.op('sub', INDEX, self.lane, self.quantity, hint='f')
+        self.origin = self.cones.cols[0]
+        self.column = _index(b, 'add', self.quantity, self.origin, 'p')
+        #: Each shuffle's source lane, read from its table (`source`).
+        self.sources: Dict[int, object] = {}
+        #: Each mixing product's terms (`element_group.slot_terms`).
+        self.terms: Dict[int, list] = {}
+        #: Every FMA a statement where it is computed, the column's
+        #: accumulations among them: a row's, right behind its shuffles and
+        #: sums, as the lanes prototype wrote them.  Inlined into one
+        #: expression at the write, the sums of every row stayed live to the
+        #: end -- 229 registers at o4 in F64 on sm_90a, where the prototype
+        #: takes 148.
+        self.fma_attrs = tuple(dict(self.fma_attrs, no_inline=True).items())
+
+    def source(self, shuffle: int):
+        """The lane shuffle `shuffle` reads for this one: its entry of the
+        shuffle's table, a table of the generated file (`int_tables`)."""
+        if shuffle not in self.sources:
+            from tensorforge.backend.instructions.compute.multilinear import \
+                _module_table_name
+            numbers = tuple(int(n) for n in self.exchange.sources[shuffle])
+            name = _module_table_name('mes', Datatype.I32, numbers)
+            self.int_tables[name] = (Datatype.I32, numbers)
+            self.context.module_tables[name] = numbers
+            self.sources[shuffle] = self.builder.rawexpr(
+                f'{name}[{{0}}]', self.lane, type_=INDEX, pure=True,
+                movable=True, hint='src')
+        return self.sources[shuffle]
+
+    def brought(self, tensor, row: int, term: int):
+        """`tensor`'s entry at `row` in the column `term` brings: the lane's
+        own (-1), or shuffle `term`'s from its source lane."""
+        key = ('brought', id(tensor), row, term)
+        if key not in self.here:
+            if term < 0:
+                self.here[key] = self.own(tensor, row, self.column)
+            else:
+                self.here[key] = self.builder.relayout(
+                    'shfl', {}, self.brought(tensor, row, -1),
+                    self.source(term), type_=self.fp, hint='r')
+        return self.here[key]
+
+    def coefficient(self, product, term: int):
+        """The lane's coefficient of `term` in `product`: its element's small
+        operand at the quantity the term brings and the lane's column; zero
+        where a shuffle brings the lane nothing (`Exchange.received`)."""
+        small = product.second.tensor
+        key = ('coefficient', id(small), term)
+        if key not in self.small:
+            b, fp = self.builder, self.fp
+            valid = None
+            if term < 0:
+                row = self.column
+            else:
+                source = self.source(term)
+                got = b.op('sub', INDEX, source, self.first, hint='g')
+                row = _index(b, 'add', got, self.origin, 'g')
+                if not self.exchange.full(term, self.mapping):
+                    valid = b.op('ne', BOOL, source, self.lane, hint='v')
+            index = self.anchored(_address(b, small, row, self.column))
+            memory = _bound(b, self.symbols[id(small)])
+            if small.is_dense():
+                value = b.load(memory, index, type_=fp,
+                               uniform=Uniformity.LANE, hint='c')
+            else:
+                value = _sparse_read(b, self.context, self.int_tables, memory,
+                                     small, index, fp,
+                                     uniform=Uniformity.LANE, hint='c')
+            if valid is not None:
+                value = b.op('select', fp, valid, value, b.const(0.0, fp),
+                             hint='c')
+            self.small[key] = value
+        return self.small[key]
+
+    def mixed(self, step, row):
+        """A mixing step's destination at `row` of the lane's column, or None
+        where none of its products adds into the row: each product's terms
+        (`element_group.slot_terms`), the entry each brings times the lane's
+        coefficient of it."""
+        b, fp = self.builder, self.fp
+        total = None
+        for p in step.products:
+            if not p.rows[0] <= row < p.rows[1]:
+                continue
+            if id(p) not in self.terms:
+                self.terms[id(p)] = self.slot_terms(self.group.lanes, p,
+                                                    self.origin)
+            part = None
+            for term in self.terms[id(p)]:
+                x = self.brought(p.first.tensor, row, term)
+                c = self.coefficient(p, term)
+                part = (b.op('mul', fp, x, c, hint='t') if part is None
+                        else b.op('fma', fp, x, c, part, hint='t',
+                                  attrs=self.fma_attrs))
+            if part is None:
+                continue
+            part = self.windowed(part, p, step)
+            total = part if total is None else b.op('add', fp, total, part,
+                                                    hint='t')
+        return total
+
+
+def _slot_column(trip) -> None:
+    """The slot form's output column at the plan's rows: its steps added in
+    turn into sums from zero, and only then the output read, the sums added
+    and written back under the lane's mask -- a tile of sixteen bytes the
+    column writes in part read and written whole, its other rows as they
+    were read, one access each way (the lanes prototype's read-modify-write
+    of a column).  The lanes form's `_column` starts its sums at the
+    output's rows instead, read ahead of the walk: held through it, they
+    cost the o6 volume 152 B of spill in F64 on sm_90a."""
+    b, fp = trip.builder, trip.fp
+    cones = trip.cones
+    steps = cones.outputs
+    tensor = steps[0].dest
+    lo, hi = cones.rows
+    rows = [i for i in range(*trip.rows) if lo <= i < hi]
+    if steps[0].assigns:
+        write = list(rows)
+    else:
+        touched = set()
+        for step in steps:
+            for p in step.products:
+                if p.kind is trip.kinds.OPERATOR:
+                    touched |= {i for i in rows
+                                if cones.nonzeros[id(p)].get(i)}
+                else:
+                    touched |= {i for i in rows if p.rows[0] <= i < p.rows[1]}
+        write = sorted(touched)
+    lower = int(tensor.bbox.lower()[0])
+    kept = set()
+    for i in write:
+        first = i - (i - lower) % trip.width
+        if trip.claim(tensor, first) is not None:
+            kept |= {r for r in range(first, first + trip.width)
+                     if r not in write}
+    trip.tiles, trip.slot = {}, 0
+    trip.acc = {(i, 0): None for i in write}
+    for step in steps:
+        LOWERINGS[step.lowering](trip, step)
+    trip.tiles = {}
+    values = {}
+    rows = sorted(set(write) | kept)
+    for i in rows:
+        if steps[0].assigns and i in write:
+            values[(i, 0)] = trip.acc.get((i, 0))
+            continue
+        old = trip.own(tensor, i, trip.col)
+        part = trip.acc.get((i, 0))
+        values[(i, 0)] = (old if part is None
+                          else b.op('add', fp, old, part, hint='q'))
+    trip.tiles = {}
+    _write(trip, tensor, rows, values)
+
+
+def _slots(trip) -> None:
+    """A trip of the slot form: each lane its element's column of the
+    output at the plan's one range of rows (`element_group.slots_plan`),
+    the warps of the block each its own elements -- no loop over columns,
+    no guard of a share."""
+    plan = trip.group.lanes
+    trip.rows = plan.ranges[0]
+    trip.need = trip.cones.need(range(*trip.rows))
+    trip.cols, trip.slot = [trip.column], 0
+    trip.small = {}
+    _slot_column(trip)
+
+
 #: Each step's lowering (`element_group.Step.lowering`).
 LOWERINGS = {'fma': _fma, 'rows': _per_output,
              'mix': lambda trip, step: _mix(trip, [step]),
@@ -3944,8 +4148,12 @@ class MultiElementSection(AbstractInstruction):
         if self._group.lanes is not None:
             # The lanes form: nothing staged, a lane its element's
             # (`_lanes`) -- a chained section's phases one after another
-            # (`_chained`).
-            if self._group.lanes.phases:
+            # (`_chained`); its slot form a lane a column (`_slots`).
+            if self._group.lanes.mapping is not None:
+                trips = [_SlotTrip(builder, self._context, self._group,
+                                   self._symbols)]
+                _slots(trips[0])
+            elif self._group.lanes.phases:
                 trips = _chained(builder, self._context, self._group,
                                  self._symbols)
             else:

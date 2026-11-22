@@ -69,7 +69,12 @@ mixing step's entries are computed where a product reads them, an
 operator step's column is held in registers while a product reads it, and
 only the operators' nonzeros are multiplied by -- literals of the code, or
 read from the operator's memory at addresses every lane shares
-(`lane_literals`).  Every step's lowering is `lane`.
+(`lane_literals`).  Every step's lowering is `lane`.  Its *slot form*
+(`slots`, `SlotMapping`, `slots_plan`) lays a warp's lanes out by a lead
+over (element, quantity) instead: on CUDA a lane one column of its
+element, nine lanes an element, three elements a warp, each warp its own,
+and a mixing product's other columns brought by shuffles planned at
+generation (`plan_exchange`).
 
 The layout is written for CUDA on NVIDIA, HIP on AMD and DPC++ under SPMD
 on Intel (`TARGETS`), and the forms say "warp" for what the target has:
@@ -673,7 +678,9 @@ class ElementGroup:
     one warp each, and the section as it runs (`GroupSection`, each step
     with its lowering) -- or, in the lanes form (`lanes`, a `Lanes`), E
     elements on the lanes of a warp and `lanes.warps` warps that all take
-    them, each a share of the output."""
+    them, each a share of the output; in its slot form (`Lanes.mapping`)
+    each of the `lanes.warps` warps takes elements of its own, E all of
+    them, several lanes an element."""
 
     elements: int
     section: GroupSection
@@ -683,7 +690,10 @@ class ElementGroup:
     @property
     def threads(self) -> int:
         """A warp's lanes: `WARP_LANES`, or in the lanes form the group's
-        elements, a lane each (`lane_elements`)."""
+        elements, a lane each (`lane_elements`) -- in its slot form the
+        warp its lead wraps over (`SlotMapping.width`)."""
+        if self.lanes is not None and self.lanes.mapping is not None:
+            return self.lanes.mapping.width
         return self.elements if self.lanes is not None else WARP_LANES
 
     @property
@@ -2587,8 +2597,8 @@ FMA_FORMS: Dict[str, str] = {}
 
 
 def fma_form(context) -> str:
-    """The FMA form a section takes on the context's target, `warp` or
-    `lanes` (`Options.multi_element_fma`)."""
+    """The FMA form a section takes on the context's target, `warp`,
+    `lanes` or its slot form `slots` (`Options.multi_element_fma`)."""
     asked = context.get_user_options().multi_element_fma
     if asked != 'auto':
         return asked
@@ -2664,9 +2674,20 @@ class Lanes:
     #: columns, so that a lane reads back what it wrote -- the output of the
     #: phase before, whose every column the next phase's columns read.
     phases: Tuple[Optional['Lanes'], ...] = ()
+    #: The slot form's lead (`Options.multi_element_fma` `slots`,
+    #: `slots_plan`): a warp's elements and their columns over its lanes,
+    #: a column a slot -- None in the lanes form, a lane an element.
+    mapping: Optional['SlotMapping'] = None
+    #: The slot form's mixing, the shuffles a row (`plan_exchange`).
+    exchange: Optional['Exchange'] = None
+    #: The slot form's warps a block, each its own elements (`SLOT_WARPS`).
+    units: int = 0
 
     @property
     def warps(self) -> int:
+        if self.mapping is not None:
+            # The slot form's: a warp is a group of its own elements.
+            return self.units
         if self.phases:
             return 1
         return self.classes * len(self.ranges)
@@ -3003,6 +3024,328 @@ def _lanes_plan(section: GroupSection, context,
                   f'here')
 
 
+# -- the slot form ----------------------------------------------------------- #
+
+#: The targets the slot form (`Options.multi_element_fma` `slots`) is written
+#: for: CUDA on NVIDIA, whose warp shuffle takes its source lane a lane
+#: (`SHFL.IDX`, the `shfl` relayout of `pir.engines`).
+SLOT_TARGETS = (('cuda', 'nvidia'),)
+
+#: The warps of a block of the slot form, each a group of its own elements:
+#: the lanes prototype's four (`~/tf-probe/lanes/gen_lanes.py`), 128 threads
+#: a block -- three blocks an SM capped it at 168 registers
+#: (`Options.min_blocks_per_sm`), 11-12 % faster at o6 F32 on GH200.
+SLOT_WARPS = 4
+
+
+@dataclass(frozen=True)
+class SlotMapping:
+    """The slot form's lead (`Options.multi_element_fma` `slots`; the
+    integration plan's step 5): a warp's `elements` elements and their
+    `quantities` columns as one index over (element, quantity) items,
+    wrapped over the warp's `width` lanes -- `lane = i mod width`, `slot =
+    i div width` -- each slot of a lane a column of its element's operands.
+
+    `items` says where each item is held: `(lane, slot, element,
+    quantity)`.  Two families (the lanes prototypes', `split_mapping`,
+    `wrapped_mapping`):
+
+    * split, `lanes` lanes an element: an element on consecutive lanes,
+      quantity `q` on lane `q mod lanes` of them at slot `q div lanes` --
+      the order `(q div lanes, e, q mod lanes)`, the inner two padded to the
+      warp.  As many lanes as quantities is one slot a lane, element-outer
+      and unpadded: L9 for SeisSol's nine, three elements a warp, 27 of 32
+      lanes.  One lane is a lane an element, its columns in its slots.
+    * wrapped, `lanes` 0: `i = Qp e + q` (element-outer) or `i = E q + e`
+      (element-fastest) over the quantities padded to `Qp`, wrapped -- seven
+      elements fill 63 of 64 slots of two a lane.
+
+    Pad or wrap is a family and its numbers (integration plan, part D 5);
+    the fill rule takes one slot a lane on NVIDIA (`slots_plan`)."""
+
+    name: str
+    width: int
+    elements: int
+    quantities: int
+    slots: int
+    lanes: int
+    items: Tuple[Tuple[int, int, int, int], ...]
+
+    def item(self, lane: int, slot: int) -> Optional[Tuple[int, int]]:
+        """The `(element, quantity)` at `slot` of `lane`, None where the slot
+        holds none."""
+        for at, s, element, quantity in self.items:
+            if at == lane and s == slot:
+                return element, quantity
+        return None
+
+    def place(self, element: int, quantity: int) -> Tuple[int, int]:
+        """The `(lane, slot)` holding the item."""
+        for lane, slot, e, q in self.items:
+            if e == element and q == quantity:
+                return lane, slot
+        raise KeyError((element, quantity))
+
+    @property
+    def busy(self) -> int:
+        """The lanes holding an item."""
+        return len({lane for lane, _, _, _ in self.items})
+
+    def one_element(self) -> bool:
+        """Whether every lane's slots hold one element's columns: what a lane
+        then binds as its element (`Trip.LANE_GROUP`)."""
+        seen: Dict[int, int] = {}
+        return all(seen.setdefault(lane, e) == e
+                   for lane, _, e, _ in self.items)
+
+
+def split_mapping(lanes: int, quantities: int, width: int) -> SlotMapping:
+    """An element on `lanes` consecutive lanes, `width // lanes` elements a
+    warp (`SlotMapping`, split)."""
+    elements = width // lanes
+    items = tuple(sorted((lanes * e + q % lanes, q // lanes, e, q)
+                         for e in range(elements) for q in range(quantities)))
+    return SlotMapping(f'L{lanes}', width, elements, quantities,
+                       -(-quantities // lanes), lanes, items)
+
+
+def wrapped_mapping(elements: int, quantities: int, width: int,
+                    order: str = 'element-outer',
+                    padded: Optional[int] = None) -> SlotMapping:
+    """`elements` elements' items flattened element-outer or element-fastest
+    over the quantities padded to `padded`, wrapped (`SlotMapping`,
+    wrapped)."""
+    padded = padded or quantities
+    items = []
+    for e in range(elements):
+        for q in range(quantities):
+            i = (padded * e + q if order == 'element-outer'
+                 else elements * q + e)
+            items.append((i % width, i // width, e, q))
+    count = (elements * padded if order == 'element-outer'
+             else elements * quantities)
+    tag = 'eo' if order == 'element-outer' else 'ef'
+    return SlotMapping(f'E{elements}{tag}', width, elements, quantities,
+                       -(-count // width), 0, tuple(sorted(items)))
+
+
+@dataclass(frozen=True)
+class Exchange:
+    """The slot form's mixing as a cross-lane exchange, planned at
+    generation (`plan_exchange`): the shuffles a row of a mixed operand,
+    each moving one register a lane -- lane `l` reads lane `sources[k][l]`
+    -- and what each lane receives by it, `received[k][l]`, a quantity of
+    its element, or -1 where nothing: the lane reads itself, and its term's
+    coefficient is zero (`slot_terms`).  `kinds[k]` the pattern: `xor`
+    where every receiving lane reads at one distance in bits, `segment`
+    where each reads the same lane of its aligned run of a power of two,
+    `lanes` where the sources are a lane's own, a table's (the prototype's
+    registers of source lanes).  `bound` is the fewest shuffles a row: the
+    most quantities a lane needs from others."""
+
+    sources: Tuple[Tuple[int, ...], ...]
+    received: Tuple[Tuple[int, ...], ...]
+    kinds: Tuple[str, ...]
+    bound: int
+
+    @property
+    def count(self) -> int:
+        return len(self.sources)
+
+    def full(self, shuffle: int, mapping: SlotMapping) -> bool:
+        """Whether every lane that holds an item receives by the shuffle."""
+        return all(self.received[shuffle][lane] >= 0
+                   for lane, _, _, _ in mapping.items)
+
+
+def _shuffle_kind(width: int, sources: Sequence[int],
+                  received: Sequence[int]) -> str:
+    """A shuffle's pattern (`Exchange.kinds`)."""
+    lanes = [lane for lane in range(width) if received[lane] >= 0]
+    if len({sources[lane] ^ lane for lane in lanes}) == 1:
+        return 'xor'
+    run = 2
+    while run < width:
+        if (len({sources[lane] % run for lane in lanes}) == 1
+                and all(sources[lane] // run == lane // run
+                        for lane in lanes)):
+            return 'segment'
+        run *= 2
+    return 'lanes'
+
+
+def plan_exchange(mapping: SlotMapping,
+                  needs: Dict[int, Set[int]]) -> Exchange:
+    """The shuffles that bring every lane the quantities of its element it
+    needs from other lanes (`needs`, by lane), one slot a lane: as many as
+    the most a lane needs -- a provider hands its one register to whoever
+    reads it, so no two readers contend -- each lane taking its needs in
+    the order after its own quantity (`(x - q) mod Q`), which for a dense
+    operand is a rotation.  Several slots a lane would want a provider's
+    select where its readers take different slots of it: not built."""
+    if mapping.slots != 1:
+        raise ValueError(f'an exchange of {mapping.slots} slots a lane')
+    width, quantities = mapping.width, mapping.quantities
+    count = max((len(n) for n in needs.values()), default=0)
+    sources = [list(range(width)) for _ in range(count)]
+    received = [[-1] * width for _ in range(count)]
+    for lane, _, element, quantity in mapping.items:
+        order = sorted(needs.get(lane, ()),
+                       key=lambda x: ((x - quantity) % quantities, x))
+        for k, x in enumerate(order):
+            sources[k][lane] = mapping.place(element, x)[0]
+            received[k][lane] = x
+    kinds = tuple(_shuffle_kind(width, s, r)
+                  for s, r in zip(sources, received))
+    return Exchange(tuple(tuple(s) for s in sources),
+                    tuple(tuple(r) for r in received), kinds, count)
+
+
+def _possible(tensor, row: int, col: int) -> bool:
+    """Whether cell `(row, col)` of an element's small operand may be
+    nonzero: inside its box, and stored where it is stored sparse
+    (SeisSol's GPU layout keeps 24 of a star's 81 cells)."""
+    lower = [int(x) for x in tensor.bbox.lower()]
+    upper = [int(x) for x in tensor.bbox.upper()]
+    if not (lower[0] <= row < upper[0] and lower[1] <= col < upper[1]):
+        return False
+    return tensor.is_dense() or bool(tensor.spp.is_nz((row, col)))
+
+
+def slot_needs(section: GroupSection, mapping: SlotMapping,
+               first: int) -> Dict[int, Set[int]]:
+    """By lane, the quantities its output column's mixing products read
+    from other lanes: each contraction index whose cell of the small
+    operand may be nonzero at the lane's column, `first` the output's first
+    column -- every one for a dense star, two or three for SeisSol's
+    sparse one."""
+    needs: Dict[int, Set[int]] = {}
+    for lane, _, _, quantity in mapping.items:
+        mine = needs.setdefault(lane, set())
+        col = first + quantity
+        for step in section.steps:
+            for p in step.products:
+                if p.kind is not Kind.MIXING or not (
+                        p.cols[0] <= col < p.cols[1]):
+                    continue
+                for k in range(*p.depth):
+                    if k != col and _possible(p.second.tensor, k, col):
+                        mine.add(k - first)
+    return needs
+
+
+def slot_terms(plan: 'Lanes', product: Product, first: int) -> List[int]:
+    """The terms a mixing product sums at a lane in the slot form, in its
+    order: -1, the lane's own column, where some lane's coefficient for it
+    may be nonzero; then each shuffle that brings some lane a quantity
+    whose coefficient may be (`Exchange`)."""
+    mapping, exchange = plan.mapping, plan.exchange
+    small = product.second.tensor
+
+    def inside(col):
+        return product.cols[0] <= col < product.cols[1]
+
+    terms = []
+    if any(inside(first + q) and _possible(small, first + q, first + q)
+           for _, _, _, q in mapping.items):
+        terms.append(-1)
+    for k in range(exchange.count):
+        if any(exchange.received[k][lane] >= 0 and inside(first + q)
+               and _possible(small, first + exchange.received[k][lane],
+                             first + q)
+               for lane, _, _, q in mapping.items):
+            terms.append(k)
+    return terms
+
+
+def slot_registers(section: GroupSection, plan: 'Lanes') -> int:
+    """The plan's estimate of what a lane of the slot form holds, in 32-bit
+    words: its output column's rows, the mixing products' coefficients, a
+    row's shuffled values and own tile, a source lane a shuffle, and a few
+    temporaries."""
+    cones = Cones(section)
+    first = cones.cols[0]
+    size = 2 if section.dtype is Datatype.F64 else 1
+    coefficients = sum(len(slot_terms(plan, p, first))
+                       for step in section.steps for p in step.products
+                       if p.kind is Kind.MIXING)
+    tile = max(1, 16 // section.dtype.size())
+    rows = cones.rows[1] - cones.rows[0]
+    held = rows + coefficients + plan.exchange.count + tile
+    return held * size + plan.exchange.count + 8
+
+
+def slots_plan(section: GroupSection,
+               context) -> Tuple[Optional[Lanes], str]:
+    """The slot form's plan for `section` (`Lanes` with a `mapping`), or
+    None and why not.
+
+    The lanes form's walk, its lanes laid out by the plan's lead: a lane
+    holds one column of its element -- the output's, and the same quantity
+    of the operands its products mix -- and a mixing product's other
+    columns come by shuffles, planned here (`plan_exchange`) from the small
+    operands' cells that may be nonzero (`slot_needs`).  One slot a lane on
+    CUDA's warp: as many lanes an element as the output has columns, `32 //
+    that` elements a warp (`split_mapping`) -- SeisSol's L9, 27 of 32 lanes
+    -- and `SLOT_WARPS` warps a block, each its own elements.
+
+    It takes what the lanes form takes but a chained section (not yet):
+    one output; mixing products of the element's own operands, whose
+    columns are the output's; operators that carry their numbers, as
+    literals or read from memory (`lane_values`; not the `table`, read a
+    warp's width at a time as a lane's element)."""
+    target = context.target
+    vendor = getattr(target.hw, 'vendor', None)
+    if (target.backend, vendor) not in SLOT_TARGETS:
+        return None, (f'the slot form is written for CUDA on NVIDIA, whose '
+                      f'shuffle takes a source lane a lane, not '
+                      f'{target.backend} on {vendor}')
+    if section.chained:
+        return None, 'the slot form takes no chained section yet'
+    if len(section.outputs) != 1:
+        return None, (f'the slot form writes one output, not '
+                      f'{len(section.outputs)}')
+    if lane_values(context) == 'table':
+        return None, ('the slot form reads no table of numbers a warp\'s '
+                      'width at a time (`multi_element_values`)')
+    cones = Cones(section)
+    first, last = cones.cols
+    quantities = last - first
+    if quantities > WARP_LANES:
+        return None, (f'an element\'s {quantities} columns are more than '
+                      f'the {WARP_LANES} lanes of a warp')
+    most = lane_literal_cap(context) if lane_literals(context) else None
+    for step in section.steps:
+        for p in step.products:
+            if p.kind is Kind.MIXING:
+                mixed = p.first.tensor
+                if mixed.is_tmp:
+                    return None, (f'{mixed.alias}, an intermediate, is mixed: '
+                                  f'its other columns are other lanes\' '
+                                  f'values, which the slot form does not '
+                                  f'shuffle yet')
+                if p.depth != (first, last):
+                    return None, (f'{mixed.alias} mixes columns {p.depth}, '
+                                  f'not the output\'s {(first, last)}')
+                continue
+            if p.kind is not Kind.OPERATOR:
+                return None, 'the slot form takes no scaled copy'
+            operator = p.first.tensor
+            if not operator.has_values():
+                return None, (f'{operator.alias}: no numbers to walk the '
+                              f'nonzeros of')
+            if most is not None and sum(len(v) for v in cones.nonzeros[
+                    id(p)].values()) > most:
+                return None, (f'{operator.alias}: more nonzeros than the '
+                              f'{most} literals an operator may take '
+                              f'(`inline_constants`)')
+    mapping = split_mapping(quantities, quantities, WARP_LANES)
+    exchange = plan_exchange(mapping, slot_needs(section, mapping, first))
+    plan = Lanes(1, (cones.rows,), 0, 1, (), mapping, exchange, SLOT_WARPS)
+    return dataclasses.replace(
+        plan, registers=slot_registers(section, plan)), ''
+
+
 def fill(section: GroupSection, context,
          form: Optional[str] = None) -> Tuple[Optional[ElementGroup], str]:
     """The fill rule: the group's size for `section` on the context's
@@ -3011,7 +3354,9 @@ def fill(section: GroupSection, context,
     Only on the targets the layout is written for (`TARGETS`).  The lanes
     form where it is asked for -- `form`, else the option's (`fma_form`) --
     and the section fits it (`lanes_plan`): a group of a warp's lanes
-    (`lane_elements`), an element each.
+    (`lane_elements`), an element each.  Its slot form likewise
+    (`slots_plan`): a warp's elements, several lanes each, in each of the
+    block's warps.
     Otherwise the size is the table's (`table_elements`) where the block
     holds it, halved while it does not -- in shared memory, in threads --
     and `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
@@ -3035,6 +3380,14 @@ def fill(section: GroupSection, context,
     if int(options.stack_elements) > 1:
         return None, (f'a trip of {options.stack_elements} stacked elements '
                       f'is no element group')
+    if (form or fma_form(context)) == 'slots':
+        slots, why = slots_plan(section, context)
+        if slots is not None:
+            return ElementGroup(slots.mapping.elements * slots.units,
+                                lower(section, context, lanes=True), 0,
+                                slots), ''
+        if section.chained:
+            return None, why
     if (form or fma_form(context)) == 'lanes':
         lanes, why = lanes_plan(section, context)
         if lanes is not None:
@@ -3308,4 +3661,6 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'ring_chunks', 'ring_notes', 'ring_volume',
            'second_stages', 'shared_bytes', 'SM_REGISTERS', 'split',
            'step_refusal', 'streamed', 'table_elements', 'tile_units',
-           'tiled']
+           'tiled', 'Exchange', 'SLOT_TARGETS', 'SLOT_WARPS', 'SlotMapping',
+           'plan_exchange', 'slot_needs', 'slot_registers', 'slot_terms',
+           'slots_plan', 'split_mapping', 'wrapped_mapping']
