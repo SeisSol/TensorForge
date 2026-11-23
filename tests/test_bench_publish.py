@@ -641,6 +641,28 @@ def test_the_old_generators_part_into_fusion_and_code(tmp_path):
     assert out.name == 'legacy-A-elastic-f64'
 
 
+@pytest.mark.parametrize('kind', ['columns', 'bars'])
+def test_the_old_generators_upright_and_as_bars(tmp_path, kind):
+    """The same comparison stood upright and as bars: fusing, the code and
+    the whole they multiply to, at the largest launch -- the smallest left
+    out -- the kernels along the bottom, the ratios up a log axis."""
+    _legacy_run(tmp_path / 'runs', _legacy_rows())
+    field = _tree(tmp_path / 'runs', [_point('gpu_volume', 'A', 4, 0.9)])
+    make = {'columns': publish.figure_legacy_columns,
+            'bars': publish.figure_legacy_bars}[kind]
+    (out,), skipped = make(field, ['gpu_volume'], 'wall')
+    assert not skipped
+    assert out.name == f'legacy-{kind}-A-elastic-f64'
+    entry, = out.rows
+    assert entry['fusion'] * entry['code'] == pytest.approx(
+        entry['total_large'])
+    assert 'ymode=log' in out.tex and 'xmode=log' not in out.tex
+    assert out.tex.count('\\addplot') == 3
+    assert ('\\texttt{volume}' in out.tex)
+    assert ('ybar' in out.tex) == (kind == 'bars')
+    assert 'smallest' not in out.caption.split('largest launch')[0]
+
+
 def test_without_the_old_generators_say_where_to_get_them(tmp_path):
     made, why = publish.figure_legacy(
         _tree(tmp_path, [_point('gpu_volume', 'A', 4, 0.5)]),
@@ -1119,6 +1141,7 @@ def test_the_preview_compiles(tmp_path):
             'simulations', 'traffic', 'buildcost', 'legacy'} <= kinds, \
         sorted(kinds)
     assert {'legacy-A-elastic-f64', 'legacy-roofline-A-elastic-f64',
+            'legacy-columns-A-elastic-f64', 'legacy-bars-A-elastic-f64',
             'legacy-elastic-f64'} <= {o.name for o in outputs}
     out = tmp_path / 'pub'
     publish.write(outputs, out, 'test', {'skipped': skipped})
