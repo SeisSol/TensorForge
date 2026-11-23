@@ -189,22 +189,32 @@ def _exported(kernel, export, arch, backend):
     return gen
 
 
-def test_a_multiply_add_through_dpp_is_arithmetic_too():
+def test_a_multiply_add_through_dpp_is_arithmetic_too(monkeypatch):
     """CDNA builds its double-precision contractions from `fmacdpp`, a call
     and not an `fma`, and the count saw none of them: `gpu_localFluxAll` at
     elastic order 4 issued 540 flops per element on gfx90a against 90 396
     once counted -- below even what the operation needs -- while claiming
-    to be exact.  The same kernel on a wave of 32 performs about what it
-    does on a warp of 32, give or take the padding."""
+    to be exact.  The calls written as blocks (`amd.dpp_block`) did it again:
+    a block counted their code but not their flops, 540 once more, and
+    SeisSol's F64 rates on CDNA in paper-1106 a two-hundredth of what they
+    were.  So: the count is the operation's at least, and the same with the
+    calls as blocks and one by one.  (Against the same kernel on a warp of
+    32, as this once read, no longer: the guards there now count a tail at
+    the lanes it reaches, 66 384.)"""
     from tensorforge.analysis.cost import list_cost
+    from tensorforge.backend.instructions.compute.primitives.amd import (
+        dpp_block)
 
     amd = _exported('gpu_localFluxAll', 'elastic-4-d-s1', 'gfx90a', 'hip')
-    nvidia = _exported('gpu_localFluxAll', 'elastic-4-d-s1', 'sm_90', 'cuda')
-    assert 'fmacdpp' in amd.get_kernel()
+    text = amd.get_kernel()
+    assert 'fmacdpp' in text or 'v_fmac_f64_dpp' in text
     issued = pipeline.executed_flops(amd)
     assert issued is not None and amd.metrics.emitted_flops_exact
     assert issued >= list_cost(amd._given, batch=1).flops
-    assert issued == pytest.approx(pipeline.executed_flops(nvidia), rel=0.1)
+    monkeypatch.setattr(dpp_block, 'ENABLED', False)
+    calls = _exported('gpu_localFluxAll', 'elastic-4-d-s1', 'gfx90a', 'hip')
+    assert 'fmacdpp' in calls.get_kernel()
+    assert pipeline.executed_flops(calls) == issued
 
 
 def test_a_matrix_builtin_leaves_the_count_open_rather_than_short():

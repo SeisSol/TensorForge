@@ -1474,6 +1474,13 @@ class Emitter:
         for s in run:
             self._record_code(s.op, s)
             self._record_mix(s)
+            # Their flops too, as each call counts them on its own (`_FMA_CALL`
+            # in `_emit_stmt`): written as a block, the arithmetic is the same.
+            # Left out, a kernel made of blocks counted none of it -- SeisSol's
+            # F64 kernels on CDNA at a two-hundredth of their arithmetic, or
+            # with nothing counted, on the dense figure (paper-1106).
+            acc = s.target[0] if s.target else (s.args[0] if s.args else None)
+            self._record_work('fma', acc, work=False)
         self._record_code_units(blocks.waits_in(run))
         self.writer(blocks.render(run, self.operand, after=self._dpp_after))
 

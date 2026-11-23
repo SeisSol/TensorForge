@@ -72,6 +72,23 @@ def _lines(template):
     return re.findall(r'"([^"]*)\\n\\t"', template)
 
 
+def test_a_block_counts_the_flops_of_its_calls(monkeypatch):
+    """A run written as one block does the arithmetic its calls do, and the
+    executed flop count (`analysis.pipeline.executed_flops`) says so: the
+    same with blocks as with the calls one by one.  A block once counted its
+    code and mix but not its flops, which left SeisSol's F64 kernels on CDNA
+    at a two-hundredth of their arithmetic in paper-1106's rates.  F64:
+    in F32 the operator products take the MFMA tile, which counts none."""
+    from tensorforge.analysis.pipeline import executed_flops
+    blocks = _volume('gfx942')
+    assert BLOCK.findall(blocks.get_kernel())
+    monkeypatch.setattr(dpp_block, 'ENABLED', False)
+    calls = _volume('gfx942')
+    assert not BLOCK.findall(calls.get_kernel())
+    assert executed_flops(calls) is not None
+    assert executed_flops(blocks) == executed_flops(calls)
+
+
 def test_always_waits_on_both_sides_of_every_block():
     """`always`, as before: on gfx942 every fused product is in a block, each
     block waits once in front and once behind and takes at most `MAX_RUN`
