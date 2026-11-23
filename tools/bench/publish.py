@@ -42,6 +42,7 @@ number in the text can be checked against the one in the figure.
 | `figures/configs-*` | runs | does a configuration -- or another generator -- help? |
 | `figures/fusion-*` | split runs | what is fusing a kernel's chain worth? |
 | `figures/legacy-*` | legacy runs | what does TensorForge gain on gemmforge and chainforge, and from what? |
+| `figures/legacy-columns-*`, `figures/legacy-bars-*` | legacy runs | the same, upright and as bars: fusing and the code beside the whole they multiply to |
 | `figures/legacy-roofline-*` | legacy runs, ceilings | where does a kernel move under the roof, from their launches to one? |
 | `tables/legacy-*` | legacy runs | how many launches do they make of a kernel, and what do those move? |
 | `figures/lanes-*` | runs | how much of what a kernel issues is needed? |
@@ -572,12 +573,12 @@ def table_bound(described: Sequence, kernels: Sequence[str],
         mine = [r for r in rows if r['precision'] == prec]
         if not mine:
             continue
-        # A ridge is the architecture's: the backends it ran under share it.
+        # A ridge is the GPU's: the backends it ran under share it.
         ridges: Dict[str, float] = {}
         for m in fieldset.archs if fieldset is not None else ():
             c = fieldset.ceiling(m, dt)
             if c is not None and c.ridge:
-                ridges.setdefault(fieldset.architecture(m), c.ridge)
+                ridges.setdefault(fieldset.gpu(m), c.ridge)
         if not ridges:
             skipped.append(f'bound-{dt.lower()}: no {_dt_name(dt)} ceiling '
                            'measured')
@@ -2311,6 +2312,136 @@ def figure_legacy(fieldset: Field, kernels: Sequence[str], clock: str
                    f'is faster.  {_clock_sentence(clock)}')
         out.append(Output(f'legacy-{tag}', 'figure', tex, entries, caption))
     return out, skipped
+
+
+def _column_axis(groups: Sequence[Tuple[str, int]], values: Sequence[float],
+                 ylabel: str, rule: Optional[float] = 1.0) -> texout.Axis:
+    """`_dot_axis` stood upright: a column per kernel and order, the ratios
+    up a logarithmic axis -- twice and half as far from one -- with the rule
+    across at one, a hairline between one kernel's orders and the next's,
+    the orders as the ticks and each kernel's name under its orders, on
+    three lines in turn so that long names do not run into each other."""
+    lo, hi, ticks = _ratio_axis_range(values, rule or 1.0)
+    n = len(groups)
+    ax = texout.Axis(options=[
+        'tf', 'tf legend above', 'ymode=log', 'log basis y=2',
+        f'ymin={lo:g}, ymax={hi:g}',
+        f'ytick={{{",".join(f"{t:g}" for t in ticks)}}}',
+        f'yticklabels={{{",".join(f"{t:g}" for t in ticks)}}}',
+        f'xtick={{{",".join(str(i) for i in range(n))}}}',
+        'xticklabels={' + ','.join(str(o) for _, o in groups) + '}',
+        'xticklabel style={font=\\scriptsize, color=tfink}',
+        f'xmin=-0.7, xmax={n - 0.3}', 'xmajorgrids=false',
+        'clip mode=individual', 'height=0.45\\tfwidth',
+        f'ylabel={{{ylabel}}}'])
+    if rule:
+        ax.raw.append(texout.hrule(rule))
+    start, kernel = 0, 0
+    for i in range(1, n + 1):
+        if i < n and groups[i][0] == groups[start][0]:
+            continue
+        # Centred under its orders; the last kernel's name ends at the
+        # axis's right edge instead, so that a long one stays inside.
+        mid, anchor = (start + i - 1) / 2, 'north'
+        if i == n:
+            mid, anchor = n - 0.3, 'north east'
+        shift = ('-1.5em', '-2.6em', '-3.7em')[kernel % 3]
+        ax.raw.append(
+            f'\\node[anchor={anchor}, font=\\scriptsize, color=tfink, '
+            f'yshift={shift}] at ({{axis cs:{mid:g},1}}|-{{rel axis cs:0,0}}) '
+            f'{{\\texttt{{{texout.escape(short(groups[start][0]))}}}}};\n')
+        if i < n:
+            ax.raw.append(
+                f'\\draw[tfgrid] ({{axis cs:{i - 0.5:g},1}}|-{{rel axis '
+                f'cs:0,0}}) -- ({{axis cs:{i - 0.5:g},1}}|-{{rel axis '
+                f'cs:0,1}});\n')
+        start, kernel = i, kernel + 1
+    return ax
+
+
+#: The upright and the bar forms of the legacy comparison: the whole at the
+#: largest launch and the two steps it parts into, each a series -- the
+#: smallest launch left out, as the bars cannot show it beside the two
+#: factors it is not the product of.
+LEGACY_PARTS = (('fusion', 'fusing the kernel'), ('code', 'the code'),
+                ('total_large', 'all of it'))
+
+
+def _legacy_variant(fieldset: Field, kernels: Sequence[str], clock: str,
+                    kind: str) -> Tuple[List[Output], List[str]]:
+    """The legacy comparison of `figure_legacy`, drawn upright (`columns`:
+    a mark per series, as there) or as bars side by side (`bars`: fusing,
+    the code and the whole they multiply to, from one up or down)."""
+    found = _legacy(fieldset, kernels)
+    if not found:
+        return [], [f'legacy-{kind}: no kernel measured against gemmforge '
+                    'and chainforge (suites/seissolforge.py)']
+    out, skipped = [], []
+    styles = {'columns': {'total_large': 'tf s1, only marks',
+                          'fusion': 'tf s3, only marks',
+                          'code': 'tf s4, only marks'},
+              'bars': {'total_large': 'fill=tfc1, draw=none, mark=none',
+                       'fusion': 'fill=tfc3, draw=none, mark=none',
+                       'code': 'fill=tfc4, draw=none, mark=none'}}[kind]
+    for (arch, dt, eq), by_kernel in sorted(found.items()):
+        entries = [e for (k, o, run), by_config in by_kernel.items()
+                   for e in [_legacy_entry(k, o, run, by_config, clock)]
+                   if e is not None]
+        tag = f'{kind}-{arch}-{eq}-{dt.lower()}'
+        values = [e[key] for e in entries for key, _ in LEGACY_PARTS
+                  if e.get(key)]
+        if not values:
+            skipped.append(f'legacy-{tag}: no time per element to divide')
+            continue
+        entries.sort(key=lambda e: (kernels.index(e['kernel']), e['order'],
+                                    e['run']))
+        groups = [(e['kernel'], e['order']) for e in entries]
+        ax = _column_axis(groups, values,
+                          'speed-up of TensorForge\\\\over gemmforge-chainforge')
+        ax.options.append('ylabel style={align=center}')
+        if kind == 'bars':
+            ax.options += ['ybar=0pt', 'bar width=0.26', 'log origin y=0',
+                           'area legend']
+        ax.plots = [texout.Plot(styles[key],
+                                [(x, e.get(key)) for x, e in
+                                 enumerate(entries)], legend)
+                    for key, legend in LEGACY_PARTS]
+        tex = texout.picture([ax], comment=(
+            f'generated by tools/bench/publish.py: {arch}, {_dt_name(dt)}, '
+            f'{eq}; time per element on the {clock} clock, one run, at the '
+            'largest launch both were measured at; all of it = '
+            'gemmforge-chainforge over baseline, fusing = chains over '
+            'baseline, the code = gemmforge-chainforge over chains'))
+        drawn = ('as bars side by side, from one up where TensorForge is '
+                 'faster and down where it is slower'
+                 if kind == 'bars' else
+                 'upright, above one where TensorForge is faster')
+        caption = (f'TensorForge against the generators SeisSol used before '
+                   f'it, gemmforge and chainforge, on '
+                   f'{texout.escape(fieldset.device_of(arch))}, '
+                   f'{_dt_name(dt)}, {eq}, {drawn}: their time per element '
+                   'over TensorForge\'s at the largest launch measured, and '
+                   'the two steps it parts into, which multiply to it -- '
+                   'fusing the whole kernel, TensorForge at the launches the '
+                   'old generators make of it against TensorForge in one '
+                   'launch, and the code, the old generators against '
+                   'TensorForge at those launches.  '
+                   f'{_clock_sentence(clock)}')
+        out.append(Output(f'legacy-{tag}', 'figure', tex, entries, caption))
+    return out, skipped
+
+
+def figure_legacy_columns(fieldset: Field, kernels: Sequence[str],
+                          clock: str) -> Tuple[List[Output], List[str]]:
+    """`figure_legacy` stood upright, the smallest launch left out."""
+    return _legacy_variant(fieldset, kernels, clock, 'columns')
+
+
+def figure_legacy_bars(fieldset: Field, kernels: Sequence[str], clock: str
+                       ) -> Tuple[List[Output], List[str]]:
+    """`figure_legacy` as bars: fusing, the code and all of it, side by
+    side per kernel and order, at the largest launch."""
+    return _legacy_variant(fieldset, kernels, clock, 'bars')
 
 
 def figure_legacy_roofline(fieldset: Field, kernels: Sequence[str],
@@ -4151,6 +4282,8 @@ def build(fieldset: Optional[Field], described: Sequence,
             'configs: one configuration only')
         add(figure_fusion(fieldset, kernels, clock))
         add(figure_legacy(fieldset, kernels, clock))
+        add(figure_legacy_columns(fieldset, kernels, clock))
+        add(figure_legacy_bars(fieldset, kernels, clock))
         add(figure_legacy_roofline(fieldset, kernels, styles))
         add(table_legacy(fieldset, kernels))
         add(figure_lanes(fieldset, kernels, styles),
