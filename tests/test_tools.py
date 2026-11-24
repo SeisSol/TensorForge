@@ -175,6 +175,10 @@ def test_every_mutation_still_applies():
     `--dry-run` is a string search.  Finding the anchor is the part that rots.
     """
     out = _run("mutation_check.py", "--dry-run", timeout=300)
+    # A table that does not even load reports no stale anchor either: after
+    # a merge left a group's list open, every group failed and this passed.
+    # The dry run's closing count says it got through the table.
+    assert "anchor(s) no longer match" in out, out[-2000:]
     stale = [ln for ln in out.splitlines()
              if "no longer testing anything" in ln]
     assert not stale, ("mutation anchors that no longer match:\n"

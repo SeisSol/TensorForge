@@ -6547,6 +6547,7 @@ GROUPS = {
         ("one round's launch said to loop",
          sub(GEN, '            self._context.get_user_options().one_round_grid\n',
              '            False\n', 1)),
+    ]),
     # --- warp roles (tensorforge-roles) ------------------------------------- #
     # A block in N roles (`pir.roles`, `IRBuilder.split_roles`): the chain of
     # links, each role's barrier id, the verifier's and the placement's
