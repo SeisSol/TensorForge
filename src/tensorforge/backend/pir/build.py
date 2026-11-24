@@ -1157,7 +1157,18 @@ class IRBuilder:
         names none.  The block's first warp writes it and every thread reads
         it, so it is the block's one: where the block holds several
         multiplications, each with its own window of their arena, `arena`
-        is the block's."""
+        is the block's.
+
+        Where the context names a target, no more columns than a block of
+        it allocates (`Target.tmem_columns`); without one, the powers of
+        two up to 512 `engines.tmem_alloc` holds every body to."""
+        target = getattr(self.context, 'target', None)
+        reach = getattr(target, 'tmem_columns', None)
+        reach = reach() if callable(reach) else None
+        if reach is not None and columns > reach:
+            raise IRError(f'{columns} columns of tensor memory on '
+                          f'{target.hw.model}, whose blocks allocate at most '
+                          f'{reach} (`Target.tmem_columns`)')
         slot = self.alloc(Datatype.I32, (1,), MemSpace.SHARED,
                           hint=f'{hint}Slot', arena=arena)
         tmem = self.value(BufferType(Datatype.F32,

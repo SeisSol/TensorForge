@@ -194,6 +194,13 @@ def _cache_hash(b: BuildInputs) -> str:
         # `TF_HIPCC_OPTIONS` rides along with the target (`toolchain.Hipcc`)
         h.update(" ".join(toolchain.COMPILERS["hip"].target_flags(
             b.target.arch)).encode())
+    elif b.target.backend == "cuda":
+        # the checks `TF_TMEM_ACCESS_CHECK` builds in (`toolchain.Nvcc.
+        # check_flags`): only a build with them switched on gets a key of its
+        # own, so the binaries built without them keep theirs
+        checks = toolchain.COMPILERS["cuda"].check_flags(b.target.arch)
+        if checks:
+            h.update(" ".join(checks).encode())
     for part in (b.includes_src, b.kernel_src, b.header_src, b.launcher_src, b.driver_src):
         h.update(part.encode())
     # and the runtime those sources include, which they name and do not hold

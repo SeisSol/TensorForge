@@ -859,16 +859,26 @@ class Target:
         return (self.hw.vendor == 'nvidia' and model.startswith('sm_')
                 and model.endswith('a'))
 
+    def family_specific(self) -> bool:
+        """Whether the target is an NVIDIA family's family-specific one
+        (`sm_100f`): the instructions every part of the family has may be
+        written for it, and the build is for all of them (`toolchain.Nvcc`)
+        -- `compute_100f` runs on 10.0, 10.3 and 10.7.  Its row of the table
+        is what the family's least member has."""
+        model = str(self.hw.model)
+        return (self.hw.vendor == 'nvidia' and model.startswith('sm_')
+                and model.endswith('f'))
+
     def register_budgets(self) -> bool:
         """Whether a warpgroup may move registers to or from the block's
         pool as it runs (`setmaxnreg`, engine op `REGISTER_BUDGET`): CUDA on
-        the arch-specific targets of sm_90 on -- sm_90a, sm_100a, sm_120a;
-        the plain targets' PTX has none of it.  The kernel's registers a
-        thread are then fixed at its entry (`__maxnreg__`), which is what
-        the budgets are drawn from."""
+        the arch- and family-specific targets of sm_90 on -- sm_90a,
+        sm_100a, sm_100f, sm_120a; the plain targets' PTX has none of it.
+        The kernel's registers a thread are then fixed at its entry
+        (`__maxnreg__`), which is what the budgets are drawn from."""
         level = self.hw.sm_level() if self.hw.vendor == 'nvidia' else None
-        return (self.backend == 'cuda' and self.arch_specific()
-                and level is not None and level >= 90)
+        return (self.backend == 'cuda' and level is not None and level >= 90
+                and (self.arch_specific() or self.family_specific()))
 
     def wgmma(self) -> bool:
         """Whether a product may go to wgmma, the asynchronous matrix engine
@@ -881,10 +891,29 @@ class Target:
     def tcgen05(self) -> bool:
         """Whether a product may go to tcgen05, the 5th generation tensor
         core with tensor memory (`engines.MATRIX_ENGINES['tcgen05']`): CUDA
-        on sm_100a.  Plain sm_100 has none of it in its PTX, and sm_120 has
-        none at all."""
-        return (self.backend == 'cuda' and self.arch_specific()
-                and self.hw.sm_level() == 100)
+        on the arch- and family-specific targets of a part with tensor
+        memory (`hw.tmem_columns`) -- sm_100a, sm_103a, sm_107a, sm_110a and
+        sm_100f, sm_103f, sm_107f, sm_110f.  A plain target has none of it in
+        its PTX, and sm_120 and sm_121 have none at all."""
+        return (self.backend == 'cuda'
+                and (self.arch_specific() or self.family_specific())
+                and getattr(self.hw, 'tmem_columns', None) is not None)
+
+    def tmem_columns(self, exclusive: bool = False) -> Optional[int]:
+        """The columns of tensor memory one block may allocate here, or None
+        without tcgen05 (`tcgen05`): a power of two up to `hw.tmem_columns`,
+        512 -- and with `exclusive`, any multiple of 32 up to what an
+        exclusive allocation reaches, 576 on sm_107a and sm_107f
+        (`hw.tmem_exclusive_columns`), and elsewhere no further than the
+        plain one: sm_100f's family has sm_100 in it.  What a planner budgets
+        against; nothing allocates exclusively yet, and an exclusive
+        allocation is its SM's only one (`hw_descr_db.yml`, sm_107)."""
+        if not self.tcgen05():
+            return None
+        wider = getattr(self.hw, 'tmem_exclusive_columns', None)
+        if exclusive and wider is not None:
+            return wider
+        return self.hw.tmem_columns
 
     def tensor_copies(self) -> bool:
         """Whether a window may go into the LDS as one tile by gfx12.5's

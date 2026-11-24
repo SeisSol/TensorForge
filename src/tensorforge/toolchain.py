@@ -120,9 +120,22 @@ def _arch_specific(arch: str) -> bool:
             and arch[len('sm_'):-1].isdigit())
 
 
+def _family_specific(arch: str) -> bool:
+    """`sm_100f`: an NVIDIA family's family-specific target."""
+    return (arch.startswith('sm_') and arch.endswith('f')
+            and arch[len('sm_'):-1].isdigit())
+
+
+def _switched_on(name: str) -> bool:
+    return os.environ.get(name, '') in ('1', 'true', 'yes', 'on')
+
+
 @dataclass(frozen=True)
 class Nvcc(Compiler):
     blocks_from_registers: bool = True
+
+    #: ptxas's guardrails on tensor memory (`check_flags`).
+    TMEM_ACCESS_CHECK = '-Xptxas=-g-tmem-access-check'
 
     def language_flags(self):
         # The device headers call `constexpr` host functions from device code.
@@ -130,21 +143,65 @@ class Nvcc(Compiler):
 
     def target_flags(self, arch):
         """`-arch=sm_90` for a part; for its arch-specific target (`sm_90a`)
-        the build of that target alone.  `-arch=sm_90a` compiles the source
-        for `compute_90` as well, the PTX a driver would JIT for another
-        part, and ptxas refuses there every instruction only `sm_90a` has --
-        wgmma, and tcgen05 on `sm_100a` (nvcc 13.4, 2026-11-20)."""
+        the build of that target alone, and for a family-specific one
+        (`sm_100f`) the build of the family's (nvcc 12.9 on).  `-arch=sm_90a`
+        compiles the source for `compute_90` as well, the PTX a driver would
+        JIT for another part, and ptxas refuses there every instruction only
+        `sm_90a` has -- wgmma, and tcgen05 on `sm_100a` (nvcc 13.4,
+        2026-11-20).
+
+        `TF_TMEM_ACCESS_CHECK=1` rides along with a target that has tcgen05,
+        as ptxas's guardrails on tensor memory (`check_flags`); off by
+        default."""
+        return self._target(arch) + self.check_flags(arch)
+
+    def _target(self, arch):
         if _arch_specific(arch):
             level = arch[len('sm_'):-1]
             return [f'-gencode=arch=compute_{level}a,code=sm_{level}a']
+        if _family_specific(arch):
+            level = arch[len('sm_'):-1]
+            return [f'-gencode=arch=compute_{level}f,code=sm_{level}f']
         return [f'-arch={arch}']
+
+    def check_flags(self, arch) -> List[str]:
+        """The checks the environment asks to have built into the code for
+        `arch`: ptxas's guardrails on tensor memory where
+        `TF_TMEM_ACCESS_CHECK` is set and `arch` has tcgen05
+        (`Target.tcgen05`) -- `-g-tmem-access-check`, ptxas's
+        `--g-tensor-memory-access-check` (CUDA 12.8 on, and on under `-g`
+        already).  A tcgen05 instruction on tensor memory nobody allocated,
+        at an address that is none, or a misused allocator stops the kernel
+        with `CUDA_EXCEPTION_20` ("Warp Tensor Memory Access Check"), and
+        tensor memory still allocated at its exit with `CUDA_EXCEPTION_21`
+        ("Warp Tensor Memory Leak").
+
+        For the GPU tests of tcgen05 to run once with the checks on -- and
+        so for whatever else builds through `target_flags`, the benchmark
+        and the tuner's builds among them.  Off by default: the guardrails
+        are code of their own.  Not asked elsewhere, where ptxas would
+        ignore the option with a note.  CUDA 13.4's ptxas has a known bug
+        with an exclusive allocation of 576 columns under it (sm_107,
+        `hw_descr_db.yml`): nothing here allocates exclusively yet, and
+        nvcc 13.5 builds one with the check."""
+        if not _switched_on('TF_TMEM_ACCESS_CHECK') or not (
+                _arch_specific(arch) or _family_specific(arch)):
+            return []
+        from tensorforge.common.target import Target
+        try:
+            tcgen05 = Target(arch, 'cuda').tcgen05()
+        except ValueError:
+            return []
+        return [self.TMEM_ACCESS_CHECK] if tcgen05 else []
 
     def report_flags(self):
         return ['-Xptxas=-v']
 
     #: Parts whose arch-specific features (`sm_90a`) the generated code may
-    #: use, so that the report is for the instructions it will run.
-    ARCH_SPECIFIC = ('sm_90', 'sm_100', 'sm_101', 'sm_120')
+    #: use, so that the report is for the instructions it will run.  Thor is
+    #: `sm_110` (`hw_descr.RENAMED`).
+    ARCH_SPECIFIC = ('sm_90', 'sm_100', 'sm_103', 'sm_107', 'sm_110',
+                     'sm_120', 'sm_121')
 
     def report_build(self, compiler, src, out_dir, arch, include):
         flags = self.target_flags(arch)

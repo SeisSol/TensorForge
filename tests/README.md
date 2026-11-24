@@ -360,7 +360,12 @@ Override the compiler binary via `$TF_NVCC`, `$TF_HIPCC`, `$TF_ICPX` or
 `$TF_ACPP`; the plain `$NVCC`, `$HIPCC`, `$ICPX` and `$ACPP` are honored
 where the `TF_` one is not set (`tensorforge.toolchain`).  `TF_SYCL_AOT=1`
 builds the SYCL binaries ahead of time for the detected device, and
-`$TF_ICPX_DEVICE_OPTIONS` reaches its device compiler.
+`$TF_ICPX_DEVICE_OPTIONS` reaches its device compiler.  `TF_TMEM_ACCESS_CHECK=1`
+builds every target with tcgen05 (`sm_100a`, `sm_100f`, ...) with ptxas's
+checks of tensor memory (`-Xptxas=-g-tmem-access-check`,
+`toolchain.Nvcc.check_flags`): a tcgen05 test that reaches tensor memory it
+did not allocate, or leaves some allocated, stops with `CUDA_EXCEPTION_20` or
+`CUDA_EXCEPTION_21`.  Off by default.
 
 ## CI use
 

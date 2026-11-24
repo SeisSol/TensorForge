@@ -67,11 +67,12 @@ class MemSpace(IntEnum):
     # what this enum is.  As one, it also earns the alias answer for free --
     # nothing reaches param space through a pointer into global.
     PARAM = 7
-    # NVIDIA's tensor memory (sm_100a): 128 lanes of 512 columns of 32 bits
-    # an SM, which a block allocates columns of (`Op.TMEM_ALLOC`) and the
-    # matrix engine keeps D in (tcgen05).  A space of its own: a thread
-    # reaches it through the engine's loads and stores alone, and nothing
-    # in shared or global memory aliases it.
+    # NVIDIA's tensor memory (`Target.tcgen05`): 128 lanes of 512 columns of
+    # 32 bits an SM -- 576 on sm_107, to an exclusive allocation
+    # (`Target.tmem_columns`) -- which a block allocates columns of
+    # (`Op.TMEM_ALLOC`) and the matrix engine keeps D in (tcgen05).  A
+    # space of its own: a thread reaches it through the engine's loads and
+    # stores alone, and nothing in shared or global memory aliases it.
     TMEM = 8
 
     @classmethod
