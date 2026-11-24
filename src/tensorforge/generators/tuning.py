@@ -281,6 +281,8 @@ def space(descrs, context: Context) -> List[Knob]:
                           lambda c: (0,) + widths(c) if widths(c) else ()))
     if _slot_form(descrs, context):
         knobs.append(Knob('min_blocks_per_sm', lambda c: SLOT_MIN_BLOCKS))
+        knobs.append(Knob('slot_output_read', lambda c: SLOT_OUTPUT_READS))
+        knobs.append(Knob('one_round_grid', lambda c: (False, True)))
     return knobs
 
 
@@ -292,6 +294,23 @@ def space(descrs, context: Context) -> List[Knob]:
 #: capped at 168 (12 warps an SM against 8), where at o4 the cap does not
 #: bind and at o6 in F64 it would spill.
 SLOT_MIN_BLOCKS = (1, 2, 3)
+
+#: Where the slot form's kernel is tried reading its output
+#: (`Options.slot_output_read`), and its grid (`Options.one_round_grid`).
+#: Neither placement nor grid is the better one across SeisSol's kernels and
+#: the two GPUs measured (GH200 Vista 1161223, GB200 Horizon 102368): masked
+#: saved the volume at o6 8-28 % of its time, localFluxAll at o4 in F64
+#: 14-19 %, where ahead saved localFluxAll at o4 in F32 26-30 % on GH200;
+#: one round saved the derivative up to 14 % and cost the volume at o4 5 %
+#: on GB200.  `element_group.slot_read` and `slot_one_round` pick by rule,
+#: within 1 % of the best of the four in 16 of the kernels on each GPU and
+#: at most 5.2 % behind; this space has the rest, for strategies a caller
+#: who times the builds runs (`MeasuredScore`) -- and not `simple_space`'s:
+#: the grid is a launch no build shows, and the placement moves the
+#: registers, the spill and the residency but not the bound the walk's
+#: margin is read off (`_worth_it`); under `autotune=compiled` it took
+#: SeisSol's five slot kernels from 39 s to 55 s and changed no pick.
+SLOT_OUTPUT_READS = ('ahead', 'masked')
 
 
 def _slot_form(descrs, context: Context) -> bool:

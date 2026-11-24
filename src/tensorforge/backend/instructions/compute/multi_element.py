@@ -4314,7 +4314,8 @@ def _slot_column(trip) -> None:
     reads = [i for i in rows if not (steps[0].assigns and i in write)]
     # Masked only where nothing reads the column as written behind it (a
     # phase's scaled copies, `_scaled`): the block's values stay in it.
-    masked = (trip.context.get_user_options().slot_output_read == 'masked'
+    from tensorforge.generators.element_group import slot_read
+    masked = (slot_read(trip.section, trip.context) == 'masked'
               and trip.mask is not None and not trip.fused)
 
     def read():

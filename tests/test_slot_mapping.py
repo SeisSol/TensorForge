@@ -303,19 +303,216 @@ def test_the_derivative_takes_its_phases_in_each_warp():
         ((0, 35),), ((0, 20),), ((0, 10),), ((0, 4),), ((0, 1),)]
 
 
-def test_the_tuner_tries_the_slot_forms_register_caps():
-    """`min_blocks_per_sm` 1, 2 and 3 where the kernel takes the slot form
-    (255, 255 and 168 registers a thread of its block of four warps), and
-    no such knob where it does not."""
+def test_the_tuner_tries_the_slot_forms_caps_reads_and_grids():
+    """Where the kernel takes the slot form: `min_blocks_per_sm` 1, 2 and 3
+    (255, 255 and 168 registers a thread of its block of four warps), the
+    output read ahead and masked, the grid by occupancy and in one round --
+    twelve builds where every one is tried; none of them where it does
+    not."""
     from tensorforge.generators import tuning
     descrs = me._descrs('volume', 6, 's')
     knobs = {k.name: k for k in tuning.space(
         descrs, me._context('sm_90', 's', **SLOTS))}
-    assert list(knobs['min_blocks_per_sm'].values(
-        tuning.Candidate())) == [1, 2, 3]
-    assert 'min_blocks_per_sm' not in {k.name for k in tuning.space(
+    origin = tuning.Candidate()
+    assert list(knobs['min_blocks_per_sm'].values(origin)) == [1, 2, 3]
+    assert list(knobs['slot_output_read'].values(origin)) == ['ahead',
+                                                              'masked']
+    assert list(knobs['one_round_grid'].values(origin)) == [False, True]
+    slots = [knobs[n] for n in ('min_blocks_per_sm', 'slot_output_read',
+                                'one_round_grid')]
+    assert len(list(tuning.enumerate_space(slots, origin))) == 12
+    lanes = {k.name for k in tuning.space(
         descrs, me._context('sm_90', 's', multi_element='force',
                             multi_element_fma='lanes'))}
+    assert not lanes & {'min_blocks_per_sm', 'slot_output_read',
+                        'one_round_grid'}
+
+
+def test_autotunes_walk_turns_neither_the_placement_nor_the_grid():
+    """`Options.autotune`'s walk (`simple_space`) turns neither: the grid is
+    a launch no build shows, and the placement leaves the bound its margin
+    is read off where it was."""
+    from tensorforge.generators import tuning
+    descrs = me._descrs('volume', 6, 's')
+    context = me._context('sm_90', 's', **SLOTS)
+    for mode in ('static', 'compiled'):
+        knobs = {k.name for k in tuning.simple_space(descrs, context,
+                                                     mode=mode)}
+        assert not knobs & {'slot_output_read', 'one_round_grid'}
+
+
+# -- `auto`: the slot form where it pays, the element form where it does not -- #
+
+AUTO = {'multi_element': 'auto'}
+
+
+def _seissol(kernel, order, precision):
+    """SeisSol's kernel as yateto sent it (the fixture's capture); with
+    `/sparse` after its name, its stars stored as SeisSol's GPU builds store
+    them (`spp`, `me.STAR_ENTRIES`), as the jobs' `vols` and `ders` do."""
+    import json
+    from tensorforge.frontend.yateto import DescriptionReader
+    name, _, stored = kernel.partition('/')
+    d = json.loads(json.dumps(me._seissol(name)(order, precision)))
+    if stored == 'sparse':
+        for t in d['tensors']:
+            if t['name'].startswith('star('):
+                t['storage'] = {'shape': [9, 9], 'type': 'spp',
+                                'entries': me.STAR_ENTRIES}
+    return DescriptionReader(None, {}).read(d)[0]
+
+
+#: (kernel, order, precision, arch, taken): what `auto` measured to pay and
+#: to lose, on GH200 (sm_90a), GB200 (sm_100a), sm_120 and a target nobody
+#: measured; `/sparse`, the stars stored sparse (`_seissol`).
+AUTO_CASES = [
+    ('gpu_volume', 4, 's', 'sm_90a', True), ('gpu_volume', 6, 'd', 'sm_90a',
+                                             True),
+    ('gpu_derivative', 6, 's', 'sm_90a', True),
+    ('gpu_derivative', 6, 'd', 'sm_90a', False),
+    ('gpu_derivative/sparse', 6, 'd', 'sm_90a', True),
+    ('gpu_derivative', 6, 'd', 'sm_100a', True),
+    ('gpu_localFlux[0]', 4, 'd', 'sm_90a', True),
+    ('gpu_localFlux[0]', 6, 's', 'sm_90a', False),
+    ('gpu_localFlux[0]', 6, 'd', 'sm_100a', False),
+    ('gpu_localFlux[0]', 6, 's', 'sm_80', False),
+    ('gpu_localFluxAll', 6, 's', 'sm_90a', True),
+    ('gpu_localFluxAll', 6, 'd', 'sm_100a', False),
+    ('gpu_localFluxAll', 6, 'd', 'sm_120', False),
+    ('gpu_derivative', 4, 's', 'sm_120', False),
+    ('gpu_derivative/sparse', 4, 's', 'sm_120', False),
+    ('gpu_derivative', 4, 'd', 'sm_120', True),
+    ('gpu_derivative', 4, 's', 'sm_100a', True),
+    ('gpu_derivative/sparse', 4, 's', 'sm_90a', True),
+    ('gpu_volume/sparse', 6, 'd', 'sm_90a', True)]
+
+
+@pytest.mark.parametrize('kernel,order,precision,arch,taken', AUTO_CASES,
+                         ids=[f'{k.replace("/", "-")}-o{o}{p}-{a}'
+                              for k, o, p, a, _ in AUTO_CASES])
+def test_auto_takes_the_slot_form_on_nvidia_where_it_pays(
+        kernel, order, precision, arch, taken):
+    """`multi_element=auto` on CUDA: the slot form -- the group `force`
+    takes in it -- where nothing in `SLOT_DECLINES` declines the section,
+    and no plan, the per-element kernel, where an entry does: localFlux at
+    o6 on every target, localFluxAll at o6 in F64 too, the derivative at o6
+    in F64 with its stars dense on sm_90 alone -- with them sparse the slot
+    form -- and at o4 in F32 on sm_120 alone."""
+    descrs = _seissol(kernel, order, precision)
+    group = eg.plan(descrs, me._context(arch, precision, **AUTO))
+    section = eg.classify(descrs)[0]
+    if taken:
+        assert group is not None and group.lanes.mapping is not None
+        forced = eg.plan(descrs, me._context(arch, precision, **SLOTS))
+        assert (group.elements, group.lanes) == (forced.elements,
+                                                 forced.lanes)
+        assert eg.slot_decline(section, me._context(arch, precision)) is None
+    else:
+        assert group is None
+        lanes, why = eg.auto_takes(section, me._context(arch, precision,
+                                                        **AUTO))
+        assert lanes is None and ('slower' in why or 'no faster' in why)
+
+
+def test_auto_takes_no_other_form_on_nvidia():
+    """Asked for the warp or the lanes form, `auto` takes nothing on CUDA;
+    `slots` and `auto` take the slot form."""
+    descrs = _seissol('gpu_volume', 4, 's')
+    section = eg.classify(descrs)[0]
+    for form in ('warp', 'lanes'):
+        context = me._context('sm_90a', 's', multi_element_fma=form, **AUTO)
+        lanes, why = eg.auto_takes(section, context)
+        assert lanes is None and f'the {form} form is asked for' in why
+        assert eg.plan(descrs, context) is None
+    for form in ('auto', 'slots'):
+        context = me._context('sm_90a', 's', multi_element_fma=form, **AUTO)
+        assert eg.plan(descrs, context).lanes.mapping is not None
+
+
+def test_every_decline_names_a_seissol_kernel_and_its_jobs():
+    """Each entry of `SLOT_DECLINES` is the signature of a SeisSol kernel at
+    an order the jobs measured, and says what was measured where: a job's
+    number, or the local run's date."""
+    signatures = {eg.slot_signature(eg.classify(_seissol(k, o, 's'))[0])
+                  for k in ('gpu_volume', 'gpu_localFlux[0]',
+                            'gpu_localFluxAll', 'gpu_derivative',
+                            'gpu_volume/sparse', 'gpu_derivative/sparse')
+                  for o in (4, 6)}
+    for entry in eg.SLOT_DECLINES:
+        assert entry.signature in signatures
+        assert re.search(r'(Vista|Horizon) \d+|local run, \d{4}-\d\d-\d\d',
+                         entry.why)
+
+
+#: (kernel, order, precision, arch, read, one round): the defaults' rule on
+#: GH200 (sm_90a), GB200 (sm_100a) and a target nobody measured, which takes
+#: GB200's.
+DEFAULTS = [
+    ('gpu_volume', 4, 's', 'sm_90a', 'ahead', True),
+    ('gpu_volume', 4, 'd', 'sm_90a', 'ahead', True),
+    ('gpu_volume', 6, 's', 'sm_90a', 'masked', True),
+    ('gpu_volume', 6, 'd', 'sm_90a', 'masked', True),
+    ('gpu_localFlux[0]', 4, 's', 'sm_90a', 'ahead', True),
+    ('gpu_localFlux[0]', 4, 'd', 'sm_90a', 'masked', True),
+    ('gpu_localFluxAll', 4, 's', 'sm_90a', 'ahead', True),
+    ('gpu_localFluxAll', 4, 'd', 'sm_90a', 'masked', True),
+    ('gpu_localFluxAll', 6, 's', 'sm_90a', 'ahead', True),
+    ('gpu_volume', 4, 's', 'sm_100a', 'masked', False),
+    ('gpu_volume', 4, 'd', 'sm_100a', 'masked', False),
+    ('gpu_volume', 6, 's', 'sm_100a', 'masked', True),
+    ('gpu_localFlux[0]', 4, 's', 'sm_100a', 'ahead', True),
+    ('gpu_localFlux[0]', 4, 'd', 'sm_100a', 'masked', True),
+    ('gpu_localFluxAll', 4, 's', 'sm_100a', 'ahead', True),
+    ('gpu_localFluxAll', 4, 'd', 'sm_100a', 'masked', True),
+    ('gpu_derivative', 4, 's', 'sm_100a', 'ahead', True),
+    ('gpu_volume', 4, 's', 'sm_120', 'masked', False)]
+
+
+@pytest.mark.parametrize('kernel,order,precision,arch,read,one_round',
+                         DEFAULTS, ids=[f'{k}-o{o}{p}-{a}' for k, o, p, a, *_
+                                        in DEFAULTS])
+def test_the_slot_forms_defaults_follow_the_measured_rule(
+        kernel, order, precision, arch, read, one_round):
+    """`slot_output_read=auto` (`slot_read`): a section that holds columns
+    -- the fluxes' faces, the derivative's orders -- reads masked in F64
+    and ahead in F32; any other masked, on GH200 only past 32 rows of
+    output.  `one_round_grid=auto` (`slot_one_round`): one round on GH200,
+    elsewhere where the section holds columns or its output is long.
+    Asked, as asked."""
+    descrs = _seissol(kernel, order, precision)
+    section = eg.classify(descrs)[0]
+    context = me._context(arch, precision)
+    assert eg.slot_read(section, context) == read
+    other = 'ahead' if read == 'masked' else 'masked'
+    assert eg.slot_read(section, me._context(
+        arch, precision, slot_output_read=other)) == other
+    group = eg.plan(descrs, me._context(arch, precision, **SLOTS))
+    assert eg.slot_one_round(group, context) is one_round
+    assert eg.slot_one_round(None, context) is False
+
+
+def test_the_slot_forms_grid_covers_the_batch_in_one_round():
+    """`one_round_grid=auto`: a block an element group where the kernel
+    takes the slot form and the rule asks for it (GH200 always, GB200 at
+    o6), the occupancy grid where it does not or where it is asked off, and
+    a resident grid where one is asked for."""
+    def launcher(order=4, arch='sm_90', **options):
+        return me._generate(me._descrs('volume', order, 's'),
+                            me._context(arch, 's', **options)
+                            ).get_launcher()
+    one_round = 'config.grid[0] = (numElements0 + 12 - 1) / 12;'
+    occupancy = 'gridsize = smCount * blocksPerSM;'
+    assert one_round in launcher(**SLOTS)
+    assert occupancy in launcher(**SLOTS, one_round_grid=False)
+    assert occupancy in launcher()
+    assert occupancy in launcher(multi_element='force')  # the warp form
+    assert occupancy in launcher(arch='sm_100a', **SLOTS)
+    assert one_round in launcher(6, 'sm_100a', **SLOTS)
+    resident = launcher(**SLOTS, resident_grid=1.0)
+    assert 'static_cast<std::size_t>(1.0 * gridsize)' in resident
+    kernel = me._generate(me._descrs('volume', 4, 's'),
+                          me._context('sm_90', 's', **SLOTS)).get_kernel()
+    assert '"persistent":false' in kernel
 
 
 def test_only_a_group_on_the_lanes_has_a_lane_map():
@@ -622,8 +819,9 @@ SLOT_CASES = [
     ('localFluxAll', 4, 'd'), ('direction', 6, 'd'), ('columns', 6, 's')]
 
 
-#: Beside the defaults: the output read in its masked block, and the grid
-#: covering the batch in one round (`one_round_grid`), one trip a block.
+#: Beside the defaults: the output read in its masked block, the grid
+#: covering the batch in one round (`one_round_grid`), one trip a block, and
+#: `multi_element=auto` where it takes the slot form and where it declines.
 SLOT_VARIANTS = [
     ('volume', 4, 's', {'slot_output_read': 'masked'}),
     ('volume', 6, 'd', {'slot_output_read': 'masked'}),
@@ -631,13 +829,16 @@ SLOT_VARIANTS = [
     ('localFluxAll', 4, 'd', {'slot_output_read': 'masked'}),
     ('volume', 4, 's', {'one_round_grid': True}),
     ('localFlux', 6, 'd', {'one_round_grid': True,
-                           'slot_output_read': 'masked'})]
+                           'slot_output_read': 'masked'}),
+    # `auto`: the slot form taken, and declined for the per-element kernel.
+    ('volume', 6, 's', {'multi_element': 'auto'}),
+    ('localFlux', 6, 's', {'multi_element': 'auto'})]
 GPU_CASES = [(s, o, p, {}) for s, o, p in SLOT_CASES] + SLOT_VARIANTS
 
 
 def _case_id(shape, order, precision, options):
-    suffix = ''.join(f'-{"1r" if k == "one_round_grid" else v}'
-                     for k, v in sorted(options.items()))
+    short = {'one_round_grid': '1r', 'multi_element': 'auto'}
+    suffix = ''.join(f'-{short.get(k, v)}' for k, v in sorted(options.items()))
     return f'{shape}-o{order}{precision}{suffix}'
 
 

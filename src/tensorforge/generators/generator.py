@@ -2185,13 +2185,23 @@ class Generator:
     (`resident_grid`) and no section waits on the whole grid, which has to
     be resident."""
     options = self._context.get_user_options()
-    if options.one_round_grid and options.resident_grid > 0:
+    if options.one_round_grid is True and options.resident_grid > 0:
       raise GenerationError(
           f'one_round_grid sizes the grid to the batch and resident_grid='
           f'{options.resident_grid} to the device; ask for one of them')
     return not (cooperative or options.resident_grid > 0
                 or (self._context.target.bounds_grid()
-                    and not options.one_round_grid))
+                    and not self._grid_one_round()))
+
+  def _grid_one_round(self) -> bool:
+    """Whether the grid is asked to cover the batch in one round
+    (`one_round_grid`): as asked, and under `auto` where the kernel takes
+    the slot form (`element_group.slot_one_round`)."""
+    asked = self._context.get_user_options().one_round_grid
+    if asked == 'auto':
+      return element_group.slot_one_round(self._element_group,
+                                          self._context)
+    return bool(asked)
 
   def _batch_parts(self, index: int, loop) -> int:
     """How many contiguous parts section `index`'s traversal cuts the batch
@@ -3570,7 +3580,8 @@ class Generator:
         # A grid asked to cover the batch (`one_round_grid`) holds a block
         # an element group, the loop's one trip each.
         persistent=bool(self._persistent_threading) and not (
-            self._context.get_user_options().one_round_grid
+            self._grid_one_round()
+            and self._context.get_user_options().resident_grid <= 0
             and not any(s.barrier for s in sections)),
         sections=sections)
 

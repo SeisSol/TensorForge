@@ -3847,17 +3847,226 @@ def fill(section: GroupSection, context,
 #: least work.  Elsewhere nothing, until the measurements say otherwise.
 AUTO_LANES: Dict[str, Tuple[Datatype, ...]] = {'intel': (Datatype.F32,)}
 
+#: Where `Options.multi_element` `auto` takes the slot form (`slots_plan`),
+#: by vendor: the element types of the sections it takes, but where a
+#: measurement declines one (`SLOT_DECLINES`).  Measured against the
+#: per-element kernel (d), the time an element, SeisSol's elastic kernels at
+#: o4 and o6 with the stars dense and as SeisSol's GPU builds store them,
+#: the best placement and grid: on GH200 (Vista 1161223) the volume
+#: 0.43-0.58 of d's, the volume with sparse stars 0.39-0.62, the derivative
+#: 0.63-0.89, localFlux 0.72-0.78 at o4, localFluxAll 0.34-0.62; on GB200
+#: (Horizon 102368) 0.35-0.54, 0.29-0.51, 0.41-0.78, 0.53-0.67 and
+#: 0.39-0.62 -- and slower at o6 where `SLOT_DECLINES` says.
+AUTO_SLOTS: Dict[str, Tuple[Datatype, ...]] = {
+    'nvidia': (Datatype.F32, Datatype.F64)}
+
+
+@dataclass(frozen=True)
+class SlotDecline:
+    """A kind of section the slot form ran slower than the per-element
+    kernel on, which `Options.multi_element` `auto` therefore builds per
+    element (`slot_decline`): what the section is (`slot_signature`), at
+    which element types and on which targets, and the measurement."""
+    #: Chained or not, its mixing products, its operator products, the
+    #: rows of its output, and an operand of its mixing stored sparse or
+    #: not (`slot_signature`).
+    signature: Tuple[bool, int, int, int, bool]
+    dtypes: Tuple[Datatype, ...]
+    #: The architectures it declines on, as prefixes of the target's
+    #: (`sm_90` takes `sm_90a`); None for every one.
+    archs: Optional[Tuple[str, ...]]
+    why: str
+
+
+#: Where `auto` declines the slot form, measured, against the per-element
+#: kernel (d): a kind of section that lost on GH200 and on GB200 declines on
+#: every target, those not measured included -- what lost there looks like
+#: the form's own cost and not the part's -- and one that lost on one of them
+#: on that one alone.  An entry from a new measurement: the section's
+#: `slot_signature` (the SeisSol kernel's, as `tests/test_slot_mapping.py`
+#: reads its descriptions -- with the stars stored sparse, as SeisSol's GPU
+#: builds store them, another signature), its element types, None or the
+#: architectures it lost on, and in `why` the times and the jobs that
+#: measured them.
+SLOT_DECLINES: Tuple[SlotDecline, ...] = (
+    # localFlux, a face: a mixing product and two operator products.
+    SlotDecline((False, 1, 2, 56, False), (Datatype.F32, Datatype.F64), None,
+                'localFlux at o6 ran slower in the slot form than per element, '
+                'its best placement and grid against d: on GH200 1.07x in F32 '
+                'and 1.21x in F64 (Vista 1161223), on GB200 1.22x and 1.19x '
+                '(Horizon 102368) -- nine shuffles a row of the 56 rows of I it '
+                'mixes, and five idle lanes of 32, against the element form'),
+    # localFluxAll, four faces.
+    SlotDecline((False, 4, 8, 56, False), (Datatype.F64,), None,
+                'localFluxAll at o6 in F64 ran slower in the slot form than per '
+                'element, its best placement and grid against d: on GH200 '
+                '2.08x, 904 B of spill (Vista 1161223), on GB200 1.04x '
+                '(Horizon 102368)'),
+    # The time derivative, an order a phase, its stars stored dense.
+    SlotDecline((True, 15, 15, 56, False), (Datatype.F64,), ('sm_90',),
+                'the derivative at o6 in F64 with its stars dense ran no faster '
+                'in the slot form than per element on GH200, its best placement '
+                'and grid against d: 1.01x (Vista 1161223 and 1167207) -- where '
+                'it was 0.78x on GB200 (Horizon 102368), and 0.83x on GH200 '
+                'with the stars sparse'),
+    # On sm_120, the derivative at o4 with its stars dense and sparse.
+    SlotDecline((True, 9, 9, 20, False), (Datatype.F32,), ('sm_120',),
+                'the derivative at o4 in F32 with its stars dense ran slower in '
+                'the slot form than per element on sm_120, measured on a '
+                'DRAM-bound consumer card (an RTX 5070 Laptop GPU, batch '
+                '65536): 1.15x d in one round and 1.29x by the occupancy grid '
+                '(the l9d package\'s local run, 2026-11-22), 1.12x under `auto` '
+                '(the l9e package\'s, 2026-11-24) -- where it ran 0.57-0.80x of '
+                'd\'s time on GH200 and GB200'),
+    SlotDecline((True, 9, 9, 20, True), (Datatype.F32,), ('sm_120',),
+                'the derivative at o4 in F32 with its stars sparse ran slower in '
+                'the slot form than per element on sm_120, measured on a '
+                'DRAM-bound consumer card (an RTX 5070 Laptop GPU, batch '
+                '65536): 1.11x d in one round and 1.22x by the occupancy grid '
+                '(the l9d package\'s local run, 2026-11-22), 1.01x under `auto`, '
+                'within the run\'s noise (the l9e package\'s, 2026-11-24) -- '
+                'where it ran 0.41-0.88x of d\'s time on GH200 and GB200'),
+)
+
+
+#: The output's rows past which a section counts as long for the slot form's
+#: defaults (`slot_read`, `slot_one_round`): o6's 56 and not o4's 20.
+SLOT_AHEAD_ROWS = 32
+
+#: The architectures, by prefix, whose own measurement the slot form's
+#: defaults follow where it differs from GB200's (`slot_read`,
+#: `slot_one_round`): GH200's.  Every other target takes GB200's, measured
+#: as well, and the newer of the two.
+SLOT_GH200_RULES = ('sm_90',)
+
+
+def _slot_shape(section: GroupSection) -> Tuple[bool, bool]:
+    """What the slot form's defaults read off a section: whether it holds
+    the columns its operator steps compute -- the fluxes' faces, the
+    derivative's orders, an operator step's output read by a later product
+    -- and whether its output is long (`SLOT_AHEAD_ROWS`)."""
+    cones = Cones(section)
+    held = any((cones.source(p) is not None
+                and cones.source(p).kind is Kind.OPERATOR)
+               for step in section.steps for p in step.products)
+    return held, cones.rows[1] > SLOT_AHEAD_ROWS
+
+
+def _gh200_rules(context) -> bool:
+    arch = str(getattr(context.target.hw, 'model', ''))
+    return any(arch.startswith(a) for a in SLOT_GH200_RULES)
+
+
+def slot_read(section: GroupSection, context) -> str:
+    """Where the slot form reads the output it adds into
+    (`Options.slot_output_read`): as asked, and under `auto` by what the
+    output's tiles held across the walk cost the section.  A section that
+    holds columns (`_slot_shape`) reads masked in F64 and ahead in F32 on
+    both GPUs measured; any other masked -- on GH200 (`SLOT_GH200_RULES`)
+    only where its output is long, ahead short of that.
+
+    SeisSol's elastic kernels, the time an element saved against the other
+    placement (GH200 Vista 1161223, GB200 Horizon 102368): masked saved the
+    volume 8-28 % at o6 on GH200 and 6-19 % on GB200, the sparse-star volume
+    at o6 in F64 20 % and 13 %, localFluxAll at o4 in F64 19 % and 14 %, the
+    volume at o4 on GB200 2-9 %; ahead saved localFluxAll in F32 26-30 % at
+    o4 on GH200 and 3 % on GB200 in one round, 9 % and 5 % at o6.  The
+    volume at o4 on GH200 is a wash: in one round ahead saves 4-5 % in two
+    kernels and loses 2 % in the other two.  With `slot_one_round`'s grid
+    the rule is within 1 % of the best of the four configurations in 16 of
+    the kernels the slot form takes on each GPU (20 and 21), at most 5.2 %
+    behind (the sparse-star volume at o6 in F32 on GH200, the derivative at
+    o6 in F64 on GB200), 0.8 and 0.9 % on average."""
+    asked = context.get_user_options().slot_output_read
+    if asked != 'auto':
+        return asked
+    held, long = _slot_shape(section)
+    if held:
+        return 'masked' if section.dtype is Datatype.F64 else 'ahead'
+    if _gh200_rules(context) and not long:
+        return 'ahead'
+    return 'masked'
+
+
+def slot_one_round(group: Optional['ElementGroup'], context) -> bool:
+    """Whether a kernel's grid covers the batch in one round where nobody
+    asked (`Options.one_round_grid` `auto`): where it takes the slot form --
+    on GH200 (`SLOT_GH200_RULES`) always, elsewhere where its section holds
+    columns or its output is long (`_slot_shape`).  The occupancy grid is
+    the alternative.
+
+    One round saved on GH200 (Vista 1161223) the derivative 5-14 %, the
+    volume 2-6 % at o4 and 4-8 % at o6 read masked, localFlux 7-9 % at o4 in
+    F64 -- and cost localFluxAll 4 % at o4 in F64, the sparse-star volume
+    3 % at o6 in F32.  On GB200 (Horizon 102368) it saved the volume 2-6 % at
+    o6, localFlux and localFluxAll in F32 7-9 % at o4, localFlux in F64 5 %,
+    the derivative 5-10 % at o6 in F32 and with the stars sparse -- and cost
+    the volume 5 % at o4, the sparse-star volume 2-3 % at o4 and 3 % at o6
+    in F32, the derivative 5 % at o6 in F64 with the stars dense,
+    localFluxAll 5 % at o4 in F64; the derivative at o4 within 2 % either
+    way."""
+    if group is None or group.lanes is None or group.lanes.mapping is None:
+        return False
+    if _gh200_rules(context):
+        return True
+    held, long = _slot_shape(group.section)
+    return held or long
+
+
+def slot_signature(section: GroupSection
+                   ) -> Tuple[bool, int, int, int, bool]:
+    """What `SLOT_DECLINES` knows a section by: chained or not, its mixing
+    and its operator products, the rows of its output, and whether an
+    operand of its mixing is stored sparse -- SeisSol's stars as its GPU
+    builds store them, which take the derivative at o6 in F64 on GH200 from
+    1.01x d's time in the slot form to 0.83x (Vista 1161223 and 1167207)."""
+    products = [p for step in section.steps for p in step.products]
+    kinds = [p.kind for p in products]
+    sparse = any(not p.other.tensor.is_dense() for p in products
+                 if p.kind is Kind.MIXING)
+    return (bool(section.chained), kinds.count(Kind.MIXING),
+            kinds.count(Kind.OPERATOR), Cones(section).rows[1], bool(sparse))
+
+
+def slot_decline(section: GroupSection, context) -> Optional[SlotDecline]:
+    """The entry of `SLOT_DECLINES` that declines `section` on the context's
+    target, or None."""
+    arch = str(getattr(context.target.hw, 'model', ''))
+    signature = slot_signature(section)
+    for entry in SLOT_DECLINES:
+        if (entry.signature == signature and section.dtype in entry.dtypes
+                and (entry.archs is None
+                     or any(arch.startswith(a) for a in entry.archs))):
+            return entry
+    return None
+
 
 def auto_takes(section: GroupSection,
                context) -> Tuple[Optional[Lanes], str]:
     """The lanes form's plan of `section` where `Options.multi_element`
-    `auto` takes it on the context's target, or None and why not: where
-    the target's vendor takes the section's element type (`AUTO_LANES`),
-    the lanes form is not declined (`Options.multi_element_fma` `warp`),
-    and the plan holds the output in one row range -- where it cuts more,
-    each range computes again the rows of a value the others need too,
-    which nothing has measured to pay yet."""
+    `auto` takes it on the context's target, or None and why not.
+
+    On NVIDIA its slot form (`AUTO_SLOTS`), chained sections included,
+    unless another form is asked for (`Options.multi_element_fma`) or a
+    measurement declines it (`SLOT_DECLINES`).  Elsewhere the lanes form:
+    where the target's vendor takes the section's element type
+    (`AUTO_LANES`), the lanes form is not declined (`Options.
+    multi_element_fma` `warp`), and the plan holds the output in one row
+    range -- where it cuts more, each range computes again the rows of a
+    value the others need too, which nothing has measured to pay yet."""
     vendor = getattr(context.target.hw, 'vendor', None)
+    if (context.target.backend, vendor) in SLOT_TARGETS:
+        if section.dtype not in AUTO_SLOTS.get(vendor, ()):
+            return None, (f'`auto` takes no {section.dtype.name} section on '
+                          f'{vendor} (`AUTO_SLOTS`)')
+        asked = context.get_user_options().multi_element_fma
+        if asked not in ('auto', 'slots'):
+            return None, (f'`auto` takes the slot form on {vendor}, and the '
+                          f'{asked} form is asked for')
+        decline = slot_decline(section, context)
+        if decline is not None:
+            return None, decline.why
+        return slots_plan(section, context)
     if section.chained:
         return None, ('`auto` takes no chained section: none is measured '
                       'yet')
@@ -3879,8 +4088,9 @@ def auto_takes(section: GroupSection,
 def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
     """The section's multi-element plan, or None: where
     `Options.multi_element` is `force`, every product classifies and the
-    fill rule finds a group; where `auto`, the lanes form's group where
-    `auto_takes` takes the section."""
+    fill rule finds a group; where `auto`, the group of the form
+    `auto_takes` takes the section in -- the slot form on NVIDIA, the lanes
+    form elsewhere."""
     mode = context.get_user_options().multi_element
     if mode not in ('force', 'auto'):
         return None
@@ -3888,9 +4098,11 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
     if section is None:
         return None
     if mode == 'auto':
-        if auto_takes(section, context)[0] is None:
+        taken = auto_takes(section, context)[0]
+        if taken is None:
             return None
-        group, _ = fill(section, context, form='lanes')
+        group, _ = fill(section, context, form=(
+            'slots' if taken.mapping is not None else 'lanes'))
         return group
     group, _ = fill(section, context)
     return group
@@ -3932,4 +4144,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'tiled', 'BROADCASTS', 'Exchange', 'SLOT_TARGETS', 'SLOT_WARPS',
            'SlotMapping',
            'plan_exchange', 'slot_needs', 'slot_registers', 'slot_terms',
-           'slots_plan', 'split_mapping', 'wrapped_mapping']
+           'slots_plan', 'split_mapping', 'wrapped_mapping', 'AUTO_SLOTS',
+           'SLOT_AHEAD_ROWS', 'SLOT_DECLINES', 'SLOT_GH200_RULES', 'SlotDecline',
+           'slot_decline',
+           'slot_one_round', 'slot_read', 'slot_signature']
