@@ -329,6 +329,18 @@ def parse_matrix_tile(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_spans` takes.
+MATRIX_SPANS = ('kept', 'dense')
+
+
+def parse_matrix_spans(text: str) -> str:
+  """`kept` or `dense` (`Options.matrix_spans`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_SPANS:
+    raise ValueError(f'expected one of {MATRIX_SPANS}, got {text!r}')
+  return value
+
+
 def parse_matrix_consumers(text: str) -> int:
   """1 to 4 (`Options.matrix_consumers`)."""
   value = int(str(text).strip())
@@ -2956,6 +2968,18 @@ declare('matrix_tile',
             'lanes hold.  Where the section cannot take it, the plan says '
             'why, and the kernel\'s comment (`element_group.tile_notes`).  '
             'Not measured yet.')
+
+declare('matrix_spans',
+        default='kept',
+        env='TF_MATRIX_SPANS',
+        parse=parse_matrix_spans,
+        doc='What of B the high-order tile streams and multiplies a block of '
+            'K (`matrix_tile` `high`, `element_group.tile_chunks`): `kept`, '
+            'the default, each product\'s kept span -- its tiles of N from '
+            'its first nonzero one to its last, in the engine\'s granules -- '
+            'the block\'s first product whole, so that D starts fresh; '
+            '`dense`, every product\'s whole width, as the tilings before '
+            'the tile.')
 
 declare('matrix_consumers',
         default=2,

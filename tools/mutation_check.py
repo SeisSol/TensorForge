@@ -6887,6 +6887,66 @@ GROUPS = {
          sub(BATCHLOOP, '            if mults != self._element_rows + self._producer_rows:\n',
              '            if mults != self._group_size + self._producer_rows:\n', 1)),
     ]),
+    # --- the high-order tile, H2: B in kept spans (tensorforge-hotile)
+    'hispans': ('tests/test_hiorder_tile.py -n 6', [
+        ("a span starting where its first entry is, off the engine's granule",
+         sub(ME_GROUP, '    lo = found[0] - found[0] % granule\n', '    lo = found[0]\n', 1)),
+        ("a span's last granule dropped",
+         sub(ME_GROUP, '    hi = min(stage.width, -(-(found[-1] + 1) // granule) * granule)\n',
+             '    hi = min(stage.width, (found[-1] + 1) // granule * granule)\n', 1)),
+        ("the first block's first piece not whole",
+         sub(ME_GROUP, '            if not out and not pieces:\n                span = (0, stages[p].width)\n',
+             '', 1)),
+        ("every block's first piece whole",
+         sub(ME_GROUP, '            if not out and not pieces:\n', '            if not pieces:\n', 1)),
+        ("the spans the options ask for not the tile's on wgmma",
+         sub(ME_GROUP, "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
+                       "                            spans_asked(context))\n",
+             "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
+                       "                            'dense')\n", 1)),
+        ("the spans kept where known zeros are not skipped",
+         sub(ME_GROUP, "    if not getattr(options, 'skip_known_zeros', True):\n        return 'dense'\n", '', 1)),
+        ("an inactive group taken",
+         sub(ME_GROUP, '        if empty:\n            return (f\'block{"s" if len(empty) > 1 else ""} \'\n',
+             '        if False:\n            return (f\'block{"s" if len(empty) > 1 else ""} \'\n', 1)),
+        ("the table's span read from the stage's first row",
+         sub(ME_GROUP, '            for n in range(lo, hi):\n', '            for n in range(0, hi - lo):\n', 1)),
+        ("a chunk counted at its stages' widths",
+         sub(ME_GROUP, '    return sum(piece[2] * ((piece[4] - piece[3]) if len(piece) > 3\n',
+             '    return sum(piece[2] * ((piece[4] - piece[3]) if False\n', 1)),
+        ("a piece's lower halves past the stage's width, not its span's",
+         sub(ME_SECTION, '        half = self.rows * self.width\n',
+             '        half = self.rows * self.stage.width\n', 1)),
+        ("a chunk's pieces the stage's width apart in its slot",
+         sub(ME_SECTION, '            offset += 2 * rows * (hi - lo)\n',
+             '            offset += 2 * rows * stage.width\n', 1)),
+        ("a wgmma span's products into D's registers of its columns, not from the first",
+         sub(ME_SECTION, '                span = accs[:piece.width // 2]\n',
+             '                span = accs[piece.lo // 2:(piece.lo + piece.width) // 2]\n', 1)),
+        ("a wgmma span short of its stage's last row",
+         sub(ME_GROUP, '            if tile is not None and tile.descending:\n'
+                       '                # On to the stage\'s last row, the first of the descending\n'
+                       '                # order (`TileRows.descending`).\n'
+                       '                span = (span[0], stages[p].width)\n', '', 1)),
+        ("the wgmma spans' tiles laid first first in the table",
+         sub(ME_GROUP, '        if section.tile is not None and section.tile.descending:\n'
+                       '            # The span\'s tiles of N last first (`TileRows.descending`).\n',
+             '        if False:\n'
+             '            # The span\'s tiles of N last first (`TileRows.descending`).\n', 1)),
+        ("D's columns read back in the ascending order on wgmma",
+         sub(ME_SECTION, "                   n - 8 * (i // 4 + 1) + i % 2, hint='n')\n",
+             "                   8 * (i // 4) + i % 2, hint='n')\n", 1)),
+        ("a span's products into D's first columns on tcgen05",
+         sub(ME_SECTION, '                              + STAR_ROWS * ia + kt, d_column=piece.lo,\n',
+             '                              + STAR_ROWS * ia + kt, d_column=0,\n', 1)),
+        ("a span multiplied at the step's N on tcgen05",
+         sub(ME_SECTION, '                    b.tcgen05(n if piece.width == piece.stage.width\n'
+                         '                              and not piece.lo else piece.width, tmem,\n',
+             '                    b.tcgen05(n, tmem,\n', 1)),
+        ("the spans' option defaulting to dense",
+         sub(OPTIONS, "declare('matrix_spans',\n        default='kept',\n",
+             "declare('matrix_spans',\n        default='dense',\n", 1)),
+    ]),
 }
 
 

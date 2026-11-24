@@ -9,14 +9,20 @@ role of its own, sharing the prepared operator ring that a producer's warp
 fills while another stages the inputs; on tcgen05 (sm_100a) the three roles
 at as many elements as tensor memory's lanes hold.
 
+B streams in kept spans (`Options.matrix_spans`, `element_group.
+tile_chunks`): of each product's block of K only its tiles of N from the
+first that holds an entry to the last, in the engine's granules, each
+multiplied at its own N into D's columns of it.
+
 What is checked here: the plan -- the options' defaults, the rows' map, the
 group and the block the fill rule takes on each engine, the refusals and
-the kernel's note of them; the kernel's text -- the roles, their barriers
-and the rings' counts; the PIR -- the rings' hand-offs by role, verified
+the kernel's note of them; the kept spans against the operators' entries,
+and the prepared table as the descriptors read it; the kernel's text -- the
+roles, their barriers, the rings' counts and the spans' widths; the PIR -- the rings' hand-offs by role, verified
 through every pass; the host oracle over two trips, the second's elements
-masked past the batch, against NumPy and without a race; the build for
-sm_90a and sm_100a read back; and on a GH200 / GB200 the volume against
-NumPy.
+masked past the batch, against NumPy and without a race, and with dense
+spans bit for bit what the kept ones give; the build for sm_90a and
+sm_100a read back; and on a GH200 / GB200 the volume against NumPy.
 """
 
 from __future__ import annotations
@@ -147,12 +153,12 @@ def test_where_the_tile_does_not_take_the_kernel_says_why(arch, precision,
 
 def test_the_kernel_says_what_the_tile_took():
     src = _kernel(8).get_kernel()
-    (note,) = [line.strip() for line in src.splitlines()
-               if line.strip().startswith('// tile:')]
+    (note, _) = [line.strip() for line in src.splitlines()
+                 if line.strip().startswith('// tile:')]
     assert '14 elements, 2 tiles of 7 on 63 of 64 rows' in note
     src = _kernel(8, 'sm_100a').get_kernel()
-    (note,) = [line.strip() for line in src.splitlines()
-               if line.strip().startswith('// tile:')]
+    (note, _) = [line.strip() for line in src.splitlines()
+                 if line.strip().startswith('// tile:')]
     assert 'in the three roles' in note
 
 
@@ -280,7 +286,7 @@ def _on_the_oracle(arch, order, count, **options):
         scale = np.abs(want[e]).max() or 1.0
         error = np.abs(got[e] - want[e]).max() / scale
         assert error <= 1e-6, (e, error)
-    return gen
+    return gen, got
 
 
 @pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
@@ -288,12 +294,12 @@ def test_two_trips_of_the_tile_on_the_oracle(arch):
     """Seventeen elements: a trip of fourteen and one of three, the eleven
     past the batch masked -- on wgmma the second tile's rows all of masked
     elements, its products run, its writes none."""
-    gen = _on_the_oracle(arch, 4, 17)
+    gen, _ = _on_the_oracle(arch, 4, 17)
     assert gen.built._element_group.elements == 14
 
 
 def test_one_consumer_warpgroup_on_the_oracle():
-    gen = _on_the_oracle('sm_90a', 4, 9, matrix_consumers=1)
+    gen, _ = _on_the_oracle('sm_90a', 4, 9, matrix_consumers=1)
     assert gen.built._element_group.elements == 7
 
 
@@ -303,8 +309,213 @@ def test_one_slot_of_the_input_ring_on_the_oracle(monkeypatch):
     read, the producer behind every consumer warp's last block of A
     (`_wgmma_tile`'s `done`) -- which the oracle's ring order checks."""
     monkeypatch.setattr(eg, 'PRODUCER_SLOTS', ())
-    gen = _on_the_oracle('sm_90a', 4, 17)
+    gen, _ = _on_the_oracle('sm_90a', 4, 17)
     assert gen.built._element_group.section.ring == 1
+
+
+# -- the kept spans ------------------------------------------------------------- #
+
+def _chunks(order=8, arch='sm_90a', **options):
+    section = _group(order, arch, **options).section
+    (step,) = [s for s in section.steps if s.lowering in eg.ASYNC_LOWERINGS]
+    return section, step, eg.tile_chunks(section, step)
+
+
+def test_the_spans_option_defaults_to_kept():
+    from tensorforge.common.options import parse_matrix_spans, registry
+    assert registry()['matrix_spans'].default == 'kept'
+    assert [parse_matrix_spans(t) for t in ('kept', 'Dense')] == ['kept',
+                                                                 'dense']
+    with pytest.raises(ValueError):
+        parse_matrix_spans('sparse')
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+@pytest.mark.parametrize('order', [4, 6, 8])
+def test_every_entry_of_b_is_in_exactly_one_kept_piece(arch, order):
+    """The kept spans against the operators' entries: every entry inside a
+    product's window in exactly one piece of its product -- the block of K
+    it is in, the rows of N of its span; the spans whole granules of the
+    engine's N (8 on wgmma, 16 on tcgen05) inside the stage, on wgmma each
+    on to the stage's last row (`TileRows.descending`), the first block's
+    first piece whole; at o6 and o8 fewer rows of N than the dense pieces'
+    (o8: 62 % of them on wgmma, 59 % on tcgen05)."""
+    section, step, chunks = _chunks(order, arch)
+    granule = section.tile.granule
+    assert granule == (16 if arch == 'sm_100a' else 8)
+    assert section.tile.descending == (arch == 'sm_90a')
+    stages = eg._step_stages(section, step)
+    first = chunks[0][0]
+    assert first[3:] == (0, stages[first[0]].width)
+    for chunk in chunks:
+        for p, k0, rows, lo, hi in chunk:
+            assert 0 <= lo < hi <= stages[p].width
+            assert lo % granule == 0 and hi % granule == 0
+            assert hi == stages[p].width or not section.tile.descending
+    for p, product in enumerate(step.products):
+        stage = stages[p]
+        (r0, r1), (d0, d1) = stage.window
+        pattern = product.first.tensor.nonzero_pattern
+        for kk in range(d0, d1):
+            for row in range(r0, r1):
+                if not pattern.is_nz((row, kk)):
+                    continue
+                n, k = row - stage.n0, kk - d0
+                held = [None for chunk in chunks
+                        for q, k0, rows, lo, hi in chunk
+                        if q == p and k0 <= k < k0 + rows and lo <= n < hi]
+                assert len(held) == 1, (p, row, kk)
+    kept = sum(rows * (hi - lo) for chunk in chunks
+               for _, _, rows, lo, hi in chunk)
+    dense = sum(rows * stages[p].width for chunk in chunks
+                for p, _, rows, _, _ in chunk)
+    assert kept <= dense
+    if order == 8:
+        assert round(kept / dense, 2) == (0.59 if arch == 'sm_100a'
+                                          else 0.62)
+
+
+def test_dense_spans_are_whole_widths():
+    section, step, chunks = _chunks(8, matrix_spans='dense')
+    stages = eg._step_stages(section, step)
+    assert section.tile.spans == 'dense'
+    assert all((lo, hi) == (0, stages[p].width) for chunk in chunks
+               for p, _, _, lo, hi in chunk)
+
+
+def test_the_spans_are_dense_where_known_zeros_are_not_skipped():
+    section, _, _ = _chunks(8, skip_known_zeros=False)
+    assert section.tile.spans == 'dense'
+
+
+def test_a_block_of_no_entry_is_refused(monkeypatch):
+    """A block of K that no product has an entry in -- an inactive group,
+    which the passes bring -- is refused with its reason, not taken."""
+    kept = eg.kept_span
+
+    def none_in_the_second_block(section, step, product, k0, rows, granule):
+        return None if k0 == 8 else kept(section, step, product, k0, rows,
+                                          granule)
+    monkeypatch.setattr(eg, 'kept_span', none_in_the_second_block)
+    group = _group(6)
+    assert group.section.tile is None
+    assert 'block 1 of K hold' in group.tile_note
+    assert 'inactive group' in group.tile_note
+
+
+@pytest.mark.parametrize('arch,sm', [('sm_90a', 90), ('sm_100a', 100)])
+def test_the_table_holds_each_kept_piece_as_its_descriptors_read_it(arch, sm):
+    """The prepared table walked as the descriptors read it (`_Piece`): a
+    chunk's pieces one after another, each its rows of K by its span's rows
+    of N in the canonical K-major layout over them -- core matrices of
+    eight rows of N by four of K, on wgmma the span's tiles of N last first
+    (`TileRows.descending`) -- the upper TF32 halves, then the lower; each
+    entry of the operator's window split (`tf32_halves`), zero outside it;
+    a chunk's elements what the ring copies (`chunk_volume`)."""
+    import numpy as np
+    from tensorforge.common.matrix.prepare import tf32_halves
+    section, step, chunks = _chunks(6, arch)
+    _, numbers, offsets = eg.prepared_table(section, step, sm)
+    numbers = np.asarray(numbers, dtype=np.float32)
+    stages = eg._step_stages(section, step)
+    at = 0
+    for chunk in chunks:
+        size = 0
+        for p, k0, rows, lo, hi in chunk:
+            stage = stages[p]
+            values = np.asarray(stage.tensor.get_values(), dtype=np.float64)
+            (r0, r1), (d0, d1) = stage.window
+            width = hi - lo
+            assert offsets[(p, k0)] == at
+            for k in range(rows):
+                for n in range(width):
+                    place = ((n // 8) * rows * 8 + (k // 4) * 32
+                             + (n % 8) * 4 + k % 4)
+                    # The laid row `n`: the span's `n` on tcgen05; on wgmma
+                    # its tile `n / 8` counted from the span's last.
+                    row = stage.n0 + (hi - 8 * (n // 8 + 1) + n % 8
+                                      if section.tile.descending else lo + n)
+                    col = d0 + k0 + k
+                    value = (values[row, col] if r0 <= row < r1 and col < d1
+                             else 0.0)
+                    upper, lower = tf32_halves(np.array([value],
+                                                        dtype=np.float32))
+                    assert numbers[at + place] == upper[0], (p, k0, n, k)
+                    assert numbers[at + rows * width + place] == lower[0]
+            at += 2 * rows * width
+            size += 2 * rows * width
+        assert eg.chunk_volume(section, step, chunk) == size
+    assert at == len(numbers)
+
+
+def test_the_kernel_multiplies_each_span_at_its_width():
+    """o8 on wgmma: a product a piece, its term and its tile -- three of
+    3xTF32 a piece, each tile its own -- at the piece's width: several N,
+    their sum the spans' rows of N; every one of them into the accumulators
+    from their first register (`TileRows.descending`)."""
+    section, step, chunks = _chunks(8)
+    src = _kernel(8).get_kernel()
+    widths = [int(n) for n in re.findall(r'wgmma\.mma_async\.sync\.aligned\.'
+                                         r'm64n(\d+)k8', src)]
+    pieces = [hi - lo for chunk in chunks for *_, lo, hi in chunk]
+    assert len(widths) == 2 * 3 * len(pieces)
+    assert sorted(widths) == sorted(2 * 3 * pieces)
+    assert len(set(widths)) > 1
+    firsts = re.findall(r'wgmma\.mma_async\.sync\.aligned\.m64n\d+k8[^;]*;"'
+                        r'\s*:\s*"\+f"\((\w+)\)', src)
+    assert len(firsts) == len(widths) and len(set(firsts)) == 2
+
+
+def test_the_kernel_says_what_the_spans_keep():
+    src = _kernel(8).get_kernel()
+    notes = [line.strip() for line in src.splitlines()
+             if line.strip().startswith('// tile:')]
+    assert any('B in kept spans: 62 % of the dense rows of N, 6 widths '
+               'from 40 to 120, each to the stage\'s last row' in note
+               for note in notes), notes
+    src = _kernel(8, matrix_spans='dense').get_kernel()
+    assert any('B dense' in line for line in src.splitlines()
+               if line.strip().startswith('// tile:'))
+
+
+def test_two_trips_of_kept_spans_on_tcgen05_on_the_oracle():
+    """o6 on tcgen05, seventeen elements: two trips, the second's D written
+    fresh over the first's in tensor memory -- which, unlike wgmma's
+    accumulators declared zero each trip, holds the last trip's D."""
+    _on_the_oracle('sm_100a', 6, 17)
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+def test_the_first_block_s_first_piece_is_whole(monkeypatch, arch):
+    """The first block's first piece whole whatever its product's own span
+    -- its product writes D first, every column fresh, which on tcgen05
+    tensor memory holds the last trip's D in otherwise -- here with every
+    span of the first block narrowed to a granule: the volume's operators
+    have entries on every row of N there, so that only this shows the rule
+    (`tile_chunks`)."""
+    kept = eg.kept_span
+
+    def narrowed(section, step, product, k0, rows, granule):
+        span = kept(section, step, product, k0, rows, granule)
+        return (0, granule) if k0 == 0 and span is not None else span
+    monkeypatch.setattr(eg, 'kept_span', narrowed)
+    section, step, chunks = _chunks(6, arch)
+    stages = eg._step_stages(section, step)
+    assert chunks[0][0][3:] == (0, stages[chunks[0][0][0]].width)
+
+
+@pytest.mark.parametrize('arch,order,count', [('sm_90a', 4, 17),
+                                              ('sm_100a', 6, 14)])
+def test_kept_and_dense_spans_compute_alike_on_the_oracle(arch, order,
+                                                          count):
+    """The kept spans leave out products of zeros alone: on the oracle every
+    output bit for bit what dense spans give, both against NumPy -- where
+    the spans are narrower than the stage: o4 on wgmma (83 % of the dense
+    rows of N), two trips, the second's elements masked past the batch; o6
+    on tcgen05 (73 %; at o4 its granule of 16 keeps every row), a trip."""
+    _, kept = _on_the_oracle(arch, order, count)
+    _, dense = _on_the_oracle(arch, order, count, matrix_spans='dense')
+    assert (kept == dense).all()
 
 
 # -- the build and the hardware ------------------------------------------------- #
@@ -341,9 +552,9 @@ def _ptxas(arch, tmp_path, order=8, **options):
     ('sm_90a', 'HGMMA', 2 * 99), ('sm_100a', 'UTCHMMA', 99)])
 def test_the_build_reads_back(arch, engine, products, tmp_path):
     """o8 built: every product an instruction of the engine's, as many as
-    the text has, and none of them serialized by ptxas: no C7510 (a wgmma
-    serialized for a register's use), C7511, C7514 or C7517 in its
-    report."""
+    the text has -- the 33 kept pieces' three each, every tile's -- and
+    none of them serialized by ptxas: no C7510 (a wgmma serialized for a
+    register's use), C7511, C7514 or C7517 in its report."""
     sass, report = _ptxas(arch, tmp_path)
     assert tma._count(sass, engine) == products
     for code in ('C7510', 'C7511', 'C7514', 'C7517'):

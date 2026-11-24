@@ -1930,6 +1930,27 @@ class TileRows:
     width: int
     per: int
     tiles: int
+    #: What of B a block streams and multiplies (`Options.matrix_spans`,
+    #: `tile_chunks`): `kept` spans, or `dense` whole widths.
+    spans: str = 'kept'
+
+    @property
+    def granule(self) -> int:
+        """The rows of N a span is made of: the engine's N, a multiple of
+        8 on wgmma and of 16 on tcgen05 at its M of 128 -- whose D column
+        a span starts at, too."""
+        return 16 if self.engine == 'tcgen05' else 8
+
+    @property
+    def descending(self) -> bool:
+        """Whether B's pieces lay their tiles of N last first, each span
+        running to its stage's last row (`tile_chunks`): on wgmma, so that
+        every span's products start at the accumulators' first register --
+        D's fragment gives a register the same column whatever N, but
+        ptxas serializes the wgmmas of a chain whose accumulators start
+        elsewhere (C7511).  On tcgen05 a span starts at its own column of
+        tensor memory instead (`d_column`)."""
+        return self.engine == 'wgmma'
 
     @property
     def m(self) -> int:
@@ -1962,6 +1983,87 @@ TILE_PRODUCER_WARPS = 2
 def tile_asked(context) -> str:
     """The tile the options ask for (`Options.matrix_tile`)."""
     return getattr(context.get_user_options(), 'matrix_tile', 'off')
+
+
+def spans_asked(context) -> str:
+    """What of B the options ask the tile to stream (`Options.
+    matrix_spans`): whole widths wherever known zeros are not skipped
+    (`Options.skip_known_zeros`), as `kept_tiles` keeps every tile then."""
+    options = context.get_user_options()
+    if not getattr(options, 'skip_known_zeros', True):
+        return 'dense'
+    return getattr(options, 'matrix_spans', 'kept')
+
+
+def kept_span(section: GroupSection, step: Step, product: int, k0: int,
+              rows: int, granule: int) -> Optional[Tuple[int, int]]:
+    """`(lo, hi)`: the rows of N of product `product`'s stage, from its
+    grid's first (`Stage.n0`), that hold an entry of its operator inside
+    the product's window at rows `k0` to `k0 + rows` of K -- from the first
+    such row to the last, in whole `granule`s, within the stage's width --
+    or None where none does; the whole width where the operator's pattern
+    says nothing (`Tensor.nonzero_pattern`)."""
+    p = step.products[product]
+    stage = _step_stages(section, step)[product]
+    pattern = getattr(p.first.tensor, 'nonzero_pattern', None)
+    if pattern is None:
+        return 0, stage.width
+    (r0, r1), (d0, d1) = stage.window
+    cols = range(d0 + k0, min(d1, d0 + k0 + rows))
+    found = [n for n in range(stage.width)
+             if r0 <= stage.n0 + n < r1
+             and any(pattern.is_nz((stage.n0 + n, kk)) for kk in cols)]
+    if not found:
+        return None
+    lo = found[0] - found[0] % granule
+    hi = min(stage.width, -(-(found[-1] + 1) // granule) * granule)
+    return lo, hi
+
+
+def _tile_pieces(section: GroupSection, step: Step) -> Tuple[
+        Tuple[Tuple[int, ...], ...], ...]:
+    """`tile_chunks`'s chunks, a block of K with no piece an empty one."""
+    tile = section.tile
+    stages = _step_stages(section, step)
+    out = []
+    for chunk in ring_chunks(section, step):
+        pieces = []
+        for p, k0, rows in chunk:
+            span = ((0, stages[p].width) if tile is None
+                    or tile.spans != 'kept'
+                    else kept_span(section, step, p, k0, rows, tile.granule))
+            if span is None:
+                continue
+            if not out and not pieces:
+                span = (0, stages[p].width)
+            if tile is not None and tile.descending:
+                # On to the stage's last row, the first of the descending
+                # order (`TileRows.descending`).
+                span = (span[0], stages[p].width)
+            pieces.append((p, k0, rows) + span)
+        out.append(tuple(pieces))
+    return tuple(out)
+
+
+def tile_chunks(section: GroupSection, step: Step) -> Tuple[
+        Tuple[Tuple[int, ...], ...], ...]:
+    """The chunks the high-order tile streams `step`'s B in
+    (`ring_chunks`'s, a block of K of every product a chunk), each piece
+    `(product, k0, rows, lo, hi)` -- the rows of N `lo` to `hi` of the
+    product's stage: its kept span (`kept_span`) where the tile keeps them
+    (`TileRows.spans`), its whole width where it does not; on wgmma the
+    span on to the stage's last row, its tiles laid last first
+    (`TileRows.descending`).  The first
+    piece of the first block whole, as its product is the first to write D
+    -- every column fresh from it on; a product with no entry in a block
+    no piece of it.  A block with none at all, an inactive group, the tile
+    refuses for now (`tile_refusal`): the volume's operators have none at
+    a pass of the whole of N."""
+    chunks = _tile_pieces(section, step)
+    if not all(chunks):
+        raise ValueError(f'{step.dest.alias}: a block of K with no entry of '
+                         f'any product')
+    return chunks
 
 
 def rowless(section: GroupSection) -> bool:
@@ -2013,6 +2115,14 @@ def tile_refusal(section: GroupSection, context) -> Optional[str]:
     width = step.cols[1] - step.cols[0]
     if step.lowering == 'wgmma' and width > 64:
         return f'an element\'s {width} rows are past a warpgroup\'s 64'
+    if section.tile is not None:
+        empty = [i for i, chunk in enumerate(_tile_pieces(section, step))
+                 if not chunk]
+        if empty:
+            return (f'block{"s" if len(empty) > 1 else ""} '
+                    f'{", ".join(map(str, empty))} of K hold no entry of '
+                    f'{step.dest.alias}\'s operators: an inactive group, '
+                    f'which the tile does not skip yet')
     return None
 
 
@@ -2052,7 +2162,8 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
         consumers = int(getattr(context.get_user_options(),
                                 'matrix_consumers', 2))
         for tiles in range(consumers, 0, -1):
-            tile = TileRows('wgmma', width, max(1, per), tiles)
+            tile = TileRows('wgmma', width, max(1, per), tiles,
+                            spans_asked(context))
             for slots in PRODUCER_SLOTS + (1,):
                 lowered = tile_lowered(section, context, tile, slots)
                 why = tile_refusal(lowered, context)
@@ -2071,7 +2182,7 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
                       f'elements of {width} rows, fewer than {MIN_ELEMENTS}')
     for elements in range(min(per, TCGEN05_ROWS // width), MIN_ELEMENTS - 1,
                           -1):
-        tile = TileRows('tcgen05', width, elements, 1)
+        tile = TileRows('tcgen05', width, elements, 1, spans_asked(context))
         lowered = tile_lowered(section, context, tile)
         why = tile_refusal(lowered, context)
         if why is not None:
@@ -2107,9 +2218,31 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
                 f'prepared ring; warp {c} stages the inputs into a ring of '
                 f'{group.section.ring} slot'
                 f'{"s" if group.section.ring > 1 else ""}, warp {c + 1} fills '
-                f'B\'s ring']
+                f'B\'s ring', _spans_note(group.section)]
     return [f'the high-order tile: {rows}, in the three roles '
-            f'(`matrix_roles` `three`)']
+            f'(`matrix_roles` `three`)', _spans_note(group.section)]
+
+
+def _spans_note(section: GroupSection) -> str:
+    """The kernel's word on what of B the high-order tile streams and
+    multiplies (`tile_chunks`): the kept spans' share of the dense pieces'
+    rows of N and their widths, or B dense."""
+    (step,) = [s for s in section.steps if s.lowering in ASYNC_LOWERINGS]
+    if section.tile.spans != 'kept':
+        return 'B dense, every product\'s whole width a block of K'
+    stages = _step_stages(section, step)
+    chunks = tile_chunks(section, step)
+    kept = sum(rows * (hi - lo) for chunk in chunks
+               for _, _, rows, lo, hi in chunk)
+    dense = sum(rows * stages[p].width for chunk in chunks
+                for p, _, rows, _, _ in chunk)
+    widths = sorted({hi - lo for chunk in chunks for *_, lo, hi in chunk})
+    shown = (f'{len(widths)} widths from {widths[0]} to {widths[-1]}'
+             if len(widths) > 1 else f'one width, {widths[0]}')
+    return (f'B in kept spans: {round(100 * kept / dense)} % of the dense '
+            f'rows of N, {shown}' + (', each to the stage\'s last row, its '
+                                     'tiles last first'
+                                     if section.tile.descending else ''))
 
 
 def producer_refusal(section: GroupSection, context) -> Optional[str]:
@@ -2587,7 +2720,9 @@ def ring_volume(section: GroupSection) -> int:
         if stages[0].prepared:
             total += section.ring_slots * max(
                 chunk_volume(section, step, chunk)
-                for chunk in ring_chunks(section, step))
+                for chunk in (tile_chunks(section, step)
+                              if section.tile is not None
+                              else ring_chunks(section, step)))
             total += 2 * section.ring_slots * 8 // section.dtype.size()
             continue
         width = max(st.width for st in stages)
@@ -2682,7 +2817,10 @@ def chunk_volume(section: GroupSection, step: Step, chunk) -> int:
     """Elements a chunk of a step's prepared ring holds: each piece's rows
     of its stage's width, both halves."""
     stages = _step_stages(section, step)
-    return sum(rows * stages[p].width * 2 for p, _, rows in chunk)
+    # A piece of the high-order tile's names its rows of N (`tile_chunks`).
+    return sum(piece[2] * ((piece[4] - piece[3]) if len(piece) > 3
+                           else stages[piece[0]].width) * 2
+               for piece in chunk)
 
 
 def prepared(section: GroupSection) -> bool:
@@ -2774,26 +2912,35 @@ def prepared_table(section: GroupSection, step: Step, sm: int, form=None):
     if not all(st.prepared for st in stages):
         raise ValueError(f'{step.dest.alias}: a step whose B is not prepared')
     if stages[0].streamed:
-        pieces = [piece for chunk in ring_chunks(section, step)
+        pieces = [piece for chunk in (tile_chunks(section, step)
+                                      if section.tile is not None
+                                      else ring_chunks(section, step))
                   for piece in chunk]
     else:
         pieces = [(p, 0, st.depth) for p, st in enumerate(stages)]
     parts, offsets, at = [], {}, 0
-    for p, k0, rows in pieces:
+    for piece in pieces:
+        p, k0, rows = piece[:3]
         stage = stages[p]
+        # The rows of N it holds: the stage's width, or the high-order
+        # tile's span of it (`tile_chunks`).
+        lo, hi = piece[3:] or (0, stage.width)
         values = np.asarray(stage.tensor.get_values(), dtype=np.float64)
         (r0, r1), (d0, d1) = stage.window
-        block = np.zeros((rows, stage.width))
+        block = np.zeros((rows, hi - lo))
         for k in range(rows):
             col = d0 + k0 + k
             if col >= d1:
                 continue
-            for n in range(stage.width):
+            for n in range(lo, hi):
                 row = stage.n0 + n
                 if r0 <= row < r1:
-                    block[k, n] = values[row, col]
+                    block[k, n - lo] = values[row, col]
+        if section.tile is not None and section.tile.descending:
+            # The span's tiles of N last first (`TileRows.descending`).
+            block = block.reshape(rows, -1, 8)[:, ::-1, :].reshape(rows, -1)
         laid = forms.lay(form, block,
-                         forms.canonical_k_major(rows, stage.width))
+                         forms.canonical_k_major(rows, hi - lo))
         offsets[(p, k0)] = at
         at += laid.size
         parts.append(laid)
@@ -4172,6 +4319,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
            'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
            'TILE_PRODUCER_WARPS', 'TileRows', 'rowless', 'tile_asked',
+           'kept_span', 'spans_asked', 'tile_chunks',
            'tile_lowered', 'tile_notes', 'tile_plan', 'tile_refusal',
            'tile_warps',
            'TF32_HALVES_BY_WHOLE', 'async_plan', 'async_terms',

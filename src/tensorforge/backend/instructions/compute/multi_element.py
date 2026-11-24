@@ -614,7 +614,7 @@ class MultiElementOperators(AbstractInstruction):
             nvidia
         from tensorforge.generators.element_group import (
             ASYNC_LOWERINGS, WARPGROUP_WARPS, chunk_volume, prepared_table,
-            ring_chunks, ring_hold)
+            ring_chunks, ring_hold, tile_chunks)
         section = self._group.section
         sm = nvidia.sm_of(self._context)
         for n, step in enumerate(section.steps):
@@ -646,7 +646,8 @@ class MultiElementOperators(AbstractInstruction):
                         barrier=cursor, dst_index=(0,),
                         src_index=(offsets[(p, 0)],), elems=stage.volume))
                 continue
-            chunks = ring_chunks(section, step)
+            chunks = (tile_chunks(section, step) if section.tile is not None
+                      else ring_chunks(section, step))
             volumes = [chunk_volume(section, step, chunk)
                        for chunk in chunks]
             starts = [offsets[chunk[0][:2]] for chunk in chunks]
@@ -1884,10 +1885,16 @@ class _Piece:
     the resident stage, whole (`rows` its depth), or a slot of the step's
     ring (`_pieces`)."""
 
-    def __init__(self, product, stage, k0, rows, buffer, at):
+    def __init__(self, product, stage, k0, rows, buffer, at, lo=0,
+                 width=None):
         self.product, self.stage = product, stage
         self.k0, self.rows = k0, rows
         self.buffer, self.at = buffer, at
+        #: The rows of N it holds, from the stage's first: its whole width,
+        #: or the high-order tile's span of it (`element_group.
+        #: tile_chunks`), D's columns `lo` on.
+        self.lo = lo
+        self.width = stage.width if width is None else width
 
     def descriptors(self, b, kt, form):
         """The descriptors of the step of K at `kt` of the piece: the upper
@@ -1897,7 +1904,7 @@ class _Piece:
         from tensorforge.backend.pir.engines import MatrixDescType
         desc = MatrixDescType(Datatype.TF32, lbo=self.stage.leading,
                               sbo=self.rows * 32, form=form)
-        half = self.rows * self.stage.width
+        half = self.rows * self.width
         return [b.matrix_desc(self.buffer, _index(
                     b, 'add', self.at, h * half + kt * 8, 'b'),
                               desc=desc, hint='b')
@@ -2127,12 +2134,17 @@ class _OperatorRing:
             with b.if_(issue):
                 b.ring_take(self.ring, slot, parity, writes=[self.storage])
         pieces, offset = [], 0
-        for p, k0, rows in self.chunks[i]:
+        for piece in self.chunks[i]:
+            p, k0, rows = piece[:3]
             stage = self.stages[p]
+            # The high-order tile's piece names its rows of N
+            # (`element_group.tile_chunks`).
+            lo, hi = piece[3:] or (0, stage.width)
             pieces.append(_Piece(self.step.products[p], stage, k0, rows,
                                  self.storage,
-                                 _index(b, 'add', at, offset, 'b')))
-            offset += 2 * rows * stage.width
+                                 _index(b, 'add', at, offset, 'b'), lo,
+                                 hi - lo))
+            offset += 2 * rows * (hi - lo)
         return pieces
 
     def release(self, trip, i, base, issue=None) -> None:
@@ -2675,11 +2687,16 @@ class _Fold:
             for kt in range(0, rows, self.k):
                 bs = piece.descriptors(b, k0 + kt, 'tcgen05')
                 for ia, ib in plan.products:
-                    b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
+                    # The piece's N and D's columns: the high-order tile's
+                    # span of them (`element_group.tile_chunks`), else
+                    # the step's.
+                    b.tcgen05(n if piece.width == piece.stage.width
+                              and not piece.lo else piece.width, tmem,
+                              bs[ib], tmem, issue=issue,
                               enable_input_d=0 if start else 1,
                               a_column=at + 2 * STAR_ROWS * p
-                              + STAR_ROWS * ia + kt, term=(ia, ib),
-                              plan=plan)
+                              + STAR_ROWS * ia + kt, d_column=piece.lo,
+                              term=(ia, ib), plan=plan)
                     start = False
         b.ring_release(self.areas, slot, issue, engine='tcgen05')
         if ring is not None and release:
@@ -2865,6 +2882,10 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
     slots = STAR_SLOTS['wgmma']
     stages = [section.stage(p.first.tensor, (p.rows, p.depth))
               for p in step.products]
+    if any(st.width != n for st in stages):
+        # D's columns are B's stages' rows of N, laid last first.
+        raise InternalError(f'{step.dest.alias}: a stage of B narrower or '
+                            f'wider than D\'s {n} columns')
     blocks = -(-max(st.depth for st in stages) // STAR_ROWS)
     half = 64 * STAR_ROWS
     slot_size = 2 * count * half
@@ -2929,9 +2950,15 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
                                       desc=desc, hint='a')
                 b.fence(FenceKind.REGISTERS, engine='wgmma', registers=accs)
                 plan = _plan(piece.stage)
+                # The piece's span: its N, D's first registers -- its tiles
+                # of N laid last first (`TileRows.descending`), so that every
+                # span's products start at the accumulators' first one.
+                span = accs[:piece.width // 2]
+                shapes = (layouts[0], None,
+                          nvidia.wgmma_d_fragment_bits(piece.width))
                 for ia, ib in plan.products:
-                    b.wgmma(n, [(upper, lower)[ia]], bs[ib], accs,
-                            scale_d=0 if start else 1, layouts=layouts,
+                    b.wgmma(piece.width, [(upper, lower)[ia]], bs[ib], span,
+                            scale_d=0 if start else 1, layouts=shapes,
                             term=(ia, ib), plan=plan)
                     start = False
                 reads += bs + [upper, lower]
@@ -2945,8 +2972,10 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
     for j in range(max(0, blocks - hold + 1), blocks):
         ring.release(trip, j, base)
     # D: register `i` of the lane is the tile's row `16 w + g + 8 ((i % 4) /
-    # 2)`, column `8 (i / 4) + 2 t + i % 2` (PTX's D of m64nN); a row past
-    # the tile's elements is past the group's to the writer.
+    # 2)`, column `8 (i / 4) + 2 t + i % 2` of the descending order (PTX's D
+    # of m64nN): the step's column `n - 8 (i / 4 + 1) + 2 t + i % 2`, B's
+    # tiles of N laid last first (`TileRows.descending`).  A row past the
+    # tile's elements is past the group's to the writer.
     write = _d_writer(trip, step)
     quad = b.op('div', INDEX, lane, 4, hint='q')
     inquad = b.op('rem', INDEX, lane, 4, hint='q')
@@ -2958,7 +2987,7 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
                                         hint='in'),
                   _index(b, 'add', local, tile.used * t, 'm'), M, hint='m')
         col = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2, hint='n'),
-                   8 * (i // 4) + i % 2, hint='n')
+                   n - 8 * (i // 4 + 1) + i % 2, hint='n')
         write(dm, col, accs[i], ('w', rr), True)
 
 
