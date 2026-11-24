@@ -1728,6 +1728,9 @@ class Generator:
                                else Trip.ELEMENT_GROUP),
                          producer_rows=(0 if self._element_group is None
                                         else self._element_group.producers),
+                         element_rows=(None if self._element_group is None
+                                       or self._element_group.lanes
+                                       else self._element_group.rows),
                          lane_map=self._lane_map())
 
         self._section.stream = (list(self._section.global_ir) + [loop]
@@ -4554,6 +4557,7 @@ class Generator:
     # symbols are the ones its operations name.
     flat = [op for descr in descr_list for op in descr.operations()]
     section, why = element_group.classify(flat)
+    classified = section
     if section is not None:
       planned = self._element_group.section
       # The engine the plan's tiling is on: mma_sync's where the fill rule
@@ -4570,6 +4574,10 @@ class Generator:
           halves=element_group.halves(planned),
           prepared=element_group.prepared(planned), star=planned.star,
           output=element_group.output_of(planned), roles=planned.roles)
+      if planned.tile is not None:
+        # The high-order tile's own lowering (`element_group.tile_plan`).
+        section = element_group.tile_lowered(classified, self._context,
+                                             planned.tile, planned.ring)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
@@ -5250,6 +5258,9 @@ class Generator:
       for note in element_group.roles_notes(self._element_group,
                                             self._context):
         writer(f'// roles: {note}')
+      for note in element_group.tile_notes(self._element_group,
+                                           self._context):
+        writer(f'// tile: {note}')
     groups = self._launch_groups()
     if len(groups) > 1:
       writer(f'// launches: {len(groups)}, cut at the grid barriers, one after '

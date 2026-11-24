@@ -317,6 +317,26 @@ def parse_matrix_roles(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_tile` takes.
+MATRIX_TILE = ('off', 'high')
+
+
+def parse_matrix_tile(text: str) -> str:
+  """`off` or `high` (`Options.matrix_tile`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_TILE:
+    raise ValueError(f'expected one of {MATRIX_TILE}, got {text!r}')
+  return value
+
+
+def parse_matrix_consumers(text: str) -> int:
+  """1 to 4 (`Options.matrix_consumers`)."""
+  value = int(str(text).strip())
+  if not 1 <= value <= 4:
+    raise ValueError(f'matrix_consumers is 1 to 4, not {value}')
+  return value
+
+
 def parse_matrix_ring_rows(text: str) -> int:
   """A positive multiple of 8 (`Options.matrix_ring_rows`)."""
   value = int(str(text).strip())
@@ -2917,6 +2937,36 @@ declare('matrix_roles',
             'tcgen05 (sm_100a); elsewhere the plan says why not, and the '
             'kernel\'s comment (`element_group.roles_refusal`, '
             '`roles_notes`).  A demonstrator of the roles, not measured yet.')
+
+declare('matrix_tile',
+        default='off',
+        env='TF_MATRIX_TILE',
+        parse=parse_matrix_tile,
+        doc='The high-order tile of the multi-element layout\'s asynchronous '
+            'tiling (`element_group.TileRows`, `tile_refusal`).  `off`, the '
+            'default: the tilings as before.  `high`: the section\'s one '
+            'asynchronous step with its star step folded in and B streamed '
+            'prepared (`matrix_star` `engine`, `matrix_ring` `prepared`, '
+            'which it implies for that step), the group\'s rows dense on the '
+            'engine\'s rows -- on wgmma (sm_90a) a tile of whole elements a '
+            'consumer warpgroup, `matrix_consumers` of them sharing the '
+            'operator ring, and producer warps staging the inputs and '
+            'filling the ring; on tcgen05 (sm_100a) the three roles '
+            '(`matrix_roles` `three`) at as many elements as tensor memory\'s '
+            'lanes hold.  Where the section cannot take it, the plan says '
+            'why, and the kernel\'s comment (`element_group.tile_notes`).  '
+            'Not measured yet.')
+
+declare('matrix_consumers',
+        default=2,
+        env='TF_MATRIX_CONSUMERS',
+        parse=parse_matrix_consumers,
+        doc='The consumer warpgroups of the high-order tile on wgmma '
+            '(`matrix_tile` `high`), each its own tile of 64 rows of whole '
+            'elements, the group their elements: 2, the default, as the '
+            'hand-written kernels run them (one warpgroup alone reached 70 '
+            'to 90 % of the TF32 rate on a GH200); 1 to 4.  The fill rule '
+            'takes fewer where the group does not fit.')
 
 declare('matrix_ring_rows',
         default=16,

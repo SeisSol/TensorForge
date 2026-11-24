@@ -6845,6 +6845,48 @@ GROUPS = {
          sub(ORACLE, '                if not _same(self.mem.peek(base, slot), value):\n',
              '                if not _same(self.mem.read(base, slot), value):\n', 1)),
     ]),
+    # --- the high-order tile, H1: dense rows, consumer warpgroups (tensorforge-hotile)
+    'hirows': ('tests/test_hiorder_tile.py -n 6', [
+        ("a tile's rows of A from the instruction's 64, not its elements'",
+         sub(ME_SECTION, "    m = _index(b, 'add', r, tile.used * t, 'm')\n",
+             "    m = _index(b, 'add', r, tile.m * t, 'm')\n", 1)),
+        ("a tile's rows of D from the instruction's 64, not its elements'",
+         sub(ME_SECTION, "                  _index(b, 'add', local, tile.used * t, 'm'), M, hint='m')\n",
+             "                  _index(b, 'add', local, tile.m * t, 'm'), M, hint='m')\n", 1)),
+        ("the tile's rings counting a warpgroup's arrival, not a warp's",
+         sub(ME_SECTION, '    return (WARPGROUP_WARPS * tiles,\n', '    return (tiles,\n', 1)),
+        ("the inputs staged by the operator ring's warp",
+         sub(ME_SECTION, '                              bound[MASK_KEY], warp=first)\n',
+             '                              bound[MASK_KEY], warp=first + 1)\n', 1)),
+        ("a tile's role counting half its threads",
+         sub(ME_SECTION, "    roles = tuple(Role(f'tile{t}', lanes * WARPGROUP_WARPS,\n",
+             "    roles = tuple(Role(f'tile{t}', lanes * 2,\n", 1)),
+        ("both tiles' A in one buffer",
+         sub(ME_SECTION, '                _wgmma_tile(trip, step, t, areas[t], done)\n',
+             '                _wgmma_tile(trip, step, t, areas[0], done)\n', 1)),
+        ("the input slot given back behind the first block of A",
+         sub(ME_SECTION, '        if j + 1 == blocks:\n'
+                         "            # Every read of the trip's inputs is behind: the slot back.\n",
+             '        if j == 0:\n'
+             "            # Every read of the trip's inputs is behind: the slot back.\n", 1)),
+        ("a tile's rows past its elements taken as theirs",
+         sub(ME_GROUP, '        return self.per * self.width\n',
+             '        return self.per * self.width + 1\n', 1)),
+        ("the block's rows an element's in the tile's layout",
+         sub(ME_GROUP, '        return 0 if rowless(self.section) else self.elements\n',
+             '        return self.elements\n', 1)),
+        ("one consumer warpgroup fewer than the options give",
+         sub(ME_GROUP, '        for tiles in range(consumers, 0, -1):\n',
+             '        for tiles in range(consumers - 1, 0, -1):\n', 1)),
+        ("the generator lowering the section again without its tile",
+         sub(GEN, '      if planned.tile is not None:\n'
+                  "        # The high-order tile's own lowering (`element_group.tile_plan`).\n",
+             '      if False:\n'
+             "        # The high-order tile's own lowering (`element_group.tile_plan`).\n", 1)),
+        ("the batch loop's rows of a block all an element's",
+         sub(BATCHLOOP, '            if mults != self._element_rows + self._producer_rows:\n',
+             '            if mults != self._group_size + self._producer_rows:\n', 1)),
+    ]),
 }
 
 
