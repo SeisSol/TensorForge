@@ -348,11 +348,12 @@ def test_tcgen05_s_kernel_text():
 
 # -- the oracle ------------------------------------------------------------------ #
 
-def _on_the_oracle(arch, order, count, **options):
+def _on_the_oracle(arch, order, count, grid=1, launches=(), **options):
     """Every element of `count` against NumPy on the host oracle, the
     group's trips over them -- the last one's elements past the batch
     masked -- and no access a ring, a role's barrier or a wait does not
-    order (`kernel_eval.Races`)."""
+    order (`kernel_eval.Races`).  `grid` blocks in turn, `launches` what
+    each block's claims are granted (`kernel_eval.evaluate_wave`)."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
@@ -400,7 +401,7 @@ def _on_the_oracle(arch, order, count, **options):
         mem = kernel_eval.evaluate_wave(
             gen.get_kernel(), lanes, seed=me.SEED, globals_only=True,
             mults=mults, block=True, preset=preset, elements=count,
-            races=races)
+            races=races, grid=grid, launches=launches)
     assert not races, races[:3]
     got = memory(output, lambda e, s: mem.get((f'{output.name}@{e}', s),
                                               fill.read(f'{output.name}@{e}',
@@ -794,6 +795,117 @@ def test_kept_and_dense_spans_compute_alike_on_the_oracle(arch, order,
     assert (kept == dense).all()
 
 
+# -- the schedule (H3d) ----------------------------------------------------------- #
+
+def test_the_schedule_option_and_where_it_is_taken():
+    """`tile_schedule`: static by default; clc and auto where the target has
+    cluster launch control (sm_100 on: tcgen05's tile, whose input warp
+    claims), declined with a note on sm_90a; its shared memory counted."""
+    from tensorforge.common.options import parse_tile_schedule, registry
+    assert registry()['tile_schedule'].default == 'static'
+    assert [parse_tile_schedule(x) for x in ('static', 'CLC', 'auto')] == [
+        'static', 'clc', 'auto']
+    with pytest.raises(ValueError):
+        parse_tile_schedule('dynamic')
+    assert _group(6, 'sm_100a').section.tile.schedule == 'static'
+    for asked in ('clc', 'auto'):
+        group = _group(6, 'sm_100a', tile_schedule=asked)
+        assert group.section.tile.schedule == asked
+        plain = dataclasses.replace(group.section, tile=dataclasses.replace(
+            group.section.tile, schedule='static'))
+        assert (eg.shared_bytes(group.section, 14)
+                - eg.shared_bytes(plain, 14)) == eg.SCHEDULE_BYTES
+    group = _group(8, 'sm_90a', tile_schedule='clc')
+    assert group.section.tile.schedule == 'static'
+    notes = eg.tile_notes(group, me._context(
+        'sm_90a', 's', multi_element='force',
+        **{**HIGH, 'tile_schedule': 'clc'}))
+    assert ('tile_schedule=clc declined: no cluster launch control on '
+            'sm_90a; the static grid') in notes
+
+
+@pytest.mark.parametrize('asked', ['clc', 'auto'])
+def test_tcgen05_s_tile_keeps_the_static_grid_without_launch_control(
+        asked, monkeypatch):
+    """The schedule asks the target, not the engine: a tcgen05 target
+    without cluster launch control (`Target.launch_control` false) keeps
+    the static grid -- the input warp would claim with an instruction the
+    part has not."""
+    from tensorforge.common.target import Target
+    monkeypatch.setattr(Target, 'launch_control', lambda self: False)
+    context = me._context('sm_100a', 's', multi_element='force',
+                          **{**HIGH, 'tile_schedule': asked})
+    assert eg.tile_schedule('tcgen05', context) == 'static'
+    assert _group(6, 'sm_100a', tile_schedule=asked).section.tile.schedule \
+        == 'static'
+
+
+def test_the_scheduled_kernel_and_its_launch():
+    """o6 on tcgen05 under clc: the blocks' loop by the tiles the ring hands
+    every warp -- 19 of them giving each slot back -- one claim and one
+    next tile a trip, by the input warp's lane 0, and the launch a block a
+    tile; under auto the launcher's choice from two waves of the device on;
+    static as before."""
+    src = _kernel(6, 'sm_100a', tile_schedule='clc').get_kernel()
+    assert src.count('tensorforge::tileClaim(') == 1
+    assert src.count('tensorforge::tileNext(') == 1
+    assert re.search(r'mbarrierInit\(&tq_ring\[2 \+ r\], 19\)', src)
+    assert re.search(r'mbarrierInit\(&tc_ring\[r\], 1\)', src)
+    assert re.search(r'while \(true\)', src)
+    launch = _kernel(6, 'sm_100a', tile_schedule='clc').get_launcher()
+    assert 'config.grid[0] = ((numElements0 + 13) / 14);' in launch
+    launch = _kernel(6, 'sm_100a', tile_schedule='auto').get_launcher()
+    assert ('config.grid[0] = (((numElements0 + 13) / 14) >= 2 * gridsize ? '
+            '((numElements0 + 13) / 14) : std::min(gridsize, '
+            '((numElements0 + 13) / 14)));') in launch
+    static = _kernel(6, 'sm_100a')
+    assert 'tileClaim' not in static.get_kernel()
+    assert 'config.grid[0] = std::min(gridsize, numElements0);' in \
+        static.get_launcher()
+
+
+def test_the_schedule_s_ring_hands_over_and_verifies():
+    """The tiles' ring: published by the input warp, taken and given back
+    by every warp outside the roles -- a ring of the block's -- and every
+    pass's `verify` clean."""
+    bodies = tro._bodies(order=6, arch='sm_100a', matrix_tile='high',
+                         tile_schedule='clc')
+    found = []
+    for body in bodies:
+        found += [d for d in verify(body, strict=False)
+                  if "slot's" in d or 'role' in d or 'chain' in d]
+    assert not found, found[:3]
+    uses = tro._uses(bodies)
+    (ring,) = [u for n, u in uses.items() if n.startswith('tq')]
+    assert ring.roles('publish') == ring.roles('acquire') == ('input',)
+    assert ring.roles('take') == ring.roles('release') == (None,)
+
+
+@pytest.mark.parametrize('grid,launches', [
+    (3, {0: [1, 2]}), (3, {0: [2]}), (3, {}), (2, {}), (1, {})],
+    ids=['one-block-claims-all', 'claims-one', 'claims-none', 'stride-2',
+         'stride-1'])
+def test_the_scheduled_tiles_on_the_oracle(grid, launches):
+    """Thirty-one elements, three tiles, the blocks in turn: a block a tile
+    whose claims are granted every other block (the blocks it cancelled
+    never run), one of them, none; and fewer blocks than tiles, which take
+    the static stride through the same ring -- every element against
+    NumPy without a race, and bit for bit what the static grid gives."""
+    _, static = _on_the_oracle('sm_100a', 4, 31)
+    _, got = _on_the_oracle('sm_100a', 4, 31, grid=grid, launches=launches,
+                            tile_schedule='clc')
+    assert (got == static).all()
+
+
+def test_the_oracle_refuses_a_block_granted_twice():
+    """A script granting one block's claims a CTA twice is no launch the
+    hardware makes: the oracle refuses it rather than run a tile twice."""
+    from tensorforge.reference import kernel_eval
+    with pytest.raises(kernel_eval.Abort, match='ran or was granted before'):
+        _on_the_oracle('sm_100a', 4, 31, grid=3, launches={0: [2, 2]},
+                       tile_schedule='clc')
+
+
 # -- A's slots, each band's own ------------------------------------------------- #
 
 def _a_slots(src):
@@ -868,6 +980,7 @@ def _ptxas(arch, tmp_path, order=8, **options):
     ('sm_100a', 'UTCHMMA', 9, {}),
     ('sm_100a', 'UTCHMMA', 9, {'matrix_bands': 2}),
     ('sm_100a', 'UTCHMMA', 9, {'matrix_output': 'bulk'}),
+    ('sm_100a', 'UTCHMMA', 9, {'tile_schedule': 'clc'}),
     ('sm_100a', 'UTCHMMA', 99, {'matrix_groups': 'unrolled'})])
 def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     """o8 built: every product an instruction of the engine's, as many as

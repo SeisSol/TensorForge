@@ -83,6 +83,114 @@ class Trip(Enum):
 #: element and the mask of any element of the group (`batch_indices`).
 GROUP_KEY = 'group'
 MASK_KEY = 'element_active'
+#: What a scheduled traversal of the high-order tile publishes besides
+#: (`TileSchedule`): the block's count of its trips, 0 on -- no longer the
+#: group's distance from the block's first -- and the schedule, whose
+#: fetcher the body's input warp is.
+TRIPS_KEY = 'trips'
+SCHEDULE_KEY = 'schedule'
+
+
+class TileSchedule:
+    """The high-order tile's tiles by cluster launch control
+    (`element_group.TileRows.schedule`, the hand-written kernels' tsched.h,
+    SCHED 2): a block a tile at most, its first its own, `blockIdx.x`.  At
+    the head of each trip the fetcher -- lane 0 of the warp that stages the
+    inputs -- claims the tile after it (`claim`: one try_cancel, which cancels
+    a block of the launch not yet started and answers its id, completing on
+    the mbarrier of the 1-slot ring `claims`); once the trip's inputs are
+    staged it takes the answer, -1 where no block was left, and publishes it
+    through `ring`, two slots of the block's ids, round `n` trip `n + 1`'s
+    (`publish`); every warp of the block takes it at the foot of the trip
+    (`take`), and -1 ends every warp's loop on the same trip.
+
+    One kernel for either grid the launcher gives (`clc`, `auto`): where it
+    gave the block fewer blocks than tiles, below two waves of the device
+    under `auto`, no claim is made and the fetcher publishes the static
+    stride's next tile, `gridDim.x` on."""
+
+    def __init__(self, builder, lexic, elements: int, count, warps: int):
+        from tensorforge.backend.pir.core import (BOOL, INDEX, SIZE, MemSpace,
+                                                  Uniformity)
+        from tensorforge.common.basic_types import Datatype
+        b = builder
+        leader = 'threadIdx.x == 0 && threadIdx.y == 0'
+        self.elements = elements
+        self.ring = b.mbarrier_ring('tq', 2, full=1, empty=warps,
+                                    leader=leader,
+                                    arena=GeneralLexicon.TOTAL_SHR_MEM)
+        self.claims = b.mbarrier_ring('tc', 1, full=1, empty=1,
+                                      leader=leader,
+                                      arena=GeneralLexicon.TOTAL_SHR_MEM)
+        if self.ring is None or self.claims is None:
+            raise InternalError('the tile\'s schedule in a body without an '
+                                'arena for its mbarriers')
+        # The ring's slots, which its barriers hand over: no barrier of the
+        # block's stands in for them (`barriers.handed_buffers`).
+        self.ids = b.alloc(Datatype.I32, (2,), MemSpace.SHARED, hint='tq',
+                           arena=GeneralLexicon.TOTAL_SHR_MEM,
+                           lifetime='body', handed=True)
+        # The claim's 16-byte answer, on sixteen bytes: the fetcher's alone,
+        # its write the claim's, its read behind the claim's barrier.
+        self.response = b.alloc(Datatype.F32, (4,), MemSpace.SHARED,
+                                hint='tc', place_align=4,
+                                arena=GeneralLexicon.TOTAL_SHR_MEM,
+                                lifetime='body', handed=True)
+        grid = b.extern_value(lexic.grid_dim_x, SIZE,
+                              uniform=Uniformity.GRID, hint='grid')
+        self.grid = grid
+        self.tiles = b.op('div', SIZE, b.op('add', SIZE, count,
+                                            elements - 1, hint='tiles'),
+                          elements, hint='tiles')
+        # A block a tile: the claims' grid (`clc`, `auto` from two waves on).
+        self.claiming = b.op('ge', BOOL, grid, self.tiles, hint='claiming')
+
+    def claim(self, b, issue) -> None:
+        """The fetcher's claim of the tile after the trip's, at the head of
+        the trip, by the thread `issue` picks: the arrival on the claims'
+        mbarrier that announces the answer's sixteen bytes, and the
+        try_cancel that completes them (`tensorforge::tileClaim`)."""
+        from tensorforge.backend.pir.core import BOOL, Access, Effect, MemSpace
+        who = b.op('and', BOOL, issue, self.claiming, hint='claim')
+        b.call_stmt('tensorforge::tileClaim', self.response,
+                    self.claims.object, who, accesses=(
+                        Access(Effect.WRITE, MemSpace.SHARED, self.response),))
+
+    def publish(self, b, trips, tile, issue) -> None:
+        """The tile after the trip's -- the claim's answer, or the static
+        stride's -- into the ring's round `trips`, by the thread `issue`
+        picks, once the readers gave its slot back
+        (`tensorforge::tileNext`)."""
+        from tensorforge.backend.pir.core import INDEX, SIZE, Access, Effect, \
+            MemSpace
+        with b.if_(issue):
+            nxt = b.call('tensorforge::tileNext', INDEX, self.response,
+                         self.claims.object, b.op('rem', SIZE, trips, 2,
+                                                  hint='tp'),
+                         self.claiming, tile, self.grid, self.tiles,
+                         hint='next', pure=False, movable=False,
+                         effect=Effect.READ, accesses=(
+                             Access(Effect.READ, MemSpace.SHARED,
+                                    self.response),),
+                         materialize=True)
+            slot, parity = b.ring_round(self.ring, trips, hint='tq')
+            b.ring_acquire(self.ring, slot, parity, writes=[self.ids])
+            b.store(self.ids, nxt, slot)
+            b.ring_publish(self.ring, slot, issue)
+
+    def take(self, b, trips, lane0):
+        """Every warp's read of the ring's round `trips`, the tile after the
+        trip's, at its foot; the warp's lane 0 gives the slot back behind
+        the warp's reads.  The block's: every warp reads the same id."""
+        from tensorforge.backend.pir.core import INDEX, Participants, \
+            Uniformity
+        slot, parity = b.ring_round(self.ring, trips, hint='tq')
+        b.ring_take(self.ring, slot, parity, reads=[self.ids])
+        nxt = b.load(self.ids, slot, type_=INDEX, hint='next',
+                     uniform=Uniformity.BLOCK)
+        b.barrier(Participants.WAVE)
+        b.ring_release(self.ring, slot, lane0)
+        return nxt
 
 
 class BatchLoop(AbstractInstruction):
@@ -104,8 +212,16 @@ class BatchLoop(AbstractInstruction):
                  trip: Trip = Trip.ELEMENT,
                  producer_rows: int = 0,
                  lane_map: Optional[Tuple[int, int]] = None,
-                 element_rows: Optional[int] = None):
+                 element_rows: Optional[int] = None,
+                 schedule: Optional[str] = None):
         super().__init__(context)
+        #: The high-order tile's schedule (`element_group.TileRows.
+        #: schedule`): `clc` or `auto` traverses the groups by claims
+        #: (`TileSchedule`, `_group_loop`), anything else as before.
+        self._schedule = schedule if schedule in ('clc', 'auto') else None
+        #: What the scheduled loop's trip publishes besides the group
+        #: (`TRIPS_KEY`, `SCHEDULE_KEY`); nothing in a counted one.
+        self._trip_keys = {}
         self._section_index = section_index
         #: Whose element count and flags this loop runs over: its own
         #: section's, or that of the first section of its cut kernel
@@ -681,7 +797,12 @@ class BatchLoop(AbstractInstruction):
         under a pass that has not run yet.  That is what `escapes` says: this
         is referenced from somewhere the graph does not model.  The rest are
         ordinary values and disappear where nothing reads them.
+
+        None in the high-order tile's scheduled loop (`_group_loop`): its
+        next group is a claim's answer, not a stride on.
         """
+        if self._trip_keys:
+            return
         if not (hasattr(writer, 'op') and self._induction is not None):
             for n in range(1, self._lookahead + 1):
                 prev = self._batch(n - 1)
@@ -1426,12 +1547,7 @@ class BatchLoop(AbstractInstruction):
         # multiplications then all take the same trips (`uniform_scope`) --
         # as a block barrier in the body needs, which `pir.shards` puts there
         # for what the whole block copies in.
-        with writer.for_(start, self._stacks(), self._stride,
-                         hint=self._group_batch(), index_type=SIZE,
-                         uniform=self.uniform_scope(),
-                         peel_index=self._first_group(writer, start),
-                         flag_word=self._flag_word()) as loop:
-            group = loop.induction
+        with self._group_loop(writer, start) as (loop, group):
             row = writer.op('add', SIZE, group, lane, hint='row')
             # One named declaration, because every global write spells the
             # mask as text (`Symbol.store`), and the flags read folded into it
@@ -1478,6 +1594,8 @@ class BatchLoop(AbstractInstruction):
                         lambda w, element, cond=cond, kind=kind,
                         space=space, n=[0]: self._element_active(
                             w, element, cond, kind, space, n))
+                    # The scheduled loop's trip count and schedule.
+                    bound.update(self._trip_keys)
                     self._lookahead_bindings(writer, bound)
                     loop._next_index = self._first_lookahead
                     loop._element_index = batch
@@ -1503,6 +1621,52 @@ class BatchLoop(AbstractInstruction):
             finally:
                 self._induction = None
                 self._entry_frame = None
+
+    @contextmanager
+    def _group_loop(self, writer, start: str):
+        """The group traversal's loop (`_gen_grouped_ir`), and the group's
+        first element in it: counted, the groups a grid of them apart from
+        the block's `start` -- or the high-order tile's groups by claims
+        (`TileSchedule`): a loop whose carried value is the block's tile and
+        its count of trips -- the tile in the low 32 bits, the count above --
+        the first its own, `blockIdx.x`; the group the tile's `group_size`
+        elements on, masked past the count as the counted loop masks them;
+        at the foot every warp takes the next tile from the schedule's ring,
+        and -1 ends the loop on the same trip for every warp.  No lookahead
+        there: the next group is not known ahead of the trip's foot."""
+        from tensorforge.backend.pir.core import BOOL, SIZE, Uniformity
+        if self._schedule is None:
+            with writer.for_(start, self._stacks(), self._stride,
+                             hint=self._group_batch(), index_type=SIZE,
+                             uniform=self.uniform_scope(),
+                             peel_index=self._first_group(writer, start),
+                             flag_word=self._flag_word()) as loop:
+                yield loop, loop.induction
+            return
+        lexic = self._context.target.lexic
+        schedule = TileSchedule(writer, lexic, self._group_size,
+                                self._count(writer),
+                                self._element_rows + self._producer_rows)
+        first = writer.extern_value(lexic.block_idx_x, SIZE,
+                                    uniform=Uniformity.BLOCK, hint='tile')
+        with writer.while_(first, hint=f'{self._group_batch()}Tile',
+                           index_type=SIZE, uniform=Uniformity.BLOCK) as loop:
+            carried = loop.induction
+            tile = writer.op('bitand', SIZE, carried, 0xFFFFFFFF, hint='tile')
+            trips = writer.op('shr', SIZE, carried, 32, hint='trips')
+            self._trip_keys = {TRIPS_KEY: trips, SCHEDULE_KEY: (schedule, tile)}
+            try:
+                yield loop, writer.op('mul', SIZE, tile, self._group_size,
+                                      hint=self._group_batch())
+            finally:
+                self._trip_keys = {}
+            lane0 = writer.op('eq', BOOL, writer.thread_id('x'), 0,
+                              hint='first')
+            nxt = schedule.take(writer, trips, lane0)
+            loop.exit_when(writer.op('lt', BOOL, nxt, 0, hint='drained'))
+            loop.yield_(writer.op('bitor', SIZE, writer.op(
+                'shl', SIZE, writer.op('add', SIZE, trips, 1, hint='trips'),
+                32, hint='tile'), nxt, hint='tile'))
 
     def _element_active(self, writer, element, cond, kind, space, count):
         """Whether `element` -- any of the group's -- is one of the batch, as

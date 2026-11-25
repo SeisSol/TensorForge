@@ -798,6 +798,70 @@ __device__ __forceinline__ void mbarrierExpect(void *barrier, uint32_t bytes,
 #endif
 }
 
+/// The high-order tile's claim of a tile (`batch_loop.TileSchedule`), by the
+/// thread `issue` picks: the arrival on the claims' mbarrier -- the full
+/// barrier of the 1-slot ring `barriers` -- that announces the 16-byte answer,
+/// then `clusterlaunchcontrol.try_cancel` (PTX ISA 8.6, sm_100 on), which
+/// cancels a CTA of the launch that has not started and writes its id into
+/// `response`, or writes that none was left, completing the barrier's phase.
+/// The expectation ahead of the request: the answer may land before an
+/// expectation behind it was registered, and the phase would never complete.
+__device__ __forceinline__ void tileClaim(void *response, uint64_t *barriers,
+                                          bool issue) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  if (issue) {
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], 16;" ::"r"(
+                     bulk_shared_address(&barriers[0]))
+                 : "memory");
+    asm volatile("clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::"
+                 "complete_tx::bytes.b128 [%0], [%1];" ::"r"(
+                     bulk_shared_address(response)),
+                 "r"(bulk_shared_address(&barriers[0]))
+                 : "memory");
+  }
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// The tile after `tile`: where the launch is a CTA a tile (`claiming`), the
+/// answer of the claim the phase of parity `parity` of the claims' barrier
+/// completes -- the first CTA id of the launch it cancelled, or -1 where
+/// none was left -- and else the static stride's, `grid` on, or -1 past the
+/// `tiles`.
+__device__ __forceinline__ int tileNext(const void *response,
+                                        uint64_t *barriers, uint32_t parity,
+                                        bool claiming, size_t tile, size_t grid,
+                                        size_t tiles) {
+  if (!claiming) {
+    return tile + grid < tiles ? static_cast<int>(tile + grid) : -1;
+  }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  mbarrierWait(&barriers[0], parity);
+  const unsigned long long lo =
+      reinterpret_cast<const volatile unsigned long long *>(response)[0];
+  const unsigned long long hi =
+      reinterpret_cast<const volatile unsigned long long *>(response)[1];
+  uint32_t canceled = 0, first = 0;
+  asm volatile(
+      "{\n\t.reg .b128 r;\n\t.reg .pred p;\n\t"
+      "mov.b128 r, {%2, %3};\n\t"
+      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p, r;\n\t"
+      "selp.b32 %0, 1, 0, p;\n\t"
+      "clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128 "
+      "%1, r;\n\t}"
+      : "=r"(canceled), "=r"(first)
+      : "l"(lo), "l"(hi)
+      : "memory");
+  return canceled ? static_cast<int>(first) : -1;
+#else
+#if defined(__CUDA_ARCH__)
+  __trap();
+#endif
+  return -1;
+#endif
+}
+
 /// `bytes` from `src` to `dst`, both on sixteen bytes and `bytes` a multiple of
 /// sixteen, completing on the mbarrier at `barrier` without arriving at it
 /// (`cp.async.bulk`, `.mbarrier::complete_tx::bytes`): what the slot's

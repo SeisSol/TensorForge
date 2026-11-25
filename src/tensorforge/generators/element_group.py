@@ -1941,6 +1941,11 @@ class TileRows:
     #: (`TMEM_BUDGET`), the epilogue of a trip under the next one's products.
     bands: int = 0
     dslots: int = 1
+    #: How the blocks take their tiles (`Options.tile_schedule`): `static`,
+    #: or `clc` / `auto` where the target has cluster launch control --
+    #: the input warp's lane 0 claims the next tile with try_cancel and
+    #: hands it to every warp through a ring (`batch_loop.TileSchedule`).
+    schedule: str = 'static'
 
     @property
     def granule(self) -> int:
@@ -2001,6 +2006,23 @@ def spans_asked(context) -> str:
     if not getattr(options, 'skip_known_zeros', True):
         return 'dense'
     return getattr(options, 'matrix_spans', 'kept')
+
+
+def schedule_asked(context) -> str:
+    """How the options ask the tile's blocks to take their tiles
+    (`Options.tile_schedule`)."""
+    return getattr(context.get_user_options(), 'tile_schedule', 'static')
+
+
+def tile_schedule(engine: str, context) -> str:
+    """The schedule the tile takes: the options' where the target has
+    cluster launch control (`Target.launch_control`: sm_100 on, so tcgen05's
+    tile, whose input warp claims), else `static`."""
+    asked = schedule_asked(context)
+    if asked == 'static' or engine != 'tcgen05' \
+            or not context.target.launch_control():
+        return 'static'
+    return asked
 
 
 def groups_asked(context) -> str:
@@ -2116,6 +2138,12 @@ TILE_TCGEN05 = ('star', 'epilogue', 'input', 'operator', 'mma')
 #: The star role's bands on tcgen05 (`TileRows.bands`): three cover the
 #: fourteen elements' blocks, as the element warps' did.
 TILE_BANDS = 3
+
+#: Shared memory the tile's schedule takes past the static grid's
+#: (`batch_loop.TileSchedule`): the tiles' ring of two slots, an id and a
+#: pair of mbarriers each, and the claim, a 16-byte response and its
+#: mbarrier on sixteen bytes.
+SCHEDULE_BYTES = 2 * 4 + 2 * 2 * 8 + 32
 
 #: The columns of tensor memory the high-order tile's plan may take: a
 #: block's 512 on sm_100a -- one number, for the target to give later
@@ -2247,7 +2275,8 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
         bands = int(getattr(context.get_user_options(), 'matrix_bands',
                             TILE_BANDS))
         tile = TileRows('tcgen05', width, elements, 1, spans_asked(context),
-                        groups_asked(context), bands, dslots)
+                        groups_asked(context), bands, dslots,
+                        tile_schedule('tcgen05', context))
         for slots in PRODUCER_SLOTS[1:] + (1,):
             lowered = tile_lowered(section, context, tile, slots)
             why = tile_refusal(lowered, context)
@@ -2296,7 +2325,8 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
                 f'prepared ring; warp {c} stages the inputs into a ring of '
                 f'{group.section.ring} slot'
                 f'{"s" if group.section.ring > 1 else ""}, warp {c + 1} fills '
-                f'B\'s ring', _spans_note(group.section)]
+                f'B\'s ring', _spans_note(group.section)] + \
+            _schedule_notes(group.section, context)
     b = WARPGROUP_WARPS * tile.bands
     return [f'the high-order tile: {rows}; warps 0 to {b - 1} its star '
             f'bands, A into tensor memory; warps {b} to {b + 3} the epilogue, '
@@ -2306,7 +2336,29 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
             f'warp {b + 4} stages the inputs into a ring of '
             f'{group.section.ring} slot'
             f'{"s" if group.section.ring > 1 else ""}, warp {b + 5} fills '
-            f'B\'s ring, warp {b + 6} issues', _spans_note(group.section)]
+            f'B\'s ring, warp {b + 6} issues', _spans_note(group.section)] + \
+        _schedule_notes(group.section, context)
+
+
+def _schedule_notes(section: GroupSection, context) -> List[str]:
+    """The kernel's word on how its blocks take their tiles
+    (`TileRows.schedule`), where the options ask for more than the static
+    grid."""
+    asked = schedule_asked(context)
+    if asked == 'static':
+        return []
+    tile = section.tile
+    if tile.schedule == 'static':
+        why = (f'no cluster launch control on {context.target.hw.model}'
+               if not context.target.launch_control() else
+               f'the tile on {tile.engine} claims no tiles')
+        return [f'tile_schedule={asked} declined: {why}; the static grid']
+    when = ('a block a tile' if tile.schedule == 'clc' else
+            'a block a tile from two waves of the device on, the static grid '
+            'below')
+    return [f'the tiles by cluster launch control: {when}; a block done with '
+            f'one cancels a block not yet started and takes its tile, the '
+            f'input warp claiming the next while it stages the current one']
 
 
 def _spans_note(section: GroupSection) -> str:
@@ -3084,6 +3136,10 @@ def shared_bytes(section: GroupSection, elements: int) -> int:
         # The tile's D in its slots of tensor memory: a pair of mbarriers a
         # slot (`compute.multi_element._tile_tcgen05`).
         operators += 2 * section.tile.dslots * 8 // size
+    if section.tile is not None and section.tile.schedule != 'static':
+        # The tiles' ring -- its ids and a pair of mbarriers a slot -- and the
+        # claim's response with its mbarrier (`batch_loop.TileSchedule`).
+        operators += SCHEDULE_BYTES // size
     # tcgen05's D staged in shared memory for every element warp to write
     # (`compute.multi_element._tcgen05`): the widest step's rows of the
     # element, an odd number of floats apart -- for bulk reductions, the
@@ -4419,6 +4475,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'TILE_PRODUCER_WARPS', 'TileRows', 'rowless', 'tile_asked',
            'groups_asked', 'kept_span', 'spans_asked', 'tile_chunks',
            'TILE_BANDS', 'TILE_TCGEN05', 'TMEM_BUDGET', 'tile_dslots',
+           'SCHEDULE_BYTES', 'schedule_asked', 'tile_schedule',
            'tile_lowered', 'tile_notes', 'tile_plan', 'tile_refusal',
            'tile_warps',
            'TF32_HALVES_BY_WHOLE', 'async_plan', 'async_terms',

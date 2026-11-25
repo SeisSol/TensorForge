@@ -1988,9 +1988,12 @@ def _pieces(trip, step):
 def _trip_count(trip):
     """The block's count of its trips, 0 on, as both roles read it off the
     group's first element (`MultiElementSection._ring`): the block's trips
-    are its groups in turn, `gridDim.x` groups apart."""
+    are its groups in turn, `gridDim.x` groups apart -- or, where the
+    high-order tile's blocks take their tiles by claims, the count the
+    scheduled loop carries (`batch_loop.TRIPS_KEY`)."""
     from tensorforge.backend.instructions.batch_loop import (BatchLoop,
-                                                             GROUP_KEY)
+                                                             GROUP_KEY,
+                                                             TRIPS_KEY)
     found = getattr(trip, 'trips', None)
     if found is not None:
         return found
@@ -1999,6 +2002,9 @@ def _trip_count(trip):
     if not bound or GROUP_KEY not in bound:
         raise InternalError('a ring\'s trip outside the element group\'s '
                             'loop')
+    if TRIPS_KEY in bound:
+        trip.trips = b.op('add', INDEX, bound[TRIPS_KEY], 0, hint='k')
+        return trip.trips
     block = b.extern_value('blockIdx.x', INDEX, uniform=Uniformity.BLOCK,
                            hint='bid')
     grid = b.extern_value('gridDim.x', INDEX, uniform=Uniformity.GRID,
@@ -5330,6 +5336,11 @@ class MultiElementSection(AbstractInstruction):
         if not bound or GROUP_KEY not in bound:
             raise InternalError('the high-order tile\'s trip outside the '
                                 'element group\'s loop')
+        if bound.get('schedule') is not None:
+            # Nobody here would claim (`batch_loop.TileSchedule`): every
+            # warp would wait at the trip's foot for a tile never published.
+            raise InternalError('the high-order tile on wgmma claims no '
+                                'tiles: its schedule is static')
         (step,) = [s for s in section.steps if s.lowering == 'wgmma']
         operator = trip.rings.get(id(step))
         if operator is None:
@@ -5404,7 +5415,7 @@ class MultiElementSection(AbstractInstruction):
           element's pointer (`_tcgen05_role_epilogue`), the slot given back
           -- under the next trip's products, in the other slot."""
         from tensorforge.backend.instructions.batch_loop import (
-            BatchLoop, GROUP_KEY, MASK_KEY)
+            BatchLoop, GROUP_KEY, MASK_KEY, SCHEDULE_KEY)
         from tensorforge.backend.pir.engines import FenceKind
         from tensorforge.generators.element_group import (TILE_TCGEN05,
                                                           WARPGROUP_WARPS,
@@ -5496,8 +5507,15 @@ class MultiElementSection(AbstractInstruction):
                 _tcgen05_role_epilogue(trip, step, M, base=dbase)
                 release()
         with roles.role('input'):
+            # The tiles by claims (`batch_loop.TileSchedule`): its lane 0
+            # the fetcher, claiming the next tile while it stages this one.
+            scheduled = bound.get(SCHEDULE_KEY)
+            if scheduled is not None:
+                scheduled[0].claim(b, lane0)
             self._produce(trip, ring, slot, parity, bound[GROUP_KEY],
                           bound[MASK_KEY], warp=warps['input'])
+            if scheduled is not None:
+                scheduled[0].publish(b, trips, scheduled[1], lane0)
         with roles.role('operator'):
             with b.if_(lane0):
                 for j in range(len(operator.chunks)):

@@ -33,7 +33,8 @@ import functools
 import hashlib
 import re
 import struct
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import (Any, Dict, List, NamedTuple, Optional, Sequence, Tuple,
+                    Union)
 
 _DECL = re.compile(
     # `alignas(N)` is a declaration specifier, not a statement of its own: a
@@ -235,6 +236,13 @@ _TMA_ON = re.compile(
     rf'^tensorforge::tmaLoadOn\s*\(\s*{_MB}\s*,'
     r'\s*&\s*(?P<dst>\w+)\s*\[(?P<di>[^\]]*)\]\s*,'
     r'\s*&\s*(?P<map>\w+)\s*,\s*(?P<issue>[^,]+),(?P<coords>.+)\)$')
+
+#: `tensorforge::tileClaim(response, ring, issue)` (`cuda.h`): the high-order
+#: tile's claim of a tile by cluster launch control, on the full barrier of
+#: the 1-slot ring `ring` (`Interp._tile_claim`).
+_TILE_CLAIM = re.compile(
+    r'^tensorforge::tileClaim\s*\(\s*(?P<resp>\w+)\s*,\s*(?P<ring>\w+)\s*,'
+    r'(?P<issue>.+)\)$')
 
 #: `tensorforge::splitFloatTF32(upper, lower, value)` (`cuda.h`): the two
 #: TF32 halves a 3xTF32 product multiplies, written through references.
@@ -1534,6 +1542,9 @@ def _py(expr: str) -> str:
     e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
     # The address of a warp's quarter of tensor memory's lanes (`cuda.h`).
     e = re.sub(r'\btensorforge::tmemWarpAddress\s*\(', 'TMEMADDR(', e)
+    # The high-order tile's next tile, a claim's answer or the static
+    # stride's (`cuda.h`, `Interp._tile_next`).
+    e = re.sub(r'\btensorforge::tileNext\s*\(', 'TILENEXT(', e)
     # The math library's `fma(a, b, c)` a lexic spells for an FMA the compiler
     # is to keep where it stands (`Lexic.fused_fma`): the same arithmetic.
     e = re.sub(r'(?<![\w:])fma\s*\(', 'FMA(', e)
@@ -1754,6 +1765,7 @@ class Interp:
         self.env['FMA'] = lambda a, b, c: a * b + c
         # `tensorforge::tmemWarpAddress`: the lane 32 (w % 4) of the warp w
         # this thread is in, in the address's upper half.
+        self.env['TILENEXT'] = self._tile_next
         self.env['TMEMADDR'] = lambda base, column: (
             int(base) + ((32 * ((self.lane // 32) % 4)) << 16) + int(column))
         self.env['VLOAD'] = lambda n, p, i: Vec(p[i + k] for k in range(n))
@@ -2215,6 +2227,71 @@ class Interp:
             (self.lane, tracker.release(self.lane) if tracker is not None
              else None))
         self._mb_complete(state)
+
+    def _tile_claim(self, m, stmt: str) -> None:
+        """`tensorforge::tileClaim`: by the thread its predicate picks, a
+        claim of the next tile -- the block's next granted CTA id of its
+        script (`launches`), or -1 past it -- written into the response as
+        a copy completing on the ring's full barrier does: the arrival that
+        announces 16 bytes, the bytes landed at once.  A granted CTA is
+        cancelled: the grid's run passes it over (`evaluate_wave`)."""
+        if not bool(self.ev(m.group('issue'))):
+            return
+        ring = self.ev(m.group('ring'))
+        response = self.ev(m.group('resp'))
+        if not isinstance(ring, Ptr) or not isinstance(response, Ptr):
+            raise Abort(f'a claim on unknown buffers: {stmt!r}')
+        key = (ring.base, ring.off)
+        state = self._mb_state(key, stmt)
+        claims = self.mem.__dict__.setdefault('tile_claims', {})
+        block = getattr(self.env.get('blockIdx'), 'x', 0)
+        n = claims.get(block, 0)
+        claims[block] = n + 1
+        script = tuple(self.launches or ())
+        cta = script[n] if n < len(script) else -1
+        if cta >= 0:
+            cancelled = self.mem.__dict__.setdefault('tile_cancelled', set())
+            if cta in cancelled or cta == block:
+                raise Abort(f'a claim granted CTA {cta}, which ran or was '
+                            f'granted before: {stmt!r}')
+            cancelled.add(cta)
+        state['tx'] += 16
+        self._mb_arrive(key, state, stmt)
+        tracker = self.mem.tracker
+        if tracker is not None:
+            tracker.bulk = f'mbar:{key[0]}:{key[1]}'
+        try:
+            response[0] = float(cta)
+        finally:
+            if tracker is not None:
+                tracker.bulk = None
+        state['tx'] -= 16
+        self._mb_complete(state)
+
+    def _tile_next(self, response, ring, parity, claiming, tile, grid,
+                   tiles) -> int:
+        """`tensorforge::tileNext`: the static stride's next tile where the
+        launch is no CTA a tile; else the claim's answer, behind the wait
+        for the phase of parity `parity` of the ring's full barrier -- one
+        that has not completed would never return."""
+        if not claiming:
+            nxt = int(tile) + int(grid)
+            return nxt if nxt < int(tiles) else -1
+        if not isinstance(ring, Ptr) or not isinstance(response, Ptr):
+            raise Abort('a claim\'s answer from unknown buffers')
+        key = (ring.base, ring.off)
+        state = self._mb_state(key, 'tileNext')
+        if state['phases'] % 2 == int(parity) & 1:
+            raise Abort(f'thread {self.lane} waits for the answer of a claim '
+                        f'of parity {int(parity) & 1}, which has completed '
+                        f'{state["phases"]} phases: it would never return')
+        tracker = self.mem.tracker
+        if tracker is not None:
+            for lane, released in state['history'].get(state['phases'] - 1,
+                                                       ()):
+                tracker.met(self.lane, lane, released)
+            tracker.bulk_wait(self.lane, f'mbar:{key[0]}:{key[1]}')
+        return int(response[0])
 
     def ring_wait_pending(self, stmt: str) -> bool:
         """Whether `stmt` is a wait on a ring's mbarrier (`mbarrierWait`)
@@ -3314,6 +3391,10 @@ class Interp:
                             'tensorforge::ldsRing')):
             self._ring_statement(stmt)
             return
+        tc = _TILE_CLAIM.match(stmt)
+        if tc:
+            self._tile_claim(tc, stmt)
+            return
         bm = _BULK_ARM.match(stmt)
         if bm:
             barrier = self.env.get(bm.group('bar'))
@@ -4027,7 +4108,8 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   mults: int = 1,
                   races: Optional[List[Race]] = None,
                   elements: int = 1, block: bool = False,
-                  launches: Sequence[int] = (), grid: int = 1,
+                  launches: Union[Sequence[int], Dict[int, Sequence[int]]] = (),
+                  grid: int = 1,
                   scalars: Optional[Dict[str, object]] = None) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
@@ -4046,7 +4128,9 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     with one block of one multiplication the batch loop then visits each of
     them in turn, which is what carries a write across its back edge.
     `launches` are the CTA ids a launch-control queue hands the block after
-    its own, in order (`_LaunchCursor`).
+    its own, in order (`_LaunchCursor`) -- or, by block, what each block's
+    claims are granted (`Interp._tile_claim`): a dict from a block to its
+    CTA ids, the blocks they cancel never run.
 
     `grid` runs every block of a grid that many blocks wide, one after the
     other on the one memory: a block's traversal of the batch is then its
@@ -4074,6 +4158,15 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
         mem.tracker = Races()
     try:
         for cta in range(grid):
+            if cta in getattr(mem, 'tile_cancelled', ()):
+                # A CTA a claim cancelled (`Interp._tile_claim`): the block
+                # that claimed it took its tile, and it never runs.
+                continue
+            if races is not None and cta:
+                # Each block its own shared memory and its own copies in
+                # flight: no access of one block orders or meets another's.
+                races.extend(mem.tracker.found)
+                mem.tracker = Races()
             groups = []
             for mult in range(mults if block else 1):
                 group = []
@@ -4092,7 +4185,9 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                     env.update(scalars or {})
                     interp = Interp(mem, env)
                     interp.lane = tid + mult * lanes
-                    interp.launches = tuple(launches)
+                    interp.launches = tuple(
+                        launches.get(cta, ()) if isinstance(launches, dict)
+                        else launches)
                     group.append(interp)
                 groups.append(group)
             interps = [it for group in groups for it in group]
