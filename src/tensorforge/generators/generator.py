@@ -1731,6 +1731,7 @@ class Generator:
                          element_rows=(None if self._element_group is None
                                        or self._element_group.lanes
                                        else self._element_group.rows),
+                         schedule=self._tile_schedule(),
                          lane_map=self._lane_map())
 
         self._section.stream = (list(self._section.global_ir) + [loop]
@@ -2578,6 +2579,14 @@ class Generator:
           return True
       return False
     return walk(section.stream)
+
+  def _tile_schedule(self) -> Optional[str]:
+    """How the high-order tile's blocks take their tiles
+    (`element_group.TileRows.schedule`), or None where the section takes no
+    tile."""
+    group = self._element_group
+    tile = None if group is None else group.section.tile
+    return None if tile is None else tile.schedule
 
   def _batch_loop_mode(self) -> LoopMode:
     if self._persistent_threading:
@@ -3884,6 +3893,17 @@ class Generator:
         else:
           num_blocks = (f'({stacks} + {mults_per_block} - 1) '
                         f'/ {mults_per_block}')
+        if self._tile_schedule() in ('clc', 'auto') and not coop:
+          # The high-order tile's tiles by claims (`batch_loop.TileSchedule`):
+          # a block a tile, which the kernel's claims then cancel; under
+          # `auto` from two waves of the device on, the static grid below,
+          # which the kernel then traverses a grid apart.
+          group = self._element_group.elements
+          tiles = f'(({stacks} + {group - 1}) / {group})'
+          num_blocks = tiles
+          if self._tile_schedule() == 'auto' and bounded:
+            num_blocks = (f'({tiles} >= 2 * gridsize ? {tiles} : '
+                          f'std::min(gridsize, {tiles}))')
       writer('tensorforge::LaunchConfig config{};')
       writer(f'config.grid[0] = {num_blocks};')
       writer('config.grid[1] = 1;')

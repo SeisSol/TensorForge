@@ -329,6 +329,18 @@ def parse_matrix_tile(text: str) -> str:
   return value
 
 
+#: What `Options.tile_schedule` takes.
+TILE_SCHEDULES = ('static', 'clc', 'auto')
+
+
+def parse_tile_schedule(text: str) -> str:
+  """`static`, `clc` or `auto` (`Options.tile_schedule`)."""
+  value = str(text).strip().lower()
+  if value not in TILE_SCHEDULES:
+    raise ValueError(f'expected one of {TILE_SCHEDULES}, got {text!r}')
+  return value
+
+
 def parse_matrix_bands(text: str) -> int:
   """1 to 4 (`Options.matrix_bands`)."""
   value = int(str(text).strip())
@@ -3004,6 +3016,24 @@ declare('matrix_spans',
             'the block\'s first product whole, so that D starts fresh; '
             '`dense`, every product\'s whole width, as the tilings before '
             'the tile.')
+
+declare('tile_schedule',
+        default='static',
+        env='TF_TILE_SCHEDULE',
+        parse=parse_tile_schedule,
+        doc='How the high-order tile\'s blocks take their tiles '
+            '(`matrix_tile` `high`, `element_group.TileRows.schedule`): '
+            '`static`, the default, a grid of what the device holds, each '
+            'block its tiles a grid apart; `clc`, cluster launch control -- a '
+            'block a tile, and a block done with one cancels a block not yet '
+            'started (`clusterlaunchcontrol.try_cancel`) and takes its tile, '
+            'its input warp claiming the next while it stages the current one '
+            'and handing the ids to every warp through a ring; `auto`, the '
+            'same kernel, its launcher giving it a block a tile from two waves '
+            'of the device on and the static grid below.  The hand-written '
+            'kernels measured +7-8 % at o8 and +6-7.5 % at o12 on a GB200 '
+            'from it, and losses below two waves.  Where the target has none '
+            '(`Target.launch_control`: sm_100 on), static.')
 
 declare('matrix_bands',
         default=3,

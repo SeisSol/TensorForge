@@ -1060,12 +1060,12 @@ class Target:
         so the question is answered here.  Verified on an sm_120 part: the
         plain target assembles it, no `sm_120a` needed.
         """
+        import re
         if self.hw.vendor != 'nvidia':
             return False
-        model = str(self.hw.model)
-        if not model.startswith('sm_') or not model[3:].isdigit():
-            return False
-        return int(model[3:]) >= 100
+        # The architecture-specific targets too: sm_100a, sm_103f.
+        found = re.fullmatch(r'sm_(\d+)[af]?', str(self.hw.model))
+        return found is not None and int(found.group(1)) >= 100
 
     def min_blocks_bound(self) -> bool:
         """Whether a kernel's launch bounds may name a minimum of resident

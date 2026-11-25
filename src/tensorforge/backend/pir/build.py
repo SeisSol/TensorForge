@@ -706,7 +706,8 @@ class IRBuilder:
     def call_stmt(self, callee: str, *args: Operand,
                   writes: Sequence[Operand] = (),
                   effect: Optional[Effect] = None,
-                  movable: bool = False) -> Stmt:
+                  movable: bool = False,
+                  accesses: Sequence[Access] = ()) -> Stmt:
         """A vendor intrinsic invoked for its effect, not for a result.
 
         ``fmacdpp16<0>(c, a, b)`` and ``transpose4x4b32(...)`` return nothing
@@ -720,15 +721,21 @@ class IRBuilder:
         ``writes`` names the operands mutated in place.  Their producers are
         pinned: a value whose name is handed to a reference parameter must not
         be folded into its consumer, or the assignment would land nowhere.
+        ``accesses`` are what the call does to memory besides, as declared
+        `Access` es: a buffer it writes through a pointer it is handed.
         """
         for w in writes:
             self._require_addressable(w, callee)
+        memory = tuple(accesses)
         accesses = tuple(Access(Effect.READ | Effect.WRITE, MemSpace.REGISTER,
                                 base=w) for w in writes if isinstance(w, Value))
         for w in writes:
             self.pin(w)
         if effect is None:
             effect = Effect.WRITE if accesses else Effect.NONE
+            for a in memory:
+                effect |= a.kind
+        accesses += memory
         return self._emit_op(Op.CALL, (), tuple(args), pure=False,
                              movable=movable, effect=effect,
                              accesses=accesses, attrs=(('callee', callee),))
