@@ -173,7 +173,9 @@ def test_each_role_does_its_own():
     assert len(re.findall(r'mbarrierWait\(&ta3_ring\[\d+_i32\]',
                           mma)) == 5
     assert len(re.findall(r'mbarrierWait\(&bk3_ring\[v\d+_bks\]', mma)) == 5
-    assert mma.count('tensorforge::tcgen05CommitOn(&ta3_ring[4 + ') == 5
+    # A's ring three slots, a band each (`multi_element._fold_bands`): their
+    # empty sides the three mbarriers past the full ones.
+    assert mma.count('tensorforge::tcgen05CommitOn(&ta3_ring[3 + ') == 5
     assert mma.count('tensorforge::tcgen05CommitOn(&bk3_ring[4 + ') == 5
     assert mma.index('tensorforge::tcgen05Commit(tcmma_bulk') < mma.index(
         'tensorforge::bulk_wait(tcmma_bulk)') < mma.index('tcgen05.ld')
@@ -312,6 +314,64 @@ def test_the_build_reads_back(tmp_path):
     assert len(re.findall(r'\bBAR\.SYNC\b', sass)) >= 3
 
 
+# -- A's slots, each band's own ------------------------------------------------- #
+
+def _a_slots(src):
+    """The slots of the kernel's ring of A in tensor memory: its mbarriers
+    set up, a full side of a band's 128 threads each."""
+    (count,) = re.findall(r'for \(int r = 0; r < (\d+); \+\+r\) \{\s*'
+                          r'tensorforge::mbarrierInit\(&ta\d+_ring\[r\], 128\)',
+                          src)
+    return int(count)
+
+
+@pytest.mark.parametrize('order', [4, 6, 8])
+def test_a_s_slots_are_each_band_s_own(order):
+    """The fourteen element warps' three bands fill A's ring of tensor
+    memory between roles: three of its four slots, so that block `j`'s
+    slot `j % 3` is band `j % 3`'s -- every round of a slot one band's, in
+    turn.  Without the roles every warp meets the products at the trip's
+    end, and the four slots stay."""
+    group, _ = _group(order)
+    assert group.elements == 14
+    assert _a_slots(_kernel(order)) == 3
+    plain = {k: v for k, v in THREE.items() if k != 'matrix_roles'}
+    assert _a_slots(tma._kernel('sm_100a', 'volume', order, 's',
+                                **plain).get_kernel()) == 4
+
+
+@pytest.mark.parametrize('blocks', [2, 5, 11])
+def test_the_ring_model_sees_the_bands_race(blocks):
+    """The protocol model of the ring (`ring_model`), each warp its own
+    agent under seeded random schedules: three bands on four slots hand
+    the products a slot another band wrote for a later block -- a band
+    waiting for a round two phases ahead of the slot's empty side passes
+    the wait, its parity alike -- as soon as a trip has a fifth block;
+    three bands on three slots, and two, one or four bands on four, never.
+    The bands meeting at each trip's head, as the three roles' staging
+    makes them."""
+    import ring_model
+    racy = ring_model.violations(3, 4, blocks, sync='trip')
+    assert (racy > 0) == (blocks > 4), racy
+    for bands, slots in ((3, 3), (2, 4), (1, 4), (4, 4)):
+        assert ring_model.violations(bands, slots, blocks, sync='trip') == 0
+
+
+@pytest.mark.parametrize('order', [4, 6, 8])
+def test_the_roles_ring_of_a_holds_in_the_model(order):
+    """The kernel's own ring -- its slots read off its text, its bands the
+    element warps' whole fours, its blocks the folded step's -- in the
+    protocol model: no schedule hands the products another block's A."""
+    import ring_model
+    group, _ = _group(order)
+    section = group.section
+    (step,) = [s for s in section.steps if s.lowering == 'tcgen05']
+    depth = max(st.depth for st in eg._step_stages(section, step))
+    blocks = -(-depth // eg.STAR_ROWS)
+    assert ring_model.violations(group.elements // 4, _a_slots(
+        _kernel(order)), blocks, sync='trip') == 0
+
+
 def test_the_three_roles_compute_on_the_gpu(target, cache_root,
                                             tensorforge_include):
     """On a GB200: the o6 volume in the three roles against NumPy over a
@@ -334,3 +394,45 @@ def test_the_three_roles_compute_on_the_gpu(target, cache_root,
     result = run_case(case, special, cache_root, tensorforge_include)
     assert result.passed, (result.max_abs_err, result.max_rel_err,
                            result.detail)
+
+
+@pytest.mark.parametrize('order', [6, 8])
+def test_many_trips_of_the_three_roles_on_the_gpu(order, target, cache_root,
+                                                  tensorforge_include):
+    """On a GB200, where the bands' race on A's ring showed: the o6 and o8
+    volume over 65537 elements on a twentieth of the grid the device holds
+    -- some 650 trips a block (`Options.resident_grid`) -- in the three
+    roles, bit for bit what the folded star without them gives over the
+    same elements (the same products in the same order)."""
+    if target.backend != 'cuda' or target.arch != 'sm_100':
+        pytest.skip('no GPU with tcgen05')
+    import numpy as np
+    from harness import driver_emit
+    from harness.runner import execute
+    special = dataclasses.replace(target, arch='sm_100a')
+    tma._nvcc_builds(special.arch)
+    plain = {k: v for k, v in THREE.items() if k != 'matrix_roles'}
+    builds = [me._generate(me._descrs('volume', order, 's'), me._context(
+        special.arch, 's', multi_element='force', resident_grid=0.05,
+        **options)) for options in (THREE, plain)]
+    assert builds[0].built._element_group.section.roles == 'three'
+    batch = 65537
+    rng = np.random.default_rng(17)
+    inputs = {}
+    for op in driver_emit.collect_operands(builds[0]):
+        if op.is_scalar or not op.is_source:
+            continue
+        key = op.alias or op.kernel_name
+        if op.values is not None:
+            inputs[key] = np.asarray(op.values, dtype=np.float32).reshape(
+                op.shape, order='F')[None]
+            continue
+        rows = 1 if op.addressing == 'none' else batch
+        inputs[key] = rng.standard_normal((rows, *op.shape)).astype(
+            np.float32)
+    got, want = (execute(gen, special, cache_root, tensorforge_include,
+                         batch, inputs, runtime_timeout=300.0)
+                 for gen in builds)
+    assert set(got) == set(want)
+    for name in want:
+        assert np.array_equal(got[name], want[name]), name
