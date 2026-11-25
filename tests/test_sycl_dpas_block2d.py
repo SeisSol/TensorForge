@@ -212,9 +212,25 @@ def test_a_block_kernel_parses():
     assert result.ok, result.errors()
 
 
+def _norm(text):
+    """A kernel but for its name and the options comment, which follow the
+    options asked."""
+    text = re.sub(r'kernel_[0-9a-f]{16}', 'K', text)
+    return re.sub(r'// options: [^\n]*', '', text)
+
+
 def test_the_option_alone_changes_nothing():
-    def norm(text):
-        text = re.sub(r'kernel_[0-9a-f]{16}', 'K', text)
-        return re.sub(r'// options: [^\n]*', '', text)
-    assert (norm(_volume(sycl_dpas_block2d=True).get_kernel())
-            == norm(_volume().get_kernel()))
+    assert (_norm(_volume(sycl_dpas_block2d=True).get_kernel())
+            == _norm(_volume().get_kernel()))
+
+
+def test_auto_reads_blocks_up_to_four_slots():
+    """`auto` (`intel_spmd.AUTO_SLOTS`): the order-6 volume's products span
+    four lane slots and read blocks; the order-8 volume's span eight and
+    keep their tiles -- the kernel the tiles' build writes."""
+    six = _volume(sycl_dpas=True, sycl_dpas_block2d='auto').get_kernel()
+    assert _rows(six) and not VECTOR.search(six)
+    eight = _volume(order=8, sycl_dpas=True,
+                    sycl_dpas_block2d='auto').get_kernel()
+    assert 'dpasBlock2d' not in eight
+    assert _norm(eight) == _norm(_volume(order=8, sycl_dpas=True).get_kernel())
