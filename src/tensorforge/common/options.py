@@ -329,6 +329,18 @@ def parse_matrix_tile(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_groups` takes.
+MATRIX_GROUPS = ('loop', 'unrolled')
+
+
+def parse_matrix_groups(text: str) -> str:
+  """`loop` or `unrolled` (`Options.matrix_groups`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_GROUPS:
+    raise ValueError(f'expected one of {MATRIX_GROUPS}, got {text!r}')
+  return value
+
+
 #: What `Options.matrix_spans` takes.
 MATRIX_SPANS = ('kept', 'dense')
 
@@ -2980,6 +2992,21 @@ declare('matrix_spans',
             'the block\'s first product whole, so that D starts fresh; '
             '`dense`, every product\'s whole width, as the tilings before '
             'the tile.')
+
+declare('matrix_groups',
+        default='loop',
+        env='TF_MATRIX_GROUPS',
+        parse=parse_matrix_groups,
+        doc='How the high-order tile walks its groups -- its blocks of K, a '
+            'chunk of B each (`matrix_tile` `high`, `multi_element.'
+            '_wgmma_groups`): `loop`, the default, one loop over them, its '
+            'body written once -- a block\'s A, its chunk, one fence and one '
+            'dispatch on the block\'s width to the products at that '
+            'immediate N, read off a table of the generated file -- so that '
+            'the code does not grow with the groups (the hand-written '
+            'kernels\' group engine); `unrolled`, each group written out, as '
+            'before.  On wgmma; tcgen05\'s groups stay written out until its '
+            'issuing thread takes the widths at run time.')
 
 declare('matrix_consumers',
         default=2,

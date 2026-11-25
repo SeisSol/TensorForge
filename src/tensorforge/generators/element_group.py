@@ -1933,6 +1933,10 @@ class TileRows:
     #: What of B a block streams and multiplies (`Options.matrix_spans`,
     #: `tile_chunks`): `kept` spans, or `dense` whole widths.
     spans: str = 'kept'
+    #: How the blocks of K are walked (`Options.matrix_groups`): one `loop`
+    #: whose body dispatches on a block's width, each product of a block
+    #: then of that width (`tile_chunks`), or `unrolled`.
+    groups: str = 'unrolled'
 
     @property
     def granule(self) -> int:
@@ -1995,6 +1999,12 @@ def spans_asked(context) -> str:
     return getattr(options, 'matrix_spans', 'kept')
 
 
+def groups_asked(context) -> str:
+    """How the options ask the tile to walk its groups (`Options.
+    matrix_groups`)."""
+    return getattr(context.get_user_options(), 'matrix_groups', 'unrolled')
+
+
 def kept_span(section: GroupSection, step: Step, product: int, k0: int,
               rows: int, granule: int) -> Optional[Tuple[int, int]]:
     """`(lo, hi)`: the rows of N of product `product`'s stage, from its
@@ -2041,6 +2051,13 @@ def _tile_pieces(section: GroupSection, step: Step) -> Tuple[
                 # order (`TileRows.descending`).
                 span = (span[0], stages[p].width)
             pieces.append((p, k0, rows) + span)
+        if pieces and tile is not None and tile.groups == 'loop':
+            # One width a block, the dispatch's key: every product of it
+            # the union of their spans, zeros where its own is narrower or
+            # it has none.
+            lo = min(piece[3] for piece in pieces)
+            hi = max(piece[4] for piece in pieces)
+            pieces = [(p, k0, rows, lo, hi) for p, k0, rows in chunk]
         out.append(tuple(pieces))
     return tuple(out)
 
@@ -2163,7 +2180,7 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
                                 'matrix_consumers', 2))
         for tiles in range(consumers, 0, -1):
             tile = TileRows('wgmma', width, max(1, per), tiles,
-                            spans_asked(context))
+                            spans_asked(context), groups_asked(context))
             for slots in PRODUCER_SLOTS + (1,):
                 lowered = tile_lowered(section, context, tile, slots)
                 why = tile_refusal(lowered, context)
@@ -2182,7 +2199,8 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
                       f'elements of {width} rows, fewer than {MIN_ELEMENTS}')
     for elements in range(min(per, TCGEN05_ROWS // width), MIN_ELEMENTS - 1,
                           -1):
-        tile = TileRows('tcgen05', width, elements, 1, spans_asked(context))
+        tile = TileRows('tcgen05', width, elements, 1, spans_asked(context),
+                        groups_asked(context))
         lowered = tile_lowered(section, context, tile)
         why = tile_refusal(lowered, context)
         if why is not None:
@@ -2229,7 +2247,9 @@ def _spans_note(section: GroupSection) -> str:
     rows of N and their widths, or B dense."""
     (step,) = [s for s in section.steps if s.lowering in ASYNC_LOWERINGS]
     if section.tile.spans != 'kept':
-        return 'B dense, every product\'s whole width a block of K'
+        return ('B dense, every product\'s whole width a block of K'
+                + ('; the blocks one loop' if section.tile.groups == 'loop'
+                   else ''))
     stages = _step_stages(section, step)
     chunks = tile_chunks(section, step)
     kept = sum(rows * (hi - lo) for chunk in chunks
@@ -2239,10 +2259,13 @@ def _spans_note(section: GroupSection) -> str:
     widths = sorted({hi - lo for chunk in chunks for *_, lo, hi in chunk})
     shown = (f'{len(widths)} widths from {widths[0]} to {widths[-1]}'
              if len(widths) > 1 else f'one width, {widths[0]}')
+    walk = (f'; the {len(chunks)} blocks of K one loop, a dispatch on their '
+            f'width' if section.tile.groups == 'loop' else '')
     return (f'B in kept spans: {round(100 * kept / dense)} % of the dense '
             f'rows of N, {shown}' + (', each to the stage\'s last row, its '
                                      'tiles last first'
-                                     if section.tile.descending else ''))
+                                     if section.tile.descending else '')
+            + walk)
 
 
 def producer_refusal(section: GroupSection, context) -> Optional[str]:
@@ -4319,7 +4342,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
            'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
            'TILE_PRODUCER_WARPS', 'TileRows', 'rowless', 'tile_asked',
-           'kept_span', 'spans_asked', 'tile_chunks',
+           'groups_asked', 'kept_span', 'spans_asked', 'tile_chunks',
            'tile_lowered', 'tile_notes', 'tile_plan', 'tile_refusal',
            'tile_warps',
            'TF32_HALVES_BY_WHOLE', 'async_plan', 'async_terms',

@@ -12,13 +12,16 @@ at as many elements as tensor memory's lanes hold.
 B streams in kept spans (`Options.matrix_spans`, `element_group.
 tile_chunks`): of each product's block of K only its tiles of N from the
 first that holds an entry to the last, in the engine's granules, each
-multiplied at its own N into D's columns of it.
+multiplied at its own N into D's columns of it.  On wgmma the blocks are one
+loop (`Options.matrix_groups`, `multi_element._wgmma_groups`): its body
+written once, one dispatch a block on the block's width.
 
 What is checked here: the plan -- the options' defaults, the rows' map, the
 group and the block the fill rule takes on each engine, the refusals and
 the kernel's note of them; the kept spans against the operators' entries,
 and the prepared table as the descriptors read it; the kernel's text -- the
-roles, their barriers, the rings' counts and the spans' widths; the PIR -- the rings' hand-offs by role, verified
+roles, their barriers, the rings' counts, the spans' widths and the group
+loop; the PIR -- the rings' hand-offs by role, verified
 through every pass; the host oracle over two trips, the second's elements
 masked past the batch, against NumPy and without a race, and with dense
 spans bit for bit what the kept ones give; the build for sm_90a and
@@ -100,7 +103,7 @@ def test_on_wgmma_two_consumer_warpgroups_of_seven_elements(order):
     prepared through its ring, the inputs through the producer's."""
     group = _group(order)
     section = group.section
-    assert section.tile == eg.TileRows('wgmma', 9, 7, 2)
+    assert section.tile == eg.TileRows('wgmma', 9, 7, 2, groups='loop')
     assert group.elements == 14 and group.warps == 10
     assert group.rows == 0 and group.producers == 10
     assert eg.rowless(section) and not section.roles
@@ -112,7 +115,7 @@ def test_on_wgmma_two_consumer_warpgroups_of_seven_elements(order):
 
 def test_one_consumer_warpgroup_where_the_options_say_so():
     group = _group(8, matrix_consumers=1)
-    assert group.section.tile == eg.TileRows('wgmma', 9, 7, 1)
+    assert group.section.tile == eg.TileRows('wgmma', 9, 7, 1, groups='loop')
     assert group.elements == 7 and group.warps == 6
 
 
@@ -122,7 +125,7 @@ def test_on_tcgen05_the_three_roles_at_fourteen_elements(order):
     memory's 128 lanes, whatever the table's group or `matrix_roles`."""
     group = _group(order, 'sm_100a')
     section = group.section
-    assert section.tile == eg.TileRows('tcgen05', 9, 14, 1)
+    assert section.tile == eg.TileRows('tcgen05', 9, 14, 1, groups='loop')
     assert section.roles == 'three' and not eg.rowless(section)
     assert group.elements == 14 and group.rows == 14
     assert group.warps == 14 + eg.OPERATOR_WARPS + eg.MMA_WARPS
@@ -185,9 +188,12 @@ def test_the_kernel_splits_the_block_into_its_roles():
     assert '__syncthreads()' not in loop
     assert re.search(r'mbarrierInit\(&me_ring\[\d+ \+ r\], 8\)', src)
     assert re.search(r'mbarrierInit\(&bk\d+_ring\[\d+ \+ r\], 8\)', src)
-    # Each tile's 99 products of o8: three of 3xTF32 a block of eight rows
-    # of K of every product, eleven blocks.
-    assert src.count('wgmma.mma_async') == 2 * 99
+    # Each tile's group loop at o8: a block's nine products -- three of
+    # 3xTF32 of each of its three -- once for each of the blocks' six
+    # widths; written out, 99: nine of each of the eleven blocks.
+    assert src.count('wgmma.mma_async') == 2 * 6 * 9
+    unrolled = _kernel(8, matrix_groups='unrolled').get_kernel()
+    assert unrolled.count('wgmma.mma_async') == 2 * 99
 
 
 def _bodies(**options):
@@ -303,14 +309,39 @@ def test_one_consumer_warpgroup_on_the_oracle():
     assert gen.built._element_group.elements == 7
 
 
-def test_one_slot_of_the_input_ring_on_the_oracle(monkeypatch):
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_one_slot_of_the_input_ring_on_the_oracle(monkeypatch, groups):
     """The input ring of one slot, the plan's last choice (`tile_plan`):
     the second trip's inputs go into the slot the first trip's mixing
     read, the producer behind every consumer warp's last block of A
     (`_wgmma_tile`'s `done`) -- which the oracle's ring order checks."""
     monkeypatch.setattr(eg, 'PRODUCER_SLOTS', ())
-    gen, _ = _on_the_oracle('sm_90a', 4, 17)
+    gen, _ = _on_the_oracle('sm_90a', 4, 17, matrix_groups=groups)
     assert gen.built._element_group.section.ring == 1
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_two_slots_of_b_s_ring_on_the_oracle(arch, groups):
+    """B's prepared ring at two slots: o4's two trips' four chunks through
+    them, each slot taken again behind the wait that retired the products
+    that read it and the warps' arrivals that gave it back -- which the
+    oracle's ring order checks."""
+    gen, _ = _on_the_oracle(arch, 4, 17, matrix_ring_slots=2,
+                            matrix_groups=groups)
+    assert gen.built._element_group.section.ring_slots == 2
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+def test_the_group_loop_computes_what_the_unrolled_groups_do(arch):
+    """The group loop against the groups written out, both against NumPy
+    on the oracle: bit for bit -- the same products in the same order; on
+    wgmma the loop's D started at the accumulators' zeros where the
+    unrolled groups' first product writes it fresh, on tcgen05 N and D's
+    columns values."""
+    _, loop = _on_the_oracle(arch, 4, 17)
+    _, unrolled = _on_the_oracle(arch, 4, 17, matrix_groups='unrolled')
+    assert (loop == unrolled).all()
 
 
 # -- the kept spans ------------------------------------------------------------- #
@@ -339,7 +370,8 @@ def test_every_entry_of_b_is_in_exactly_one_kept_piece(arch, order):
     engine's N (8 on wgmma, 16 on tcgen05) inside the stage, on wgmma each
     on to the stage's last row (`TileRows.descending`), the first block's
     first piece whole; at o6 and o8 fewer rows of N than the dense pieces'
-    (o8: 62 % of them on wgmma, 59 % on tcgen05)."""
+    (o8: 62 % of them on wgmma, 61 % on tcgen05, its group loop's union of
+    a block's spans)."""
     section, step, chunks = _chunks(order, arch)
     granule = section.tile.granule
     assert granule == (16 if arch == 'sm_100a' else 8)
@@ -371,7 +403,9 @@ def test_every_entry_of_b_is_in_exactly_one_kept_piece(arch, order):
                 for p, _, rows, _, _ in chunk)
     assert kept <= dense
     if order == 8:
-        assert round(kept / dense, 2) == (0.59 if arch == 'sm_100a'
+        # A block's products one span in the group loop, their union: 61 %
+        # on tcgen05 where each product's own would keep 59 %.
+        assert round(kept / dense, 2) == (0.61 if arch == 'sm_100a'
                                           else 0.62)
 
 
@@ -448,18 +482,24 @@ def test_the_table_holds_each_kept_piece_as_its_descriptors_read_it(arch, sm):
     assert at == len(numbers)
 
 
-def test_the_kernel_multiplies_each_span_at_its_width():
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_the_kernel_multiplies_each_span_at_its_width(groups):
     """o8 on wgmma: a product a piece, its term and its tile -- three of
-    3xTF32 a piece, each tile its own -- at the piece's width: several N,
-    their sum the spans' rows of N; every one of them into the accumulators
-    from their first register (`TileRows.descending`)."""
-    section, step, chunks = _chunks(8)
-    src = _kernel(8).get_kernel()
+    3xTF32 a piece, each tile its own -- at the piece's width: several N;
+    written out, their sum the spans' rows of N; in the group loop, a
+    block's products once for each width the blocks have.  Every one of
+    them into the accumulators from their first register
+    (`TileRows.descending`)."""
+    section, step, chunks = _chunks(8, matrix_groups=groups)
+    src = _kernel(8, matrix_groups=groups).get_kernel()
     widths = [int(n) for n in re.findall(r'wgmma\.mma_async\.sync\.aligned\.'
                                          r'm64n(\d+)k8', src)]
     pieces = [hi - lo for chunk in chunks for *_, lo, hi in chunk]
-    assert len(widths) == 2 * 3 * len(pieces)
-    assert sorted(widths) == sorted(2 * 3 * pieces)
+    if groups == 'loop':
+        assert sorted(widths) == sorted(2 * 9 * sorted(set(pieces)))
+    else:
+        assert len(widths) == 2 * 3 * len(pieces)
+        assert sorted(widths) == sorted(2 * 3 * pieces)
     assert len(set(widths)) > 1
     firsts = re.findall(r'wgmma\.mma_async\.sync\.aligned\.m64n\d+k8[^;]*;"'
                         r'\s*:\s*"\+f"\((\w+)\)', src)
@@ -476,6 +516,63 @@ def test_the_kernel_says_what_the_spans_keep():
     src = _kernel(8, matrix_spans='dense').get_kernel()
     assert any('B dense' in line for line in src.splitlines()
                if line.strip().startswith('// tile:'))
+
+
+def test_the_groups_option_defaults_to_the_loop():
+    from tensorforge.common.options import parse_matrix_groups, registry
+    assert registry()['matrix_groups'].default == 'loop'
+    assert [parse_matrix_groups(t) for t in ('loop', 'Unrolled')] == [
+        'loop', 'unrolled']
+    with pytest.raises(ValueError):
+        parse_matrix_groups('rolled')
+    assert _group(8, 'sm_100a').section.tile.groups == 'loop'
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+@pytest.mark.parametrize('order', [4, 6, 8])
+def test_the_group_loop_takes_one_width_a_block(arch, order):
+    """In the group loop a block's products are one width, its key in the
+    dispatch: the union of their kept spans -- every entry still in its
+    product's piece of its block -- the first block whole."""
+    section, step, chunks = _chunks(order, arch)
+    assert section.tile.groups == 'loop'
+    stages = eg._step_stages(section, step)
+    for chunk in chunks:
+        assert len(chunk) == len(step.products)
+        assert len({piece[3:] for piece in chunk}) == 1
+    assert chunks[0][0][3:] == (0, stages[0].width)
+    _, _, apart = _chunks(order, arch, matrix_groups='unrolled')
+    for loop, unrolled in zip(chunks, apart):
+        lo = min(piece[3] for piece in unrolled)
+        assert all(piece[3] == lo for piece in loop)
+
+
+def test_the_kernel_walks_the_blocks_in_one_loop():
+    """o8: each tile's eleven blocks one rolled loop, their widths a table
+    of the generated file read once a block, one dispatch on them: six
+    widths, a branch each -- the widths 40 to 120 as the spans give them."""
+    section, step, chunks = _chunks(8)
+    src = _kernel(8).get_kernel()
+    assert len(re.findall(r'#pragma unroll 1\s*for \(int32_t \w+ = 0; '
+                          r'\w+ < 11; \+\+\w+\)', src)) == 2
+    (table,) = re.findall(r'const int32_t (tf_tw_\w+)\[11\] = \{([^}]*)\}',
+                          src)
+    eighths = [int(x) for x in table[1].split(',')]
+    assert eighths == [(chunk[0][4] - chunk[0][3]) // 8 for chunk in chunks]
+    assert sorted(set(eighths)) == [5, 9, 11, 13, 14, 15]
+    assert src.count(f'{table[0]}[') == 2 + 1
+    # tcgen05: the star role's band loop and the mma role's, one block's
+    # nine products, N and D's first column read off two tables.
+    section, step, chunks = _chunks(8, 'sm_100a')
+    src = _kernel(8, 'sm_100a').get_kernel()
+    assert src.count('#pragma unroll 1') == 2
+    assert src.count('tcgen05.mma.cta_group') == 9
+    spans = [chunk[0][3:] for chunk in chunks]
+    for prefix, numbers in (('tl', [lo for lo, _ in spans]),
+                            ('tn', [hi - lo for lo, hi in spans])):
+        (found,) = re.findall(rf'const int32_t tf_{prefix}_\w+\[11\] = '
+                              rf'\{{([^}}]*)\}}', src)
+        assert [int(x) for x in found.split(',')] == numbers
 
 
 def test_two_trips_of_kept_spans_on_tcgen05_on_the_oracle():
@@ -504,17 +601,21 @@ def test_the_first_block_s_first_piece_is_whole(monkeypatch, arch):
     assert chunks[0][0][3:] == (0, stages[chunks[0][0][0]].width)
 
 
-@pytest.mark.parametrize('arch,order,count', [('sm_90a', 4, 17),
-                                              ('sm_100a', 6, 14)])
+@pytest.mark.parametrize('arch,order,count,groups', [
+    ('sm_90a', 4, 17, 'loop'), ('sm_100a', 6, 14, 'loop'),
+    ('sm_100a', 6, 14, 'unrolled')])
 def test_kept_and_dense_spans_compute_alike_on_the_oracle(arch, order,
-                                                          count):
+                                                          count, groups):
     """The kept spans leave out products of zeros alone: on the oracle every
     output bit for bit what dense spans give, both against NumPy -- where
     the spans are narrower than the stage: o4 on wgmma (83 % of the dense
     rows of N), two trips, the second's elements masked past the batch; o6
-    on tcgen05 (73 %; at o4 its granule of 16 keeps every row), a trip."""
-    _, kept = _on_the_oracle(arch, order, count)
-    _, dense = _on_the_oracle(arch, order, count, matrix_spans='dense')
+    on tcgen05 (73 %; at o4 its granule of 16 keeps every row), a trip, its
+    blocks in the group loop and written out -- there each product's own
+    span, at its own N and D's columns from its first."""
+    _, kept = _on_the_oracle(arch, order, count, matrix_groups=groups)
+    _, dense = _on_the_oracle(arch, order, count, matrix_spans='dense',
+                              matrix_groups=groups)
     assert (kept == dense).all()
 
 
@@ -548,16 +649,26 @@ def _ptxas(arch, tmp_path, order=8, **options):
     return sass, run.stderr
 
 
-@pytest.mark.parametrize('arch,engine,products', [
-    ('sm_90a', 'HGMMA', 2 * 99), ('sm_100a', 'UTCHMMA', 99)])
-def test_the_build_reads_back(arch, engine, products, tmp_path):
+@pytest.mark.parametrize('arch,engine,products,options', [
+    ('sm_90a', 'HGMMA', 2 * 6 * 9, {}),
+    ('sm_90a', 'HGMMA', 2 * 99, {'matrix_groups': 'unrolled'}),
+    ('sm_100a', 'UTCHMMA', 9, {}),
+    ('sm_100a', 'UTCHMMA', 99, {'matrix_groups': 'unrolled'})])
+def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     """o8 built: every product an instruction of the engine's, as many as
-    the text has -- the 33 kept pieces' three each, every tile's -- and
-    none of them serialized by ptxas: no C7510 (a wgmma serialized for a
-    register's use), C7511, C7514 or C7517 in its report."""
-    sass, report = _ptxas(arch, tmp_path)
-    assert tma._count(sass, engine) == products
-    for code in ('C7510', 'C7511', 'C7514', 'C7517'):
+    the text has -- wgmma's group loop's six widths' nine each, tcgen05's
+    nine, its N a value, or written out the 33 kept pieces' three each,
+    every tile's -- and none of them
+    serialized by ptxas: no C7510 (a wgmma serialized for a register's
+    use), C7511, C7514, C7517 or C7519 (for an arrive in a divergent path:
+    the group loop's dispatch on a width ptxas cannot tell is the warp's
+    alike) in its report."""
+    sass, report = _ptxas(arch, tmp_path, **options)
+    if engine == 'HGMMA':
+        assert len(re.findall(r'\bHGMMA\.64x\d+x8\b', sass)) == products
+    else:
+        assert tma._count(sass, engine) == products
+    for code in ('C7510', 'C7511', 'C7514', 'C7517', 'C7519'):
         assert code not in report, report[-2000:]
 
 

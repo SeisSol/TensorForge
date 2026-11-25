@@ -6901,9 +6901,9 @@ GROUPS = {
          sub(ME_GROUP, '            if not out and not pieces:\n', '            if not pieces:\n', 1)),
         ("the spans the options ask for not the tile's on wgmma",
          sub(ME_GROUP, "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                            spans_asked(context))\n",
+                       "                            spans_asked(context), groups_asked(context))\n",
              "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                            'dense')\n", 1)),
+                       "                            'dense', groups_asked(context))\n", 1)),
         ("the spans kept where known zeros are not skipped",
          sub(ME_GROUP, "    if not getattr(options, 'skip_known_zeros', True):\n        return 'dense'\n", '', 1)),
         ("an inactive group taken",
@@ -6946,6 +6946,106 @@ GROUPS = {
         ("the spans' option defaulting to dense",
          sub(OPTIONS, "declare('matrix_spans',\n        default='kept',\n",
              "declare('matrix_spans',\n        default='dense',\n", 1)),
+    ]),
+    # --- the high-order tile, H3: the group engine on wgmma (tensorforge-hotile)
+    'higroups': ('tests/test_hiorder_tile.py tests/test_tcgen05.py -n 6', [
+        ("every block's A into the first slot",
+         sub(ME_SECTION, "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n",
+             "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, 1, hint='gs'),\n", 1)),
+        ("every block mixing the first rows of K",
+         sub(ME_SECTION, "                'mul', INDEX, j, STAR_ROWS, hint='k'), hint='k'), live)\n",
+             "                'mul', INDEX, j, 0, hint='k'), hint='k'), live)\n", 1)),
+        ("every block dispatched at the first block's width",
+         sub(ME_SECTION, "            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,\n",
+             "            f'{table}[{{0}}]', 0, type_=INDEX, pure=True, movable=True,\n", 1)),
+        ("the dispatch on a width ptxas cannot tell is the warp's alike",
+         sub(ME_SECTION, "        eighths = b.lane_broadcast(b.rawexpr(\n"
+                         "            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,\n"
+                         "            hint='gw'), 0, 32, hint='gw')\n",
+             "        eighths = b.rawexpr(\n"
+             "            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,\n"
+             "            hint='gw')\n", 1)),
+        ("a product's lower halves of B read where its upper ones are",
+         sub(ME_SECTION, "                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),\n"
+                         "                                desc=bdesc, hint='b')\n",
+             "                'mul', INDEX, part, 2 * p, hint='gb'), hint='gb'),\n"
+             "                                desc=bdesc, hint='b')\n", 1)),
+        ("the loop's wait leaving every block in flight",
+         sub(ME_SECTION, "        b.matrix_wait('wgmma', hold - 1, reads=[\n",
+             "        b.matrix_wait('wgmma', hold, reads=[\n", 1)),
+        ("the chunk in hand given back behind the wait",
+         sub(ME_SECTION, "                ring.release(trip, b.op('sub', INDEX, j, hold - 1,\n"
+                         "                                        hint='gr'), base)\n",
+             "                ring.release(trip, b.op('sub', INDEX, j, 0,\n"
+             "                                        hint='gr'), base)\n", 1)),
+        ("the dispatch's leaves the narrowest width's alone",
+         sub(ME_SECTION, '        for width in sorted(set(widths)):\n',
+             '        for width in sorted(set(widths))[:1]:\n', 1)),
+        ("each of the loop's products writing D fresh",
+         sub(ME_SECTION, '                        b.wgmma(width, [a[ia]], bs[ib], accs[:width // 2],\n'
+                         '                                scale_d=1, layouts=shapes, term=(ia, ib),\n',
+             '                        b.wgmma(width, [a[ia]], bs[ib], accs[:width // 2],\n'
+             '                                scale_d=0, layouts=shapes, term=(ia, ib),\n', 1)),
+        ("the group loop left to the compiler to unroll",
+         sub(ME_SECTION, "    with b.for_(0, len(chunks), unroll=1, hint='g') as loop:\n"
+                         "        j = loop.induction\n"
+                         "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n",
+             "    with b.for_(0, len(chunks), unroll=True, hint='g') as loop:\n"
+             "        j = loop.induction\n"
+             "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n", 1)),
+        # tcgen05's group engine
+        ("tcgen05's block products into D's first columns",
+         sub(ME_SECTION, '                          d_column=lo, term=(ia, ib), plan=plan,\n',
+             '                          d_column=0, term=(ia, ib), plan=plan,\n', 1)),
+        ("tcgen05's blocks at the widest N",
+         sub(ME_SECTION, '                b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,\n'
+                         '                          enable_input_d=fresh if first else 1,\n',
+             '                b.tcgen05(widths[-1], tmem, bs[ib], tmem, issue=issue,\n'
+             '                          enable_input_d=fresh if first else 1,\n', 1)),
+        ("the star role's loop taking a slot of A not given back",
+         sub(ME_SECTION, '                b.ring_acquire(self.areas, slot, parity=parity)\n', '', 1)),
+        ("tcgen05's every block writing D fresh",
+         sub(ME_SECTION, '                          enable_input_d=fresh if first else 1,\n',
+             '                          enable_input_d=0 if first else 1,\n', 1)),
+        ("tcgen05's lower halves of A read where the upper ones are",
+         sub(ME_SECTION, '                                        2 * STAR_ROWS * p + STAR_ROWS * ia,\n',
+             '                                        2 * STAR_ROWS * p,\n', 1)),
+        ("tcgen05's lower halves of B read where the upper ones are",
+         sub(ME_SECTION, "                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),\n"
+                         "                                desc=desc, hint='b')\n",
+             "                'mul', INDEX, part, 2 * p, hint='gb'), hint='gb'),\n"
+             "                                desc=desc, hint='b')\n", 1)),
+        ("the star role's loop mixing the first rows of K",
+         sub(ME_SECTION, "                k0 = b.op('mul', INDEX, j, STAR_ROWS, hint='k')\n",
+             "                k0 = b.op('mul', INDEX, j, 0, hint='k')\n", 1)),
+        ("a slot of A's ring used once a trip in the loop's parity",
+         sub(ME_SECTION, "            'mul', INDEX, trips, uses, hint='ta'), b.op(\n",
+             "            'mul', INDEX, trips, 1, hint='ta'), b.op(\n", 1)),
+        # the PIR's values of N and of the columns (tcgen05, tmem_st)
+        ("a value of N put into the descriptor unshifted",
+         sub(ENGINES, "                      f'>> 3) << 17)')\n",
+             "                      f') << 17)')\n", 1)),
+        ("a column that is a value left out of its address",
+         sub(ENGINES, "            text += f' + static_cast<uint32_t>({env.name(runtime[key])})'\n",
+             '            pass\n', 1)),
+        ("a store's column that is a value stored as a column's value",
+         sub(ENGINES, "    values = s.args[2:] if s.attr('runtime_column') else s.args[1:]\n",
+             '    values = s.args[1:]\n', 1)),
+        ("the widths of a value of N unchecked",
+         sub(ENGINES, '        if not widths or any(w not in TCGEN05_N for w in widths) \\\n',
+             '        if not widths or False \\\n', 1)),
+        ("a value of N's statement as wide as its narrowest width",
+         sub(BUILD, '            widest = max(int(w) for w in widths)\n',
+             '            widest = min(int(w) for w in widths)\n', 1)),
+        ("the groups the options ask for not the tile's on wgmma",
+         sub(ME_GROUP, '                            spans_asked(context), groups_asked(context))\n',
+             "                            spans_asked(context), 'unrolled')\n", 1)),
+        ("a block's products at their own spans in the loop",
+         sub(ME_GROUP, "        if pieces and tile is not None and tile.groups == 'loop':\n",
+             '        if False:\n', 1)),
+        ("the groups' option defaulting to written out",
+         sub(OPTIONS, "declare('matrix_groups',\n        default='loop',\n",
+             "declare('matrix_groups',\n        default='unrolled',\n", 1)),
     ]),
 }
 

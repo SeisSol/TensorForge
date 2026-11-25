@@ -2640,6 +2640,59 @@ class _Fold:
         slot = b.const(s_, INDEX)
         return slot, parity, self.columns[0] + s_ * self.slot_columns
 
+    def round_of(self, trips, j):
+        """`round`'s for a block `j` that is a value (`fill_loop`,
+        `_tcgen05_groups`): its slot `j % slots`, used `ceil((blocks -
+        slot) / slots)` times a trip."""
+        b = self.builder
+        s_ = b.op('rem', INDEX, j, self.slots, hint='tas')
+        uses = b.op('div', INDEX, b.op('sub', INDEX,
+                                        self.blocks + self.slots - 1, s_,
+                                        hint='tau'), self.slots, hint='tau')
+        parity = b.op('rem', INDEX, b.op('add', INDEX, b.op(
+            'mul', INDEX, trips, uses, hint='ta'), b.op(
+            'div', INDEX, j, self.slots, hint='ta'), hint='ta'), 2,
+            hint='tap')
+        at = b.op('add', INDEX, b.op('mul', INDEX, s_, self.slot_columns,
+                                     hint='tac'), self.columns[0],
+                  hint='tac')
+        return s_, parity, at
+
+    def fill_loop(self, trip, rows, trips, every) -> None:
+        """Every block's A as one loop a band (`TileRows.groups` `loop`):
+        band `b` the blocks `b`, `b + bands`, ... as `fill` takes them, the
+        body written once -- the block's slot and rows of K values."""
+        from tensorforge.backend.instructions.compute.primitives import \
+            nvidia
+        from tensorforge.backend.pir.engines import FenceKind
+        from tensorforge.generators.element_group import STAR_ROWS
+        b, step, tmem = self.builder, self.step, self.tmem
+        bands, band, live, element, inband, numbers = rows
+        with b.if_(inband):
+            with b.for_(band, self.blocks, bands, unroll=1, hint='g',
+                        uniform=Uniformity.MULT) as loop:
+                j = loop.induction
+                slot, parity, at = self.round_of(trips, j)
+                # The slot back from the products of its last round.
+                b.ring_acquire(self.areas, slot, parity=parity)
+                k0 = b.op('mul', INDEX, j, STAR_ROWS, hint='k')
+                halves = [_star_quad(trip, step, numbers, element, b.op(
+                    'add', INDEX, k0, r0, hint='k'), live)
+                          for r0 in range(0, STAR_ROWS, 4)]
+                for p in range(len(step.products)):
+                    xs = [x for quad in halves for x in quad[p]]
+                    split = nvidia.tfconvert(b, xs)
+                    b.tmem_st(tmem, b.op('add', INDEX, at, 2 * STAR_ROWS * p,
+                                         hint='tc'),
+                              [_as_float(b, u) for u, _ in split])
+                    b.tmem_st(tmem, b.op('add', INDEX, at,
+                                         2 * STAR_ROWS * p + STAR_ROWS,
+                                         hint='tc'),
+                              [_as_float(b, lo) for _, lo in split])
+                b.fence(FenceKind.THREAD_SYNC, engine='tcgen05',
+                        side='before')
+                b.ring_publish(self.areas, slot, every)
+
     def fill(self, trip, rows, j, slot, parity, at, every) -> None:
         """Block `j`'s A, by its band: the slot back from the products of
         its last round, the band's rows of every product into it, both
@@ -2920,7 +2973,12 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
     base = ring.base(trip, 0)
     hold = ring.hold
     flight, start = [], True
-    for j in range(blocks):
+    if tile.groups == 'loop':
+        # The blocks as one loop (`_wgmma_groups`), its last `hold - 1`
+        # chunks given back below.
+        _wgmma_groups(trip, step, ring, base, area, done, accs,
+                      (numbers, element, live, h, mine))
+    for j in range(0 if tile.groups == 'loop' else blocks):
         at = (j % slots) * slot_size
         values = _star_quad(trip, step, numbers, element, _index(
             b, 'add', b.op('mul', INDEX, h, 4, hint='k'), j * STAR_ROWS, 'k'),
@@ -2989,6 +3047,121 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
         col = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2, hint='n'),
                    n - 8 * (i // 4 + 1) + i % 2, hint='n')
         write(dm, col, accs[i], ('w', rr), True)
+
+
+def _wgmma_groups(trip, step, ring, base, area, done, accs, rows) -> None:
+    """The high-order tile's blocks of K on wgmma as one loop -- the group
+    engine (`TileRows.groups` `loop`, `Options.matrix_groups`): its body
+    written once, as `_wgmma_tile` writes a block out.  Block `j`'s A, two
+    threads a row of the tile (`rows`: the row's star numbers, element and
+    whether it is the tile's, the thread's half of the block and its
+    sixteen bytes of a core matrix), into slot `j % 2` of `area`; the
+    warpgroup's barrier; the block's chunk of B as it lands; one fence; and
+    one dispatch on the block's width -- a table of the generated file,
+    every product of a block that wide (`element_group.tile_chunks`) -- to
+    the block's products at that immediate N, into the accumulators from
+    their first register, the descriptors made ahead of it; one commit; the
+    wait that leaves `hold - 1` blocks in flight, and the chunk it retired
+    back to the ring.  D starts at the zeros the accumulators are declared
+    with, every product adding into it: none writes D fresh under a branch.
+    `done` gives the trip's input slot back behind the loop; the last
+    `hold - 1` chunks are the caller's to give back, behind the wait that
+    retires every product."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    from tensorforge.backend.pir.engines import FenceKind, MatrixDescType
+    from tensorforge.generators.element_group import STAR_ROWS, STAR_SLOTS
+    b, section = trip.builder, trip.section
+    numbers, element, live, h, mine = rows
+    count = len(step.products)
+    slots = STAR_SLOTS['wgmma']
+    half = 64 * STAR_ROWS
+    slot_size = 2 * count * half
+    stages = ring.stages
+    desc = MatrixDescType(Datatype.TF32, lbo=128, sbo=STAR_ROWS * 32,
+                          form='wgmma')
+    vector = ScalarType(section.dtype, 4)
+    chunks = ring.chunks
+    widths = []
+    for chunk in chunks:
+        spans = {piece[3:] for piece in chunk}
+        if len(spans) != 1 or len(chunk) != count or any(
+                piece[2] != STAR_ROWS for piece in chunk):
+            raise InternalError(f'{step.dest.alias}: a block of the group '
+                                f'loop whose pieces are not every product\'s '
+                                f'{STAR_ROWS} rows of one width')
+        (lo, hi), = spans
+        widths.append(hi - lo)
+    table = trip.table('tw', [w // 8 for w in widths])
+    hold = ring.hold
+    with b.for_(0, len(chunks), unroll=1, hint='g') as loop:
+        j = loop.induction
+        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),
+                  slot_size, hint='ga')
+        values = _star_quad(trip, step, numbers, element, b.op(
+            'add', INDEX, b.op('mul', INDEX, h, 4, hint='k'), b.op(
+                'mul', INDEX, j, STAR_ROWS, hint='k'), hint='k'), live)
+        for p, xs in enumerate(values):
+            split = nvidia.tfconvert(b, xs)
+            for part, picked in ((0, [_as_float(b, u) for u, _ in split]),
+                                 (1, [_as_float(b, lo) for _, lo in split])):
+                b.store(area, b.pack(vector, *picked, hint='y'), b.op(
+                    'add', INDEX, b.op('add', INDEX, mine, at, hint='as'),
+                    (2 * p + part) * half, hint='as'), align=16)
+        b.fence(FenceKind.PROXY)
+        # The warpgroup's: its role's.
+        b.barrier(Participants.ROLE)
+        # The block's width, the warp's alike as ptxas can tell: a dispatch
+        # on a value it cannot tell is would serialize every wgmma of the
+        # chain (C7519, the arrives it puts in a divergent path).
+        eighths = b.lane_broadcast(b.rawexpr(
+            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,
+            hint='gw'), 0, 32, hint='gw')
+        slot, parity, start = ring.round(trip, j, base)
+        b.ring_take(ring.ring, slot, parity, writes=[ring.storage])
+        # A product's pieces in the chunk: both halves of its rows of K by
+        # the block's width, the lower ones that far behind the upper.
+        part = b.op('mul', INDEX, eighths, 8 * STAR_ROWS, hint='gp')
+        operands = []
+        for p, stage in enumerate(stages):
+            bdesc = MatrixDescType(Datatype.TF32, lbo=stage.leading,
+                                   sbo=STAR_ROWS * 32, form='wgmma')
+            bs = [b.matrix_desc(ring.storage, b.op('add', INDEX, start, b.op(
+                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),
+                                desc=bdesc, hint='b')
+                  for k in range(1 + stage.split)]
+            upper = b.matrix_desc(area, b.op('add', INDEX, at, 2 * p * half,
+                                             hint='ga'), desc=desc, hint='a')
+            lower = b.matrix_desc(area, b.op('add', INDEX, at,
+                                             (2 * p + 1) * half, hint='ga'),
+                                  desc=desc, hint='a')
+            operands.append(((upper, lower), bs, _plan(stage)))
+        b.fence(FenceKind.REGISTERS, engine='wgmma', registers=accs)
+        for width in sorted(set(widths)):
+            with b.if_(b.op('eq', BOOL, eighths, width // 8, hint='gk')):
+                shapes = (nvidia.wgmma_a_fragment_bits(), None,
+                          nvidia.wgmma_d_fragment_bits(width))
+                for (a, bs, plan) in operands:
+                    for ia, ib in plan.products:
+                        b.wgmma(width, [a[ia]], bs[ib], accs[:width // 2],
+                                scale_d=1, layouts=shapes, term=(ia, ib),
+                                plan=plan)
+        b.commit_group('wgmma')
+        b.matrix_wait('wgmma', hold - 1, reads=[
+            x for a, bs, _ in operands for x in list(a) + bs])
+        if hold > 1:
+            with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):
+                ring.release(trip, b.op('sub', INDEX, j, hold - 1,
+                                        hint='gr'), base)
+        else:
+            ring.release(trip, j, base)
+    # Every block of A computed: the trip's input slot back.
+    done()
+    # The descriptors' buffers, for the wait that retires every product.
+    reads = [b.matrix_desc(area, 0, desc=desc, hint='a')] + [
+        b.matrix_desc(ring.storage, 0, desc=MatrixDescType(
+            Datatype.TF32, lbo=stages[0].leading, sbo=STAR_ROWS * 32,
+            form='wgmma'), hint='b')]
+    b.matrix_wait('wgmma', 0, registers=list(accs), reads=reads)
 
 
 def _star_quad(trip, step, numbers, element, first, live) -> list:
@@ -3194,12 +3367,17 @@ def _tcgen05_roles(trip, step, split, stage) -> None:
                                       split.role(role).warps[0], hint=role),
                     b.op('eq', BOOL, trip.lane, 0, hint=role), hint=role)
 
+    tile = trip.section.tile
+    loop = tile is not None and tile.groups == 'loop'
     roles = b.split_roles(split)
     with roles.role('star'):
         stage()
         held = fold.rows(trip, M)
         every = b.const(True, BOOL)
-        for j in range(fold.blocks):
+        if loop:
+            # The high-order tile's group engine (`_tcgen05_groups`).
+            fold.fill_loop(trip, held, trips, every)
+        for j in range(0 if loop else fold.blocks):
             slot, parity, at = fold.round(trips, j)
             fold.fill(trip, held, j, slot, parity, at, every)
     with roles.role('operator'):
@@ -3210,7 +3388,9 @@ def _tcgen05_roles(trip, step, split, stage) -> None:
     with roles.role('mma'):
         issue = first_of('mma')
         start, hold = True, ring.hold
-        for j in range(fold.blocks):
+        if loop:
+            _tcgen05_groups(trip, step, fold, ring, base, trips, issue)
+        for j in range(0 if loop else fold.blocks):
             slot, parity, at = fold.round(trips, j)
             start = fold.issue(trip, j, slot, parity, at, issue, base, n,
                                start, release=False)
@@ -3226,6 +3406,82 @@ def _tcgen05_roles(trip, step, split, stage) -> None:
         # loads of it, between the engine's fences.
         b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
         b.barrier(Participants.ROLE)
+
+
+def _tcgen05_groups(trip, step, fold, ring, base, trips, issue) -> None:
+    """The mma role's blocks as one loop -- tcgen05's group engine
+    (`TileRows.groups` `loop`, `_tcgen05_roles`): its body written once, the
+    thread `issue` picks taking block `j`'s slot of A as it lands and its
+    chunk of B, then the block's products at the block's N into D's
+    columns from the block's first -- both read off tables of the
+    generated file (`element_group.tile_chunks`: every product of a block
+    of one span), the instruction descriptor and the addresses in
+    registers, as the hand-written kernels issue -- and their commit onto
+    A's slot, and onto the slot of B's chunk the ring's hold reaches back
+    to.  D written fresh by the first product of the trip's first block,
+    whose span is whole.  The last `hold - 1` chunks are the caller's to
+    give back."""
+    from tensorforge.backend.pir.engines import FenceKind, MatrixDescType
+    from tensorforge.generators.element_group import STAR_ROWS
+    b = trip.builder
+    tmem = trip.tmem
+    chunks = ring.chunks
+    spans = []
+    for chunk in chunks:
+        found = {piece[3:] for piece in chunk}
+        if len(found) != 1 or len(chunk) != len(step.products) or any(
+                piece[2] != STAR_ROWS for piece in chunk):
+            raise InternalError(f'{step.dest.alias}: a block of the group '
+                                f'loop whose pieces are not every product\'s '
+                                f'{STAR_ROWS} rows of one span')
+        (span,) = found
+        spans.append(span)
+    widths = sorted({hi - lo for lo, hi in spans})
+    los = trip.table('tl', [lo for lo, _ in spans])
+    ns = trip.table('tn', [hi - lo for lo, hi in spans])
+    hold = ring.hold
+    with b.for_(0, len(chunks), unroll=1, hint='g') as loop:
+        j = loop.induction
+        slot, parity, at = fold.round_of(trips, j)
+        with b.if_(issue):
+            b.ring_take(fold.areas, slot, parity)
+            b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+        bslot, bparity, start = ring.round(trip, j, base)
+        with b.if_(issue):
+            b.ring_take(ring.ring, bslot, bparity, writes=[ring.storage])
+        lo = b.rawexpr(f'{los}[{{0}}]', j, type_=INDEX, pure=True,
+                       movable=True, hint='gl')
+        n = b.rawexpr(f'{ns}[{{0}}]', j, type_=INDEX, pure=True,
+                      movable=True, hint='gn')
+        # A product's piece in the chunk: both halves of its rows of K by
+        # the block's width, the lower ones that far behind the upper.
+        part = b.op('mul', INDEX, n, STAR_ROWS, hint='gp')
+        fresh = b.op('ne', BOOL, j, 0, hint='gf')
+        first = True
+        for p, stage in enumerate(ring.stages):
+            desc = MatrixDescType(Datatype.TF32, lbo=stage.leading,
+                                  sbo=STAR_ROWS * 32, form='tcgen05')
+            bs = [b.matrix_desc(ring.storage, b.op('add', INDEX, start, b.op(
+                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),
+                                desc=desc, hint='b')
+                  for k in range(1 + stage.split)]
+            plan = _plan(stage)
+            for ia, ib in plan.products:
+                b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
+                          enable_input_d=fresh if first else 1,
+                          a_column=b.op('add', INDEX, at,
+                                        2 * STAR_ROWS * p + STAR_ROWS * ia,
+                                        hint='gc'),
+                          d_column=lo, term=(ia, ib), plan=plan,
+                          widths=widths)
+                first = False
+        b.ring_release(fold.areas, slot, issue, engine='tcgen05')
+        if hold > 1:
+            with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):
+                ring.release(trip, b.op('sub', INDEX, j, hold - 1,
+                                        hint='gr'), base, issue)
+        else:
+            ring.release(trip, j, base, issue)
 
 
 def _tcgen05_role_epilogue(trip, step, M) -> None:
