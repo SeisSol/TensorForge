@@ -4967,8 +4967,8 @@ GROUPS = {
          sub(ME_SECTION, '            predicate = self.mask\n',
              '            predicate = None\n', 1)),
         ('every warp staging into the first slot',
-         sub(ME_SECTION, "                               group.elements, hint='slot')\n",
-             "                               1, hint='slot')\n", 1)),
+         sub(ME_SECTION, "                                group.elements, hint='slot'))\n",
+             "                                1, hint='slot'))\n", 1)),
         ('a step reading what the block has not finished writing',
          sub(ME_SECTION, '            if written & reads or dests & (written | read):\n',
              '            if dests & (written | read):\n', 1)),
@@ -7240,6 +7240,9 @@ GROUPS = {
              "            return 'publish', 'full'\n",
              "            return 'release', 'empty'\n", 1)),
         # the epilogue by bulk reductions
+        ("the tile's warps taken by their element, past the elements",
+         sub(ME_SECTION, "        self.slot = (builder.thread_id('y') if _rowless(self.section) else\n",
+             "        self.slot = (builder.thread_id('y') if False else\n", 1)),
         ("the tile's bulk epilogue asked and a reduction a cell taken",
          sub(ME_GROUP, "    output = ('red' if tile is None or tile.engine != 'tcgen05'\n"
                        "              else output_asked(context))\n",
