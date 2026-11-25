@@ -817,18 +817,33 @@ __device__ __forceinline__ void bulkCopyOn(void *barrier, void *dst,
 #endif
 }
 
-/// A shared-memory matrix descriptor (`Op.MATRIX_DESC`): what wgmma reads an
-/// operand in shared memory through.  `layout` holds every field but the
-/// start address -- the leading and the stride byte offset, the swizzle, the
-/// fixed bits of a format (`engines.matrix_descriptor_bits`) -- and the
-/// address goes in here, in 16-byte units, bits 0 to 13 (PTX ISA, wgmma's
-/// "Matrix Descriptor Format").  It is the operand's address in the shared
-/// window, so a buffer is described wherever the allocator placed it.
+/// The bits of a matrix descriptor's start address (`matrixDescriptor`), as
+/// `hw.matrix_descriptor_address_bits` states them: 14, which reach 256 KB,
+/// past the shared memory of every part but sm_107's opted-into 327 KB, and
+/// there 15 (PTX ISA 9.4, tcgen05's "Shared Memory Descriptor", bits 0 to
+/// 14) -- so that no address is cut short.  A family target of sm_100 runs
+/// on sm_107 too, within the 227 KB its blocks plan against, which 14 hold.
+#if defined(__CUDA_ARCH_FEAT_SM107_ALL) ||                                     \
+    (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                                 \
+     __CUDA_ARCH_FAMILY_SPECIFIC__ == 1070)
+#define TENSORFORGE_MATRIX_ADDRESS_BITS 15
+#else
+#define TENSORFORGE_MATRIX_ADDRESS_BITS 14
+#endif
+
+/// A shared-memory matrix descriptor (`Op.MATRIX_DESC`): what wgmma and
+/// tcgen05 read an operand in shared memory through.  `layout` holds every
+/// field but the start address -- the leading and the stride byte offset,
+/// the swizzle, the fixed bits of a format (`engines.matrix_descriptor_bits`)
+/// -- and the address goes in here, in 16-byte units, bits 0 to 13 or 14
+/// (`TENSORFORGE_MATRIX_ADDRESS_BITS`; PTX ISA, wgmma's "Matrix Descriptor
+/// Format").  It is the operand's address in the shared window, so a buffer
+/// is described wherever the allocator placed it.
 __device__ __forceinline__ uint64_t matrixDescriptor(const void *operand,
                                                      uint64_t layout) {
   return layout |
          ((static_cast<uint64_t>(__cvta_generic_to_shared(operand)) >> 4) &
-          0x3FFFull);
+          ((1ull << TENSORFORGE_MATRIX_ADDRESS_BITS) - 1ull));
 }
 
 /// The fence, the commit and the wait of wgmma (PTX ISA, "wgmma.fence",
@@ -921,16 +936,22 @@ inline cudaError_t launchProgrammatic(void (*kernel)(Params...), dim3 grid,
 #endif
 }
 
-/// The targets that have tcgen05 and tensor memory (sm_100a, sm_103a, and
-/// their families): the source of a product writes its instructions inside
-/// this guard (`engines.TCGEN05_FEATURE`), since `-arch=sm_100a` builds the
-/// source for `compute_100` as well, where ptxas refuses them; the helpers
-/// below trap outside it.
+/// The targets that have tcgen05 and tensor memory (`Target.tcgen05`):
+/// sm_100a, sm_103a, sm_107a and sm_110a, and the families sm_100f, sm_103f,
+/// sm_107f and sm_110f, which nvcc names by `__CUDA_ARCH_FAMILY_SPECIFIC__`
+/// alone (nvcc 13.5).  The source of a product writes its instructions
+/// inside this guard (`engines.TCGEN05_FEATURE`), since `-arch=sm_100a`
+/// builds the source for `compute_100` as well, where ptxas refuses them; the
+/// helpers below trap outside it.
 #if defined(__CUDA_ARCH_FEAT_SM100_ALL) ||                                     \
     defined(__CUDA_ARCH_FEAT_SM103_ALL) ||                                     \
+    defined(__CUDA_ARCH_FEAT_SM107_ALL) ||                                     \
+    defined(__CUDA_ARCH_FEAT_SM110_ALL) ||                                     \
     (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                                 \
      (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000 ||                                 \
-      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030))
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030 ||                                 \
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1070 ||                                 \
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1100))
 #define TENSORFORGE_TCGEN05 1
 #endif
 

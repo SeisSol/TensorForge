@@ -20,6 +20,18 @@ def parseBytes(string):
     elif suffix == 'MB':
       return count * 1024**2
 
+
+def _int_or_none(value):
+  return int(value) if value is not None else None
+
+
+#: Models the table no longer has under that name, and the one it has them
+#: under.  Thor was `sm_101` up to CUDA 12.9 and is `sm_110` from CUDA 13.0
+#: (PTX ISA 9.0) on; nvcc 13 refuses `compute_101` and `compute_101a`, so
+#: the old name would only generate code no current toolchain builds.
+RENAMED = {'sm_101': 'sm_110', 'sm_101a': 'sm_110a'}
+
+
 class HwDecription:
   def __init__(self, param_table, arch, backend):
     self.vec_unit_length = param_table['vec_unit_length']
@@ -85,6 +97,30 @@ class HwDecription:
     #: NVIDIA's sixteen are numbered by PTX, one of them `__syncthreads()`'s,
     #: and counted by the lexic (`CudaLexic.NAMED_BARRIERS`).
     self.named_barriers = int(param_table.get('named_barriers') or 0)
+    #: Tensor memory (tcgen05): its lanes, and the 32-bit columns of them one
+    #: block may allocate -- a power of two from 32 up to `tmem_columns`
+    #: (PTX ISA, "tcgen05.alloc").  None where the part has none.  Whether a
+    #: target may use it is `Target.tcgen05`.
+    self.tmem_lanes = _int_or_none(param_table.get('tmem_lanes'))
+    self.tmem_columns = _int_or_none(param_table.get('tmem_columns'))
+    #: The columns an exclusive allocation reaches past `tmem_columns`
+    #: (`tcgen05.alloc.exclusive`, PTX ISA 9.4): 576 on sm_107.  None where
+    #: it reaches no further.
+    self.tmem_exclusive_columns = _int_or_none(
+        param_table.get('tmem_exclusive_columns'))
+    #: Bytes of shared memory a block may have past
+    #: `max_local_mem_size_per_block` once its kernel opts in -- sm_107's
+    #: oversized shared memory.  None where there is no such opt-in.  The
+    #: planner plans against the other; nothing opts in yet.
+    self.max_local_mem_size_per_block_oversized = (
+        parseBytes(param_table['max_local_mem_size_per_block_oversized'])
+        if param_table.get('max_local_mem_size_per_block_oversized')
+        is not None else None)
+    #: Bits of the start address in a shared-memory matrix descriptor
+    #: (wgmma's, tcgen05's), in 16-byte units: 14, 15 on sm_107.  None where
+    #: the part reads no operand through one.
+    self.matrix_descriptor_address_bits = _int_or_none(
+        param_table.get('matrix_descriptor_address_bits'))
     self.model = arch
     #: The device's backend: `oneapi` for both Intel lowerings.  Which one a
     #: kernel is written in is `Target.backend`.
@@ -167,6 +203,9 @@ def hw_descr_factory(arch, backend):
   # hardware `oneapi` does and reads the same row of the table.
   from .lexic import EXPLICIT_SIMD_BACKENDS
   backend = EXPLICIT_SIMD_BACKENDS.get(backend, backend)
+  if arch in RENAMED:
+    raise ValueError(f'{arch} is {RENAMED[arch]} from CUDA 13.0 on, and nvcc '
+                     f'13 builds no {arch}: ask for {RENAMED[arch]}')
 
   script_dir = os.path.dirname(os.path.realpath(__file__))
   db_file_path = os.path.join(script_dir, 'hw_descr_db.yml')

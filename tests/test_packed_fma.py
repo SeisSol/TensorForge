@@ -43,7 +43,7 @@ def test_nvidia_before_blackwell_has_no_packed_fp32(arch):
     assert _width(arch, F32) == 1
 
 
-@pytest.mark.parametrize('arch', ['sm_100', 'sm_101', 'sm_110'])
+@pytest.mark.parametrize('arch', ['sm_100', 'sm_103', 'sm_107', 'sm_110'])
 def test_nvidia_from_sm_100_packs_fp32(arch):
     assert _width(arch, F32) == 2
 

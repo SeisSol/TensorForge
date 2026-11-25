@@ -62,7 +62,12 @@
 - arch: sm_90
   base: sm_60
   max_local_mem_size_per_block: 227kB # shared with L1; together 256 kiB
-  icache_miss_factor: 3.0  # GH200, as on sm_80; assumed for sm_101 and sm_110
+  icache_miss_factor: 3.0  # GH200, as on sm_80; assumed for sm_110
+  # Bits of the start address in a shared-memory matrix descriptor, wgmma's
+  # and tcgen05's (`tensorforge::matrixDescriptor`), in 16-byte units: 14
+  # reach 256 kB, past the shared memory of every part but sm_107's opt-in
+  # (`max_local_mem_size_per_block_oversized`), whose field has 15.
+  matrix_descriptor_address_bits: 14
 # The arch-specific targets: the same parts, built for the instructions only
 # their `a` target has -- wgmma on sm_90a, tcgen05 on sm_100a -- which nvcc
 # takes as `-gencode=arch=compute_90a,code=sm_90a` (`toolchain.Nvcc`).
@@ -72,18 +77,76 @@
   base: sm_90
   icache_miss_factor: 2.6  # GB200; as on sm_80
   max_argument_size: 32764B
+  # Tensor memory, tcgen05's (`Target.tcgen05`): 128 lanes of 32-bit
+  # columns an SM, of which a block allocates a power of two from 32 to 512
+  # (PTX ISA, "tcgen05.alloc") -- 256 kB, the whole of it on sm_100, sm_103
+  # and sm_110.
+  tmem_lanes: 128
+  tmem_columns: 512
 - arch: sm_100a
   base: sm_100
-- arch: sm_101
-  base: sm_90
-  max_argument_size: 32764B
+# The family-specific targets: built once for every part of a family
+# (`-gencode=arch=compute_100f,code=sm_100f`), with the instructions all of
+# them have -- tcgen05 among them.  compute_100f runs on 10.0, 10.3 and 10.7,
+# compute_103f on 10.3 and 10.7, so a family's row is what its least member
+# has: sm_100f is sm_100, without sm_107's exclusive columns, its oversized
+# shared memory and its wider descriptor.
+- arch: sm_100f
+  base: sm_100
+# B300 and GB300 (Blackwell Ultra): sm_100's tensor memory and shared memory,
+# and tcgen05 without `.kind::i8`, which nothing here uses.
+- arch: sm_103
+  base: sm_100
+- arch: sm_103a
+  base: sm_103
+- arch: sm_103f
+  base: sm_103
+# Rubin (PTX ISA 9.4, CUDA 13.4).
+- arch: sm_107
+  base: sm_100
+  # 576 columns of tensor memory, 288 kB, but to `tcgen05.alloc.exclusive`
+  # alone: any multiple of 32 up to 576 (CUTLASS 4.8), where a plain
+  # allocation stays a power of two up to 512.  An exclusive allocation is
+  # the only live one of its SM (DeepGEMM PR 139): the blocks of other
+  # kernels serialize on tensor memory, and a second allocation in the block
+  # never returns -- so taking it is the tile's decision about its blocks,
+  # and nothing allocates exclusively yet (`Target.tmem_columns`).  CUDA
+  # 13.4's ptxas has a known bug with 576 exclusive columns under `-g` or
+  # `-g-tmem-access-check` (`toolchain.Nvcc.check_flags`).
+  tmem_exclusive_columns: 576
+  # 328 kB of shared memory an SM and 327 kB a block, but past 228 kB only
+  # for a kernel that opts in: `cudaFuncAttributeSharedMemoryMode`, or the
+  # launch attribute `cudaLaunchAttributeSharedMemoryMode`, set to
+  # `cudaSharedMemoryModeAllowOversizedSharedMemory` -- which leaves 8 kB of
+  # L1.  The planner plans against `max_local_mem_size_per_block`, sm_100's
+  # 227 kB; nothing asks for the opt-in yet.
+  max_local_mem_size_per_block_oversized: 327kB
+  # The start address of tcgen05's shared-memory descriptor in 15 bits, 0 to
+  # 14 (PTX ISA 9.4), which reach 512 kB.
+  matrix_descriptor_address_bits: 15
+- arch: sm_107a
+  base: sm_107
+- arch: sm_107f
+  base: sm_107
+# Thor: `sm_101` until CUDA 13.0 (PTX ISA 9.0), a name nvcc 13 no longer
+# builds and the table refers to this one (`hw_descr.RENAMED`).
 - arch: sm_110
   base: sm_90
   max_argument_size: 32764B
+  # sm_100's, presumably: tcgen05 is there, `.kind::i8` included.
+  tmem_lanes: 128
+  tmem_columns: 512
+- arch: sm_110a
+  base: sm_110
+- arch: sm_110f
+  base: sm_110
 - arch: sm_120
   base: sm_89
   icache_miss_factor: 2.05  # RTX 5070 laptop; as on sm_80
   max_argument_size: 32764B
+# GB10 (DGX Spark): sm_120's, without tensor memory.
+- arch: sm_121
+  base: sm_120
 
 # AMD
 - arch: gfx900

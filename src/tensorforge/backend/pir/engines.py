@@ -3458,9 +3458,9 @@ def _lower_wgmma(s: Stmt, env: Spelling) -> Lowered:
 
 
 #: What the source of a product guards a tcgen05 instruction with: defined
-#: by `cuda.h` where nvcc compiles for a target that has them (sm_100a,
-#: sm_103a, and their families), and nowhere else -- not for the
-#: `compute_100` PTX that `-arch=sm_100a` builds besides.
+#: by `cuda.h` where nvcc compiles for a target that has them (the arch- and
+#: family-specific ones of sm_100 to sm_110, `Target.tcgen05`), and nowhere
+#: else -- not for the `compute_100` PTX that `-arch=sm_100a` builds besides.
 TCGEN05_FEATURE = 'TENSORFORGE_TCGEN05'
 
 #: The N a TF32 tcgen05.mma takes at M = 128 on one CTA: 16 to 256 in
@@ -3547,14 +3547,16 @@ def tcgen05_refusal(s: Stmt) -> Optional[str]:
 
 
 def _tcgen05_available(env: Spelling) -> None:
-    """Refuse a target that has no tcgen05: on CUDA, sm_100a
-    (`Target.tcgen05`).  Without a target it is written as for one."""
+    """Refuse a target that has no tcgen05: on CUDA, the arch- and
+    family-specific targets of sm_100 to sm_110 (`Target.tcgen05`).  Without
+    a target it is written as for one."""
     if env.family not in ('cuda', ''):
         raise IRError(f'tcgen05 has no spelling on {env.family}')
     has = getattr(env.target, 'tcgen05', None)
     if callable(has) and not has():
-        raise IRError(f'tcgen05 on {env.model or "this target"}: sm_100a is '
-                      f'the target that has it')
+        raise IRError(f'tcgen05 on {env.model or "this target"}: the arch- '
+                      f'and family-specific targets of sm_100, sm_103, '
+                      f'sm_107 and sm_110 have it (sm_100a, sm_100f)')
 
 
 def _guarded(feature: str, lines: Sequence[str]) -> Tuple[str, ...]:
