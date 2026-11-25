@@ -623,15 +623,22 @@ def test_the_section_computes_on_the_gpu(shape, order, target, cache_root,
 def test_the_pipelined_steps_compute_on_the_gpu(shape, target, cache_root,
                                                 tensorforge_include):
     """`wgmma_pending` 1 on a GH200: the o6 volume and the chain against
-    NumPy, as `test_the_section_computes_on_the_gpu` runs them."""
+    NumPy, as `test_the_section_computes_on_the_gpu` runs them, each
+    element within 1e-5 of its largest cell (`test_multi_element.
+    _normwise`: 3xTF32 at o6 is ~2e-6 of it) -- and over the same elements
+    bit for bit what the steps waited for one at a time give
+    (`wgmma_pending` 0): the same products in the same order, only the
+    waits moved."""
     if target.backend != 'cuda' or target.arch != 'sm_90':
         pytest.skip('no GPU with wgmma')
-    from harness.runner import run_case
+    import numpy as np
+    from harness import driver_emit
+    from harness.runner import execute, run_case
     special = dataclasses.replace(target, arch='sm_90a')
     _nvcc_builds(special.arch)
     case = types.SimpleNamespace(
         NAME=f'multi_element_pipelined_{shape}_o6s',
-        DTYPE=Datatype.F32, BATCH=4099, TOL=(1e-4, 1e-4),
+        DTYPE=Datatype.F32, BATCH=4099, TOL=me._normwise(),
         OPTIONS={'multi_element': 'force', 'wgmma_pending': 1, **AUTO},
         INPUT_TRANSFORM=me._known_zeros(me._descrs(shape, 6, 's')),
         descr_list=lambda: me._descrs(shape, 6, 's'),
@@ -639,6 +646,28 @@ def test_the_pipelined_steps_compute_on_the_gpu(shape, target, cache_root,
     result = run_case(case, special, cache_root, tensorforge_include)
     assert result.passed, (result.max_abs_err, result.max_rel_err,
                            result.detail)
+    builds = [me._generate(me._descrs(shape, 6, 's'), me._context(
+        special.arch, 's', multi_element='force', wgmma_pending=pending,
+        **AUTO)) for pending in (1, 0)]
+    batch = 4099
+    rng = np.random.default_rng(13)
+    inputs = {}
+    for op in driver_emit.collect_operands(builds[0]):
+        if op.is_scalar or not op.is_source:
+            continue
+        key = op.alias or op.kernel_name
+        if op.values is not None:
+            inputs[key] = np.asarray(op.values, dtype=np.float32).reshape(
+                op.shape, order='F')[None]
+            continue
+        rows = 1 if op.addressing == 'none' else batch
+        inputs[key] = rng.standard_normal((rows, *op.shape)).astype(
+            np.float32)
+    got, want = (execute(gen, special, cache_root, tensorforge_include,
+                         batch, inputs) for gen in builds)
+    assert set(got) == set(want)
+    for name in want:
+        assert np.array_equal(got[name], want[name]), name
 
 
 # -- B streamed through a ring ------------------------------------------------- #
