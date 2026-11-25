@@ -374,9 +374,11 @@ class SplitTiles(tuple):
     one multiplication's window, so an operator other operations read is
     offered none (`MultilinearInstruction._offer_order`)."""
 
-    def __new__(cls, order, parts=2):
+    def __new__(cls, order, parts=2, slots=None):
         self = super().__new__(cls, order)
         self.parts = int(parts)
+        #: The lead slots its tiles span (`prepared_order`), or None.
+        self.slots = None if slots is None else int(slots)
         return self
 
 
@@ -402,14 +404,25 @@ class SurfaceTiles(SplitTiles):
     columns, the parts planar a tile at a time, so that tile `t`'s halves
     are the surface's rows `SPLIT_TERMS DEPTH t ..`, its upper one first."""
 
-    def __new__(cls, order, parts=2, surface=(SUB_GROUP, TILE)):
-        self = super().__new__(cls, order, parts)
+    def __new__(cls, order, parts=2, surface=(SUB_GROUP, TILE), slots=None):
+        self = super().__new__(cls, order, parts, slots)
         self.surface = tuple(int(x) for x in surface)
         return self
 
 
+#: The lead slots up to which `Options.sycl_dpas_block2d=auto` lays a copy out
+#: as a surface (`surface_order`): SeisSol's order 6 and below.  Measured on
+#: the Max 1550 (SNG2 J2, IGC 2.41.5, batch 262144, ns an element, the tiles
+#: against the blocks), the volume in F32 at order 6, four slots, 12.78 /
+#: 11.30; at order 8, eight, 32.91 / 51.97.  There IGC's scheduler ahead of
+#: register allocation took the blocks to 7.7 kB of spill against the tiles'
+#: 2.8 (`EnableVISAPreSched`: without it 2.5 against 2.8).
+AUTO_SLOTS = 4
+
+
 def block2d(ctx) -> bool:
-    """`Options.sycl_dpas_block2d` where the path is taken (`usable`)."""
+    """`Options.sycl_dpas_block2d` where the path is taken (`usable`): on or
+    `auto` (`AUTO_SLOTS`, which `surface_order` asks)."""
     return (ctx is not None
             and bool(ctx.get_user_options().sycl_dpas_block2d)
             and usable(ctx))
@@ -429,17 +442,22 @@ def surface_order(order, ctx):
     operator copy the file defines alone (`multilinear._offer_order`): its
     table is aligned to 256 bytes (`Generator.COPY_ALIGN`), and a 2D
     block's surface has to start on a cache line, which an operator the
-    caller passes is not known to."""
+    caller passes is not known to.  Under `auto` for tiles of at most
+    `AUTO_SLOTS` lead slots alone."""
     if not block2d(ctx) or not isinstance(order, SplitTiles):
         return None
     if order.parts != SPLIT_TERMS or len(order) % TILE:
+        return None
+    if (ctx.get_user_options().sycl_dpas_block2d == 'auto'
+            and (order.slots is None or order.slots > AUTO_SLOTS)):
         return None
     where = {cell: n for n, cell in enumerate(tile_cells())}
     moved = [where[cell] for cell in surface_cells()]
     out = []
     for base in range(0, len(order), TILE):
         out.extend(order[base + n] for n in moved)
-    return SurfaceTiles(out, parts=SPLIT_TERMS, surface=(SUB_GROUP, TILE))
+    return SurfaceTiles(out, parts=SPLIT_TERMS, surface=(SUB_GROUP, TILE),
+                        slots=order.slots)
 
 
 # --------------------------------------------------------------------------- #
@@ -584,7 +602,7 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
         return None
     read = int(rows) if rows else -(-int(lead) // SUB_GROUP) * SUB_GROUP
     order = fragment_order(shape, ((r0, read), (c0, depth)), head)
-    return SplitTiles(order, parts=SPLIT_TERMS)
+    return SplitTiles(order, parts=SPLIT_TERMS, slots=-(-read // SUB_GROUP))
 
 
 # --------------------------------------------------------------------------- #

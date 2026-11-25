@@ -1508,7 +1508,7 @@ declare('sycl_dpas_fence',
 declare('sycl_dpas_block2d',
         default=False,
         env='TF_SYCL_DPAS_BLOCK2D',
-        parse=parse_bool,
+        parse=parse_bool_or_auto,
         doc='Under `sycl_dpas`, lay each operator copy the file defines '
             '(`mma_operator_copies`) out as a 2D surface sixteen floats '
             'wide, a tile\'s two TF32 halves sixteen rows of it, and read a '
@@ -1518,7 +1518,14 @@ declare('sycl_dpas_block2d',
             'a work-item: one kilobyte a message, as the hand-written PVC '
             'volume reads its operator (hvp).  Only a copy the file defines, '
             'whose table is aligned to 256 bytes: an operator the caller '
-            'prepares keeps the tiles.  Off by default, unmeasured.')
+            'prepares keeps the tiles.  `auto`: where a product\'s tiles span '
+            'at most four lane slots (`intel_spmd.AUTO_SLOTS`), SeisSol\'s '
+            'order 6 and below.  Measured on the Max 1550 (IGC 2.41.5, batch '
+            '262144, ns an element, the tiles against the blocks), SeisSol\'s '
+            'volume in single precision at order 6 12.78 / 11.30, at order 8 '
+            '32.91 / 51.97: there IGC\'s scheduler ahead of register '
+            'allocation took the blocks to 7.7 kB of spill against the '
+            'tiles\' 2.8.  Off by default.')
 
 declare('lead_split',
         rule=lambda target: (2 if (target.hw.vendor == 'intel'
