@@ -936,9 +936,9 @@ class _Trip:
         # The warp's element where a warp is one; in the tile's layouts
         # (`_rowless`), where the warps are their roles' members, its place
         # among the block's warps -- the modulo would put a warp past the
-        # elements in another's place: at o12's five or seven elements
-        # tcgen05's star warps 5 to 7 in the first band's, its A's full side
-        # short of their arrivals and the block hung.
+        # elements in another's place: tcgen05's star warps past the
+        # elements in the first band's, its A's full side short of their
+        # arrivals and the block hung.
         self.slot = (builder.thread_id('y') if _rowless(self.section) else
                      builder.op('rem', INDEX, builder.thread_id('y'),
                                 group.elements, hint='slot'))

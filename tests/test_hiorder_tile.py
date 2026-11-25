@@ -218,8 +218,8 @@ def test_the_epilogue_s_order_in_the_kernel(output):
 
 def _capped(monkeypatch, cap):
     """The plan's shared memory capped so that no group of more than `cap`
-    elements fits: the tile on fewer elements than its star warps, as
-    o12's bulk reductions (five) and I whole (seven) take it."""
+    elements fits: the tile on fewer elements than its star warps, as four
+    bands take it, or B's ring of eight slots at o8."""
     shared = eg.shared_bytes
     monkeypatch.setattr(eg, 'shared_bytes', lambda section, elements: (
         shared(section, elements) if elements <= cap else 1 << 30))
@@ -227,12 +227,12 @@ def _capped(monkeypatch, cap):
 
 @pytest.mark.parametrize('cap', [5, 7])
 def test_fewer_elements_than_star_warps_on_the_oracle(monkeypatch, cap):
-    """tcgen05's tile on five and seven elements, fewer than its two bands'
-    eight star warps: each warp its place among the block's warps, not its
-    element -- the modulo put warps 5 to 7 in the first band's place, the
-    second band's A short of their arrivals, and the block hung (J3, o12
-    bulk, box and I whole on a GB200).  Three trips and more, against NumPy
-    without a race, and bit for bit what fourteen elements give."""
+    """tcgen05's tile on five and seven elements, fewer than its three
+    bands' twelve star warps: each warp its place among the block's warps,
+    not its element -- the modulo put the warps past the elements in the
+    first bands' places, a band's A short of their arrivals, and the block
+    hung.  Three trips and more, against NumPy without a race, and bit for
+    bit what fourteen elements give."""
     _, whole = _on_the_oracle('sm_100a', 4, 31)
     _capped(monkeypatch, cap)
     gen, got = _on_the_oracle('sm_100a', 4, 31)
@@ -242,6 +242,13 @@ def test_fewer_elements_than_star_warps_on_the_oracle(monkeypatch, cap):
     # The bands by the warp, the batch loop's lanes by the element.
     assert re.search(r'_band = threadIdx\.y / 4;', src)
     assert f'threadIdx.y % {cap};' in src
+
+
+def test_four_bands_on_the_oracle():
+    """Four bands, sixteen star warps over fourteen elements: the warps
+    past the elements each in its own place (`_Trip.slot`)."""
+    gen, _ = _on_the_oracle('sm_100a', 4, 17, matrix_bands=4)
+    assert gen.built._element_group.section.tile.bands == 4
 
 
 def test_two_bands_over_o6_s_blocks_on_the_oracle():
