@@ -2203,9 +2203,15 @@ class Generator:
   def _grid_one_round(self) -> bool:
     """Whether the grid is asked to cover the batch in one round
     (`one_round_grid`): as asked, and under `auto` where the kernel takes
-    the slot form (`element_group.slot_one_round`)."""
-    asked = self._context.get_user_options().one_round_grid
+    the slot form (`element_group.slot_one_round`) and the Xe-cores do not
+    size the grid (`sycl_core_threads`)."""
+    options = self._context.get_user_options()
+    asked = options.one_round_grid
     if asked == 'auto':
+      # Not where the grid is sized by the Xe-cores (`sycl_core_threads`),
+      # whose work-groups loop over their share of the batch.
+      if int(options.sycl_core_threads) > 0:
+        return False
       return element_group.slot_one_round(self._element_group,
                                           self._context)
     return bool(asked)
@@ -2223,7 +2229,9 @@ class Generator:
     if core < 0:
       raise GenerationError(f'sycl_core_threads={core}: a count of '
                             f'threads, or 0 for the default grid')
-    if options.one_round_grid or options.resident_grid > 0:
+    # Asked for, not `auto`: that one yields to the Xe-cores' grid
+    # (`_grid_one_round`).
+    if options.one_round_grid is True or options.resident_grid > 0:
       raise GenerationError(
           f'sycl_core_threads={core} sizes the grid by the Xe-cores, '
           f'one_round_grid and resident_grid size it otherwise; ask for one')

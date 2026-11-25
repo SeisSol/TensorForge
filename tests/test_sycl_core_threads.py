@@ -96,6 +96,23 @@ def test_one_sizing_at_a_time(other):
         _generate('oneapi', sycl_core_threads=32, **other)
 
 
+def test_auto_one_round_yields_to_the_xe_cores(monkeypatch):
+    """`one_round_grid=auto`, the default, covers the batch in one round
+    where the kernel takes the slot form (`element_group.slot_one_round`,
+    held true here: no Intel kernel takes it yet).  Asked for a grid by the
+    Xe-cores, the grid loops, and the launch says so."""
+    from tensorforge.generators import element_group
+    monkeypatch.setattr(element_group, 'slot_one_round',
+                        lambda group, context: True)
+    plain = _generate('oneapi')
+    assert plain._grid_one_round()
+    assert not plain.launch_config().persistent
+    sized = _generate('oneapi', sycl_core_threads=16, one_round_grid='auto')
+    assert not sized._grid_one_round()
+    assert sized.launch_config().persistent
+    assert _CALL.search(sized.get_launcher())
+
+
 def test_only_dpcpp_on_intel():
     with pytest.raises(GenerationError, match='DPC\\+\\+ grid on Intel'):
         _generate('cuda', arch='sm_86', sycl_core_threads=32)
