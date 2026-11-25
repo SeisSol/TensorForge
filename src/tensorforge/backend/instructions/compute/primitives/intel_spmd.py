@@ -82,7 +82,7 @@ from tensorforge.backend.pir import engines, terms
 from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
-from .. import split
+from .. import rowpack, split
 from ..bitlayout import Bit, BitLayout, Place, packed
 from ..strategy import Strategy, whole
 
@@ -474,6 +474,24 @@ def plan(strategy, shape, n, ctx):
     return whole(strategy, n)
 
 
+def row_caps(columns: int) -> rowpack.RowCaps:
+    """What this path does with a product's columns past its last whole
+    tile of `COLUMNS` (`MatrixPaths.row_caps`, `Options.row_packing`):
+    carries them on FMAs over the operator values its tiles hold
+    (`_Product._carried`), or pads them into a tile of their own.  By
+    itself it carries up to `TAIL_MAX` and pads more; a product of no
+    more than one tile has nothing to carry."""
+    ntail = columns % COLUMNS
+    if columns <= COLUMNS:
+        return rowpack.RowCaps(COLUMNS, frozenset({rowpack.Packing.PAD}),
+                               rowpack.Packing.PAD)
+    auto = (rowpack.Packing.FMA if 0 < ntail <= TAIL_MAX
+            else rowpack.Packing.PAD)
+    return rowpack.RowCaps(
+        COLUMNS, frozenset({rowpack.Packing.FMA, rowpack.Packing.PAD}),
+        auto)
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=SUB_GROUP, corner=(0, 0), rows=None, head=0):
     """The operator's tiles (`fragment_order`), split into its TF32 halves
@@ -587,7 +605,12 @@ class _Product:
         if self.exchange is None:
             raise _Declined()
         ntail = self.N % COLUMNS
-        tailed = 0 < ntail <= TAIL_MAX and self.N > COLUMNS
+        # The columns past the last whole tile: carried on FMAs or padded
+        # into a tile of their own, as `row_packing` asks (`row_caps`; by
+        # itself up to `TAIL_MAX` carried).
+        packed = rowpack.plan_rows(self.N, row_caps(self.N), ctx)
+        tailed = (packed.packing is rowpack.Packing.FMA and ntail > 0
+                  and self.N > COLUMNS)
         self.dense = self.N - ntail if tailed else self.N
         self.tail = list(range(self.dense, self.N)) if tailed else []
         self.tiles = list(range(0, self.dense, COLUMNS))

@@ -3117,6 +3117,47 @@ declare('mma_min_depth',
             'path 0.4 kB -- while the volume in either precision was 15 to 17 % '
             'slower with them on the matrix path.')
 
+declare('row_packing',
+        default='auto',
+        env='TF_ROW_PACKING',
+        parse=parse_str,
+        doc='What a matrix product does with the rows an element brings that '
+            'do not fill the instruction\'s tile: SeisSol\'s nine quantities '
+            'on DPAS\'s eight rows or a per-element `mma.sync`\'s eight '
+            'columns (`compute.rowpack`).  `fma`: the remainder on the vector '
+            'units\' FMAs, over the operator values the tiles hold; `gather`: '
+            'the remainders of several elements stacked into whole tiles '
+            '(`row_packing_elements`, `row_packing_exchange`); `dense`: '
+            'several elements\' rows on whole tiles; `pad`: a tile of its own, '
+            'mostly zero; `transposed`: the elements on the instruction\'s '
+            'wide side.  `auto`, the default: each target\'s own rule, which '
+            'is what it did before this option -- the SPMD lowering\'s DPAS '
+            '`fma` for up to two columns and `pad` above, the explicit '
+            'vector\'s DPAS `pad`.  A packing the target does not lower '
+            '(`MatrixPaths.row_caps`) stops generation and says which it '
+            'has; today `fma` and `pad` under `sycl_dpas`, `pad` under the '
+            'explicit vector, and on other targets only `auto`.')
+
+declare('row_packing_elements',
+        default=0,
+        env='TF_ROW_PACKING_ELEMENTS',
+        parse=parse_int,
+        doc='Elements whose rows share tiles under `row_packing` `gather` or '
+            '`dense`; 0, the default, the packing\'s own: for `gather` the '
+            'tile height over its greatest common divisor with the remainder, '
+            'eight elements\' ninth rows on DPAS (`rowpack.gather_elements`).')
+
+declare('row_packing_exchange',
+        default='auto',
+        env='TF_ROW_PACKING_EXCHANGE',
+        parse=parse_str,
+        doc='How `row_packing` `gather` brings the elements\' remainders '
+            'together: `shared`, through the block\'s shared memory among the '
+            'multiplications of the elements a block holds; `item`, a work '
+            'item of its own right after them, which needs the items in that '
+            'order and a thread count coprime to the block (`coreGrid`); '
+            '`auto`, the first the target has (`MatrixPaths.row_caps`).')
+
 declare('matrix_columns',
         default=0,
         parse=parse_int,

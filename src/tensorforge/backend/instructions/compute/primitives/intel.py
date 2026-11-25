@@ -48,7 +48,7 @@ from tensorforge.backend.pir import terms
 from tensorforge.backend.pir.core import SCALAR_LAYOUT, ScalarType, join_layout
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import InternalError
-from .. import broadcast, ranking, split
+from .. import broadcast, ranking, rowpack, split
 from . import intel_spmd
 from ..bitlayout import packed
 from ..routes import lead_route
@@ -881,6 +881,19 @@ def strategies(shape, ctx):
     return frozenset(offered)
 
 
+def row_caps(shape, n, ctx):
+    """What the matrix path does with a product's `n` columns past its
+    last whole tile (`MatrixPaths.row_caps`, `Options.row_packing`): the
+    SPMD lowering's DPAS carries or pads them (`intel_spmd.row_caps`);
+    the explicit vector's pads them, its second `j0` block a tile of
+    eight rows of which the remainder fills one (`dpas_matmul`)."""
+    if not _simd_mode(ctx):
+        return intel_spmd.row_caps(n)
+    height = ATOMS['tf32'].repeat
+    return rowpack.RowCaps(height, frozenset({rowpack.Packing.PAD}),
+                           rowpack.Packing.PAD)
+
+
 def plan(strategy, shape, n, ctx):
     """One arrangement over the whole output.
 
@@ -928,6 +941,9 @@ def matmul(writer, ops, ctx, span):
         # caller that does should hear so rather than get the whole output.
         return False
     if span.strategy is Strategy.MATRIX:
+        # Only the padded remainder here (`row_caps`): anything else asked
+        # stops generation with what this path has.
+        rowpack.plan_rows(N, row_caps(None, N, ctx), ctx)
         if Datatype.F32 not in (ops.a, ops.b) or ops.a != ops.b:
             # `splitFloatTF32` takes an F32 apart; handed anything else it
             # would produce two halves of a number it never had.  The atom is

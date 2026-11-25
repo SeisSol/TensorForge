@@ -1189,6 +1189,9 @@ class Generator:
 
   def generate(self):
     self._check_addressing()
+    # `row_packing` where no matrix module could take it (`rowpack.check`).
+    from tensorforge.backend.instructions.compute import rowpack
+    rowpack.check(self._context)
     tuned = self._autotune()
     if tuned is not None:
       # built, by the configuration the tuner picked

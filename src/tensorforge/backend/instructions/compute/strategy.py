@@ -208,6 +208,16 @@ class MatrixPaths(Protocol):
     emitted and what gets reserved for it cannot be answered by two tables
     that then disagree.  So does the tuner's (`widths`), for the same reason:
     a width it offers is one the emitter then takes.
+
+    One more answer is optional and so not a member: `row_caps(shape, n,
+    ctx)`, what the matrix path does with a product's columns past its last
+    whole tile (`compute.rowpack.RowCaps`, read by `Options.row_packing`);
+    a module without it takes only `auto`.  Intel's answers.  Where the
+    others decide it today, to be answered there later: NVIDIA's
+    per-element `mma.sync` in `nvidia.matmul` (`TAIL_MAX`, `TAIL_MODES`),
+    the multi-element tiles in `element_group.fill` (dense), AMD's stacked
+    tiles in `amd.stacked.stacked_plan` (a DPP span, or `padded`), its
+    lane-batched MFMA in `amd.tiling.boundary`.
     """
 
     #: The order the target takes the legal arrangements in.  Preference
