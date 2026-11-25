@@ -188,6 +188,25 @@ def enabled(ctx) -> bool:
     return ENABLED if asked is None else bool(asked)
 
 
+def moves_refused(ctx) -> bool:
+    """Whether this build moves its transfers ahead
+    (`Options.enable_move_loads`) under the explicit vector, where DPAS is
+    then not taken (`strategies`, `prepared_order`).
+
+    With the transfers moved, SeisSol's elastic volume at order 6 in single
+    precision came out wrong on the CPU emulator (tfemu) against NumPy: nine
+    of its 576 outputs, the ninth quantity's rows 10 to 15, up to 18 % off.
+    Right with the moves off; right with only the wrap across the back edge
+    (`Options.enable_wrap_loads`) left on; and each of its three products
+    alone, and any two of them, right with the moves on.  Until that
+    interaction is found, DPAS under the explicit vector needs
+    `enable_move_loads=0`.  Nothing changes where the path is off, which is
+    the default."""
+    if ctx is None or not _simd_mode(ctx):
+        return False
+    return bool(ctx.get_user_options().enable_move_loads)
+
+
 # --------------------------------------------------------------------------- #
 # Where an element sits in a fragment
 # --------------------------------------------------------------------------- #
@@ -786,9 +805,9 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
     rows, cols = (int(x) for x in shape)
     # The question `strategies` answers for MATRIX, which `ORDER` takes first
     # wherever it is offered.
-    dpas = enabled(ctx) and atom_for(dtype, columns=columns, lead=lead,
-                                     depth=depth,
-                                     budget=register_budget(ctx)) is not None
+    dpas = (enabled(ctx) and not moves_refused(ctx)
+            and atom_for(dtype, columns=columns, lead=lead, depth=depth,
+                         budget=register_budget(ctx)) is not None)
     block = ATOMS['tf32'].k if dpas else 1
     padded = -(-cols // block) * block
     return SlotMajorOrder(slot_major_order((rows, cols), threads, padded),
@@ -832,7 +851,8 @@ def strategies(shape, ctx):
 
     `dpas_matmul`, too, only under the explicitly vectorized lowering: it
     emits `esimd::xmx::dpas` over `simd` fragments, which an SPMD kernel
-    cannot call.  The SPMD lowering reaches the instruction another way, the
+    cannot call -- and not while the build moves its transfers ahead
+    (`moves_refused`).  The SPMD lowering reaches the instruction another way, the
     OpenCL builtin over a sub-group of sixteen, whose fragments are spread
     over the work-items as the lowering spreads its rows (`intel_spmd`,
     `Options.sycl_dpas`); that path answers for SPMD alone, and only where
@@ -853,7 +873,8 @@ def strategies(shape, ctx):
     if not supports(shape.threads, shape.accumulator, shape.sparse):
         return frozenset()
     offered = set()
-    if enabled(ctx) and shape.explicit_simd and not shape.sparse:
+    if (enabled(ctx) and shape.explicit_simd and not shape.sparse
+            and not moves_refused(ctx)):
         offered.add(Strategy.MATRIX)
     if BROADCAST_ENABLED and shape.explicit_simd and not shape.sparse:
         offered.add(Strategy.BROADCAST)
