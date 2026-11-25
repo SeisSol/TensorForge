@@ -41,7 +41,8 @@ pytestmark = pytest.mark.skipif(
 #: Every executable check under `tests/cpp`.  Listed rather than globbed so
 #: that a file added without being wired up is a missing test rather than a
 #: silently skipped one.
-PROGRAMS = ("reduction_ops.cpp", "esimd_reduction.cpp", "sycl_shim.cpp")
+PROGRAMS = ("reduction_ops.cpp", "esimd_reduction.cpp", "sycl_shim.cpp",
+            "core_grid.cpp")
 
 
 def _build_and_run(tmp_path, name):

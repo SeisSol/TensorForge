@@ -146,5 +146,43 @@ template <typename T> struct ReductionOperation<T, Operation::Xor> {
   static constexpr T neutral() { return T(0); }
 };
 
+/// The greatest common divisor, for `coreGrid` (host code; `std::gcd` is not
+/// constexpr in every library a device compiler brings).
+constexpr std::size_t gcdOf(std::size_t a, std::size_t b) {
+  while (b != 0) {
+    const std::size_t r = a % b;
+    a = b;
+    b = r;
+  }
+  return a;
+}
+
+/// The work-groups of a grid-stride launch sized for `threads` hardware
+/// threads an Xe-core (`Options.sycl_core_threads`): what `cores` Xe-cores
+/// hold at that many threads, a work-group `groupThreads` of them, in whole
+/// `parts` of the batch (`Options.batch_parts`, 0 or 1 for one) -- at least
+/// one a part.  Where a traversal's items come in dependent blocks of
+/// `block`, the rows a part strides by (`groupRows` a work-group, the
+/// multiplications it holds) are kept coprime to it: a row takes items `r,
+/// r + n, r + 2n, ...`, and with `n` sharing a factor with `block` the
+/// block's dependent item lands on the same few rows every time (hvp on the
+/// Max 1550: blocks of nine at 24 or 48 threads an Xe-core, every ninth
+/// quantity on a third of the threads, 1.9x slower).  A block of one leaves
+/// the grid as it is.
+constexpr std::size_t coreGrid(std::size_t cores, std::size_t threads,
+                               std::size_t groupThreads, std::size_t groupRows,
+                               std::size_t parts = 1, std::size_t block = 1) {
+  const std::size_t p = parts > 0 ? parts : 1;
+  const std::size_t g = groupThreads > 0 ? groupThreads : 1;
+  std::size_t perPart = cores * threads / g / p;
+  if (perPart == 0) {
+    perPart = 1;
+  }
+  while (perPart > 1 && block > 1 && gcdOf(perPart * groupRows, block) != 1) {
+    --perPart;
+  }
+  return perPart * p;
+}
+
 } // namespace tensorforge
 #endif // SEISSOL_TENSORFORGE_INCLUDE_TENSORFORGE_DEVICE_BASE_H_

@@ -115,6 +115,44 @@ class SyclLexic(Lexic):
             f"  }}\n"
             f"}}")
 
+  def sub_group_size(self, lanes):
+    """The sub-group a kernel of `lanes`-lane multiplications states
+    (`kernel_definition`): the smallest of the stated sizes the lanes fit
+    in and divide, else the first that holds them, else the largest; 16
+    for a kernel of no multiplication.  None under the explicit vector,
+    whose work-item is a hardware thread of its own."""
+    if self._explicit_simd:
+      return None
+    sizes = self._sub_groups
+    return (smallest_sub_group(sizes, lanes) or
+            next((s for s in sizes if s >= lanes),
+                 sizes[-1])) if lanes else 16
+
+  def core_launch_size(self, threads, group_threads, group_rows, parts=1,
+                       block=1):
+    """Declares `gridsize` as `get_launch_size` does, for `threads`
+    hardware threads an Xe-core (`Options.sycl_core_threads`): the
+    Xe-cores are `max_compute_units` over the vector engines one holds
+    (`gpu_eu_count_per_subslice`, 8 where the device does not say), a
+    work-group `group_threads` hardware threads and `group_rows`
+    multiplications, in `parts` of the batch, its items in dependent
+    blocks of `block` (`tensorforge::coreGrid`).  Asked once per launcher,
+    as the device's other answers are."""
+    ptr = GeneralLexicon.STREAM_PTR_STR
+    queue = f"static_cast<{self.stream_type} *>({ptr})"
+    return (f"static std::size_t gridsize = 0;\n"
+            f"if (gridsize == 0 && {ptr} != nullptr) {{\n"
+            f"  const sycl::device device = {queue}->get_device();\n"
+            f"  std::size_t engines = 8;\n"
+            f"  if (device.has(sycl::aspect::ext_intel_gpu_eu_count_per_subslice)) {{\n"
+            f"    engines = device.get_info<sycl::ext::intel::info::device::gpu_eu_count_per_subslice>();\n"
+            f"  }}\n"
+            f"  const std::size_t cores = device.get_info<sycl::info::device::max_compute_units>() "
+            f"/ std::max<std::size_t>(engines, 1);\n"
+            f"  gridsize = tensorforge::coreGrid(cores, {int(threads)}, {int(group_threads)}, "
+            f"{int(group_rows)}, {int(parts)}, {int(block)});\n"
+            f"}}")
+
   def set_shmem_size(self, func_name, shmem):
     return ''
 
@@ -215,10 +253,7 @@ class SyclLexic(Lexic):
         # within one would read undefined lanes: on the CPU the kernel writes
         # nothing, or 1e27 (chain_five).  A kernel of no multiplication asks
         # for 16.
-        sizes = self._sub_groups
-        size = (smallest_sub_group(sizes, lanes) or
-                next((s for s in sizes if s >= lanes),
-                     sizes[-1])) if lanes else 16
+        size = self.sub_group_size(lanes)
         add_items = (f'[[intel::reqd_sub_group_size({size})]] '
                      f'[[intel::kernel_args_restrict]]')
     else:
