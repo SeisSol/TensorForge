@@ -6878,8 +6878,8 @@ GROUPS = {
          sub(ME_GROUP, '        return 0 if rowless(self.section) else self.elements\n',
              '        return self.elements\n', 1)),
         ("one consumer warpgroup fewer than the options give",
-         sub(ME_GROUP, '        for tiles in range(consumers, 0, -1):\n',
-             '        for tiles in range(consumers - 1, 0, -1):\n', 1)),
+         sub(ME_GROUP, '    for tiles in range(consumers, 0, -1):\n',
+             '    for tiles in range(consumers - 1, 0, -1):\n', 1)),
         ("the generator lowering the section again without its tile",
          sub(GEN, '      if planned.tile is not None:\n'
                   "        # The high-order tile's own lowering (`element_group.tile_plan`).\n",
@@ -6903,10 +6903,10 @@ GROUPS = {
          sub(ME_GROUP, '            if not out and not pieces:\n                span = (0, stages[p].width)\n',
              '            if not pieces:\n                span = (0, stages[p].width)\n', 1)),
         ("the spans the options ask for not the tile's on wgmma",
-         sub(ME_GROUP, "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                            spans_asked(context),\n",
-             "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                            'dense',\n", 1)),
+         sub(ME_GROUP, "        tile = TileRows('wgmma', width, max(1, per), tiles,\n"
+                       "                        spans_asked(context),\n",
+             "        tile = TileRows('wgmma', width, max(1, per), tiles,\n"
+                       "                        'dense',\n", 1)),
         ("the spans kept where known zeros are not skipped",
          sub(ME_GROUP, "    if not getattr(options, 'skip_known_zeros', True):\n        return 'dense'\n", '', 1)),
         ("an inactive group taken",
@@ -7037,9 +7037,9 @@ GROUPS = {
          sub(BUILD, '            widest = max(int(w) for w in widths)\n',
              '            widest = min(int(w) for w in widths)\n', 1)),
         ("the groups the options ask for not the tile's on wgmma",
-         sub(ME_GROUP, "                            tile_groups('wgmma', context, tiles,\n"
-                       "                                        step.rows[1] - step.rows[0]),\n",
-             "                            'loop',\n", 1)),
+         sub(ME_GROUP, "                        tile_groups('wgmma', context, tiles,\n"
+                       "                                    step.rows[1] - step.rows[0]),\n",
+             "                        'loop',\n", 1)),
         ("a block's products at their own spans in the loop",
          sub(ME_GROUP, "        if pieces and tile is not None and tile.groups == 'loop':\n",
              '        if False:\n', 1)),
@@ -7386,6 +7386,31 @@ GROUPS = {
          sub(ME_GROUP, "        if section.tile is not None and section.tile.engine == 'wgmma':\n"
                        "            # Staged in the warpgroups' slots of A (`wgmma_bulk_geometry`).\n"
                        "            continue\n", '', 1)),
+    ]),
+    # wgmma's tile taking I whole where it fits, in chunks where it does not
+    # (`Options.matrix_input_chunks` `auto`, `element_group.tile_plan`); the
+    # tests of the plan's I alone.
+    'hiwhole': (' '.join(f'tests/test_hiorder_tile.py::{t}' for t in (
+        'test_wgmma_takes_i_whole_where_the_tile_fits_it',
+        'test_wgmma_at_high_orders',
+        'test_on_wgmma_two_consumer_warpgroups_of_seven_elements',
+        'test_one_consumer_warpgroup_where_the_options_say_so',
+        'test_the_chunk_ring_s_text',
+        'test_i_in_chunks_where_it_has_more_rows_than_one',
+        'test_the_groups_option_defaults_to_what_each_engine_measured',
+        'test_the_rings_hand_over_between_the_roles',
+        )) + ' -n 6', [
+        ("wgmma's auto in chunks",
+         sub(ME_GROUP, '        if chunk and chunks_asked(context) == 0:\n', '        if False:\n', 1)),
+        ("wgmma's auto whole where whole fits no group",
+         sub(ME_GROUP, '            if whole[0] is not None:\n                return whole\n',
+             '            return whole\n', 1)),
+        ("wgmma's chunks asked taken whole first",
+         sub(ME_GROUP, '        if chunk and chunks_asked(context) == 0:\n',
+             '        if chunk and chunks_asked(context) >= 0:\n', 1)),
+        ("wgmma's chunks without their ring's slots",
+         sub(ME_GROUP, '                                  (chunk, cslots))\n',
+             '                                  (chunk, 0))\n', 1)),
     ]),
     # The high-order tile's defaults on tcgen05, as a GB200 measured them
     # (`Options.matrix_bands`, `Options.matrix_output` `auto`,

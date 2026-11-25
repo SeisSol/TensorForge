@@ -2039,7 +2039,8 @@ TILE_PRODUCER_WARPS = 2
 
 #: The rows of K a chunk of I takes where the options leave it to the tile
 #: (`Options.matrix_input_chunks` `auto`): four blocks of K, as the
-#: hand-written kernels stream it.
+#: hand-written kernels stream it -- on tcgen05, and on wgmma where the
+#: tile does not fit I whole (`tile_plan`).
 TILE_CHUNK = 32
 
 #: The slots of the ring I's chunks stream through (`TileRows.cslots`): two,
@@ -2067,13 +2068,24 @@ def chunked_input(section: GroupSection) -> Optional[Buffer]:
     return star_operand(section)
 
 
+def chunks_asked(context) -> int:
+    """The rows of K the options ask a chunk of I to take (`Options.
+    matrix_input_chunks`): 0 for `auto`, `INPUT_CHUNKS_WHOLE` for `whole`,
+    else the rows."""
+    from tensorforge.common.options import parse_matrix_input_chunks
+    return parse_matrix_input_chunks(getattr(
+        context.get_user_options(), 'matrix_input_chunks', 0) or 0)
+
+
 def input_chunk(section: GroupSection, context) -> int:
     """The rows of K a chunk of I takes in the tile of the lowered
-    `section` (`TileRows.chunk`): the options' (`Options.
-    matrix_input_chunks`), or `TILE_CHUNK` where I has more rows than that
-    -- 0, I whole, where the options say so, where a bulk copy cannot take
-    a column of it (`_bulk_source`), or where its rows do not start where
-    the products' contraction does, which the blocks of K count from."""
+    `section` (`TileRows.chunk`) where it takes chunks: the options'
+    (`Options.matrix_input_chunks`), or `TILE_CHUNK` where I has more rows
+    than that -- 0, I whole, where the options say so, where a bulk copy
+    cannot take a column of it (`_bulk_source`), or where its rows do not
+    start where the products' contraction does, which the blocks of K count
+    from.  On wgmma `auto` takes them only where the tile does not fit I
+    whole (`tile_plan`)."""
     from tensorforge.common.options import (INPUT_CHUNKS_WHOLE,
                                             parse_matrix_input_chunks)
     asked = parse_matrix_input_chunks(getattr(
@@ -2557,40 +2569,21 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
     width = step.cols[1] - step.cols[0]
     m = TCGEN05_ROWS if engine == 'tcgen05' else 64
     per = m // width
-    why = None
-    hw = context.target.hw
     # I in chunks through a ring of its own where it takes them, the input
     # ring a trip's star matrices alone (`TileRows.chunk`).
     chunk = input_chunk(probe, context)
     cslots = TILE_CHUNK_SLOTS if chunk else 0
     if engine == 'wgmma':
-        consumers = int(getattr(context.get_user_options(),
-                                'matrix_consumers', 2))
-        passes = tile_passes('wgmma', step.rows[1] - step.rows[0], context)
-        for tiles in range(consumers, 0, -1):
-            tile = TileRows('wgmma', width, max(1, per), tiles,
-                            spans_asked(context),
-                            tile_groups('wgmma', context, tiles,
-                                        step.rows[1] - step.rows[0]),
-                            passes=passes, chunk=chunk, cslots=cslots,
-                            output=tile_output('wgmma', step.rows[1]
-                                               - step.rows[0], context))
-            for operators in operator_slots_tried(context):
-                for slots in PRODUCER_SLOTS + (1,):
-                    lowered = tile_lowered(section, context, tile, slots,
-                                           operators)
-                    why = tile_refusal(lowered, context)
-                    if why is not None:
-                        return None, why
-                    need = shared_bytes(lowered, tile.elements)
-                    if (need <= budget and 32 * tile_warps(tile)
-                            <= hw.max_threads_per_block):
-                        return ElementGroup(tile.elements, lowered,
-                                            need), ''
-        return None, (f'no group of the tile fits: one warpgroup\'s '
-                      f'{per} elements take '
-                      f'{shared_bytes(lowered, tile.elements)} B of shared '
-                      f'memory, more than the {budget} B a block has')
+        if chunk and chunks_asked(context) == 0:
+            # `auto` on wgmma: I whole wherever the tile fits it, which a
+            # GH200 measured faster at every order (`Options.
+            # matrix_input_chunks`); in chunks where it does not.
+            whole = _wgmma_tile_search(section, context, budget, step, width,
+                                       per, (0, 0))
+            if whole[0] is not None:
+                return whole
+        return _wgmma_tile_search(section, context, budget, step, width, per,
+                                  (chunk, cslots))
     if per < MIN_ELEMENTS:
         return None, (f'tensor memory\'s {TCGEN05_ROWS} lanes hold {per} '
                       f'elements of {width} rows, fewer than {MIN_ELEMENTS}')
@@ -2615,6 +2608,45 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
                 chosen[0].elements < TILE_OUTPUT_KEEP * red[0].elements):
             return red
     return chosen
+
+
+def _wgmma_tile_search(section: GroupSection, context, budget: int,
+                       step: Step, width: int, per: int,
+                       chunks: Tuple[int, int]) -> Tuple[
+        Optional['ElementGroup'], str]:
+    """`tile_plan`'s search on wgmma: the most consumer warpgroups the
+    options give (`matrix_consumers`) and fewer, B's ring's slots and the
+    input ring's the deepest first, I's `chunks` (`TileRows.chunk`,
+    `cslots`) given."""
+    chunk, cslots = chunks
+    hw = context.target.hw
+    consumers = int(getattr(context.get_user_options(),
+                            'matrix_consumers', 2))
+    passes = tile_passes('wgmma', step.rows[1] - step.rows[0], context)
+    lowered = tile = None
+    for tiles in range(consumers, 0, -1):
+        tile = TileRows('wgmma', width, max(1, per), tiles,
+                        spans_asked(context),
+                        tile_groups('wgmma', context, tiles,
+                                    step.rows[1] - step.rows[0]),
+                        passes=passes, chunk=chunk, cslots=cslots,
+                        output=tile_output('wgmma', step.rows[1]
+                                           - step.rows[0], context))
+        for operators in operator_slots_tried(context):
+            for slots in PRODUCER_SLOTS + (1,):
+                lowered = tile_lowered(section, context, tile, slots,
+                                       operators)
+                why = tile_refusal(lowered, context)
+                if why is not None:
+                    return None, why
+                need = shared_bytes(lowered, tile.elements)
+                if (need <= budget and 32 * tile_warps(tile)
+                        <= hw.max_threads_per_block):
+                    return ElementGroup(tile.elements, lowered, need), ''
+    return None, (f'no group of the tile fits: one warpgroup\'s '
+                  f'{per} elements take '
+                  f'{shared_bytes(lowered, tile.elements)} B of shared '
+                  f'memory, more than the {budget} B a block has')
 
 
 def _tcgen05_tile_search(section: GroupSection, context, budget: int,

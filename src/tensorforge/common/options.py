@@ -3094,15 +3094,20 @@ declare('matrix_input_chunks',
         parse=parse_matrix_input_chunks,
         doc='How the high-order tile stages I, the group operand its star '
             'step reads (`matrix_tile` `high`, `element_group.TileRows.'
-            'chunk`).  `auto`, the default: in chunks of `TILE_CHUNK` (32) '
-            'rows of K where I has more, each chunk of every element a slot '
-            'of a ring of its own (`TILE_CHUNK_SLOTS`), streamed in the order '
-            'the blocks of K read them and again a pass over N -- the input '
-            'ring a trip\'s star matrices alone; `whole`: I in the input '
-            'ring\'s slot with them, a trip at a time, as before; 8 to 128 '
-            'rows (a multiple of 8, a block of K\'s) forced, for tests and '
-            'sweeps.  The hand-written kernels stream I in chunks of 32 rows '
-            'through two slots at every order.')
+            'chunk`).  `auto`, the default: on tcgen05 in chunks of '
+            '`TILE_CHUNK` (32) rows of K where I has more, each chunk of every '
+            'element a slot of a ring of its own (`TILE_CHUNK_SLOTS`), '
+            'streamed in the order the blocks of K read them -- the input ring '
+            'a trip\'s star matrices alone; on wgmma I whole wherever the tile '
+            'fits it, in chunks where it does not (`element_group.tile_plan`): '
+            'a GH200 measured I whole faster at every order (Vista 1169572, ns '
+            'an element: o6 4.91 against the chunks\' 6.23, o8 11.60 against '
+            '11.79, o10 34.77 at seven elements a warpgroup against 44.40 at '
+            'fourteen on two, o12 73.01 against 76.57); `whole`: I in the '
+            'input ring\'s slot with them, a trip at a time; 8 to 128 rows (a '
+            'multiple of 8, a block of K\'s) forced, for tests and sweeps.  '
+            'The hand-written kernels stream I in chunks of 32 rows through '
+            'two slots at every order.')
 
 declare('matrix_bands',
         default=2,

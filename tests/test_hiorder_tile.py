@@ -102,13 +102,12 @@ def test_on_wgmma_two_consumer_warpgroups_of_seven_elements(order):
     on 63 of its 64 rows -- not E/4 warpgroups each issuing 64 rows over
     9E -- and two producer warps behind them; no warp an element's, the
     batch loop's rows all a producer's; the star folded, B streamed
-    prepared through its ring, the inputs through the producer's -- I in
-    chunks of 32 rows of K past o4's ten (`TileRows.chunk`)."""
+    prepared through its ring, the inputs through the producer's -- I whole,
+    which the tile fits on wgmma at o4 to o8 (`tile_plan`, `TileRows.
+    chunk`)."""
     group = _group(order)
     section = group.section
-    chunk = 32 if order > 4 else 0
-    assert section.tile == eg.TileRows('wgmma', 9, 7, 2, groups='unrolled',
-                                       chunk=chunk, cslots=2 if chunk else 0)
+    assert section.tile == eg.TileRows('wgmma', 9, 7, 2, groups='unrolled')
     assert group.elements == 14 and group.warps == 10
     assert group.rows == 0 and group.producers == 10
     assert eg.rowless(section) and not section.roles
@@ -121,8 +120,7 @@ def test_on_wgmma_two_consumer_warpgroups_of_seven_elements(order):
 def test_one_consumer_warpgroup_where_the_options_say_so():
     group = _group(8, matrix_consumers=1)
     assert group.section.tile == eg.TileRows('wgmma', 9, 7, 1,
-                                             groups='unrolled', chunk=32,
-                                             cslots=2)
+                                             groups='unrolled')
     assert group.elements == 7 and group.warps == 6
 
 
@@ -387,23 +385,24 @@ def _bodies(**options):
         if k != 'matrix_engine'})
 
 
-@pytest.mark.parametrize('chunks', ['auto', 'whole'])
+@pytest.mark.parametrize('chunks', [32, 'auto'])
 def test_the_rings_hand_over_between_the_roles(chunks):
     """The rings' acts by role (`pir.rings.handoffs`): the producer fills
     them all -- the inputs', B's, and with I in chunks theirs -- and the
     tiles drain them all.  With I in chunks the input ring is the star
     matrices', a cell a copy of the producer's warp, none a bulk copy
-    into the slot; with I whole the producer's bulk copies are I's."""
+    into the slot; with I whole -- as the options leave it on wgmma -- the
+    producer's bulk copies are I's."""
     uses = tro._uses(_bodies(matrix_input_chunks=chunks))
     inputs = uses['me_ring']
     (b,) = [u for name, u in uses.items() if name.startswith('bk')]
-    rings = [inputs, b] + ([uses['ik_ring']] if chunks == 'auto' else [])
-    assert ('ik_ring' in uses) == (chunks == 'auto')
+    rings = [inputs, b] + ([uses['ik_ring']] if chunks == 32 else [])
+    assert ('ik_ring' in uses) == (chunks == 32)
     for use in rings:
         assert (use.spec.producer, use.spec.consumers) == (
             'producer', ('tile0', 'tile1'))
         assert use.roles('acquire') == use.roles('publish') == ('producer',)
-        assert use.roles('copy') == (() if use is inputs and chunks == 'auto'
+        assert use.roles('copy') == (() if use is inputs and chunks == 32
                                      else ('producer',))
         assert use.roles('take') == use.roles('release') == ('tile0',
                                                              'tile1')
@@ -777,8 +776,11 @@ def test_the_groups_option_defaults_to_what_each_engine_measured():
     assert [eg.tile_groups('wgmma', context, tiles, rows)
             for tiles, rows in ((2, 120), (2, 128), (2, 220), (1, 364))] == [
         'unrolled', 'unrolled', 'loop', 'unrolled']
+    assert [_group(o, 'sm_90a', matrix_input_chunks=32).section.tile.groups
+            for o in (10, 12)] == ['loop', 'loop']
+    # As the options leave them, I whole: one warpgroup, written out.
     assert [_group(o, 'sm_90a').section.tile.groups for o in (10, 12)] == [
-        'loop', 'loop']
+        'unrolled', 'unrolled']
     assert _group(10, 'sm_90a', matrix_consumers=1).section.tile.groups == (
         'unrolled')
 
@@ -1114,13 +1116,36 @@ def test_the_tile_on_tcgen05_at_high_orders(order, chunks, elements, slots):
     assert tile.bands == 2 and tile.output == 'red'
 
 
+def test_wgmma_takes_i_whole_where_the_tile_fits_it(monkeypatch):
+    """`auto` on wgmma: I whole wherever the tile fits it (`tile_plan`), as
+    a GH200 measured it faster at every order -- o4 to o8 fourteen elements
+    on two warpgroups, o10 and o12 seven on one; where whole fits no group
+    of the tile, I in chunks: o12 with 175000 B of the block's shared
+    memory, one warpgroup's whole taking 175668 B at the least (B's ring of
+    two slots), in chunks two warpgroups 165752.  On tcgen05 the chunks as
+    before."""
+    plans = {o: _group(o, 'sm_90a').section.tile for o in (4, 6, 8, 10, 12)}
+    assert {o: (t.chunk, t.tiles) for o, t in plans.items()} == {
+        4: (0, 2), 6: (0, 2), 8: (0, 2), 10: (0, 1), 12: (0, 1)}
+    assert [_group(o, 'sm_100a').section.tile.chunk for o in (4, 6, 12)] == [
+        0, 32, 32]
+    assert _group(12, 'sm_90a').shared_bytes == 211012
+    hw = me._context('sm_90a', 's').target.hw
+    monkeypatch.setattr(eg, 'SHARED_RESERVE',
+                        hw.max_local_mem_size_per_block - 175000)
+    group = _group(12, 'sm_90a')
+    assert (group.section.tile.chunk, group.section.tile.tiles) == (32, 2)
+    assert group.shared_bytes == 165752
+
+
 @pytest.mark.parametrize('order,chunks,tiles,slots', [
-    (10, 'auto', 2, 3), (12, 'auto', 2, 3), (10, 'whole', 1, 3),
-    (12, 'whole', 1, 3)])
+    (10, 32, 2, 3), (12, 32, 2, 3), (10, 'whole', 1, 3),
+    (12, 'whole', 1, 3), (10, 'auto', 1, 3), (12, 'auto', 1, 3)])
 def test_wgmma_at_high_orders(order, chunks, tiles, slots):
     """o10 and o12 on wgmma: with I in chunks two consumer warpgroups,
     fourteen elements, B's ring at three slots; with I whole one of seven
-    -- two warpgroups' I whole does not fit."""
+    -- two warpgroups' I whole does not fit -- which `auto` takes there, as
+    the tile fits it (`tile_plan`)."""
     group = _group(order, 'sm_90a', matrix_input_chunks=chunks)
     assert group.section.tile.tiles == tiles
     assert group.elements == 7 * tiles
@@ -1302,15 +1327,20 @@ def test_i_in_chunks_where_it_has_more_rows_than_one(arch):
     it has more rows -- o6's 35 in two chunks, o8's 84 in three, the last
     20 -- whole at o4's ten; `whole` as before; forced, o4's ten in chunks
     of eight, the second two rows.  A trip's rounds every chunk in turn."""
+    # On wgmma `auto` takes I whole where the tile fits it (`tile_plan`):
+    # the chunks asked for there.
+    asked = {} if arch == 'sm_100a' else {'matrix_input_chunks': 32}
+
     def tile(order, **options):
-        return _group(order, arch, **options).section.tile
-    assert (tile(4).chunk, tile(4).cslots) == (0, 0)
+        return _group(order, arch, **{**asked, **options}).section.tile
+    assert (_group(4, arch).section.tile.chunk,
+            _group(4, arch).section.tile.cslots) == (0, 0)
     assert (tile(6).chunk, tile(6).cslots) == (32, eg.TILE_CHUNK_SLOTS) \
         == (32, 2)
     assert tile(8, matrix_input_chunks='whole').chunk == 0
     for order, cuts in ((6, ((0, 32), (32, 35))),
                         (8, ((0, 32), (32, 64), (64, 84)))):
-        section = _group(order, arch).section
+        section = _group(order, arch, **asked).section
         (step,) = [s for s in section.steps
                    if s.lowering in eg.ASYNC_LOWERINGS]
         buffer = eg.chunked_input(section)
@@ -1328,7 +1358,7 @@ def test_a_pass_reads_its_own_chunks_again():
     all nine, fifteen rounds a trip; each block's chunk, the round it reads
     and whether it is the pass's first or last to read it, which take the
     round and give it back, each round exactly once."""
-    section = _group(12, 'sm_90a').section
+    section = _group(12, 'sm_90a', matrix_input_chunks=32).section
     (step,) = [s for s in section.steps if s.lowering == 'wgmma']
     rounds = eg.tile_input_rounds(section, step)
     assert rounds == tuple(range(6)) + tuple(range(9))
@@ -1344,7 +1374,8 @@ def test_the_chunks_in_the_plan_s_shared_memory(arch):
     """I's ring of chunks counted in the block's shared memory in place of
     I in every slot of the input ring: two slots of the fourteen elements'
     32 rows of its nine columns, and a pair of mbarriers a slot."""
-    section = _group(8, arch).section
+    section = _group(8, arch, **({'matrix_input_chunks': 32}
+                                 if arch == 'sm_90a' else {})).section
     whole = dataclasses.replace(section, tile=dataclasses.replace(
         section.tile, chunk=0, cslots=0))
     assert eg.chunked_input(whole) is None
@@ -1362,7 +1393,8 @@ def test_the_chunk_ring_s_text(arch, consumers):
     input ring no bulk copy, the star matrices its alone, and its slot
     given back before the first chunk is waited for -- the star numbers in
     registers by then."""
-    src = _kernel(8, arch).get_kernel()
+    src = _kernel(8, arch, **({'matrix_input_chunks': 32}
+                              if arch == 'sm_90a' else {})).get_kernel()
     assert 'mbarrierInit(&ik_ring[r], 1)' in src
     assert f'mbarrierInit(&ik_ring[2 + r], {consumers})' in src
     copies = re.findall(r'bulkCopyOn\(&ik_ring\[\w+\], [^,]+, [^,]+, '
@@ -1627,8 +1659,10 @@ def _ptxas(arch, tmp_path, order=8, **options):
     ('sm_100a', 'UTCHMMA', 9, {'tile_schedule': 'clc'}),
     ('sm_100a', 'UTCHMMA', 9, {'order': 10}),
     ('sm_100a', 'UTCHMMA', 18, {'order': 12}),
-    ('sm_90a', 'HGMMA', 2 * 72, {'order': 10, 'matrix_groups': 'loop'}),
-    ('sm_90a', 'HGMMA', 2 * 162, {'order': 12, 'matrix_groups': 'loop'}),
+    ('sm_90a', 'HGMMA', 2 * 72, {'order': 10, 'matrix_input_chunks': 32,
+                                 'matrix_groups': 'loop'}),
+    ('sm_90a', 'HGMMA', 2 * 162, {'order': 12, 'matrix_input_chunks': 32,
+                                  'matrix_groups': 'loop'}),
     ('sm_90a', 'HGMMA', 72, {'order': 10, 'matrix_input_chunks': 'whole',
                              'matrix_groups': 'loop'}),
     ('sm_90a', 'HGMMA', 162, {'order': 12, 'matrix_input_chunks': 'whole',
@@ -1669,13 +1703,15 @@ def test_the_build_reads_back(arch, engine, products, options, tmp_path):
 
 
 #: The tile's variants on the GPU: as the options leave it, its blocks
-#: written out and in one loop, I whole in the input ring rather than in
-#: chunks, and
+#: written out and in one loop, I whole in the input ring and in chunks
+#: (wgmma's as the options leave it is I whole where it fits, tcgen05's in
+#: chunks), and
 #: tcgen05's own levers -- three star bands, D added a cell at a time, by
 #: bulk reductions a column and an element's box.
 GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                 'loop': {'matrix_groups': 'loop'},
                 'whole': {'matrix_input_chunks': 'whole'},
+                'chunks': {'matrix_input_chunks': 32},
                 'b3': {'matrix_bands': 3}, 'red': {'matrix_output': 'red'},
                 'bulk': {'matrix_output': 'bulk'},
                 'box': {'matrix_output': 'box'}}
@@ -1694,9 +1730,11 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
     if target.arch == 'sm_90' and variant in ('b3', 'red', 'box'):
         pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands and '
                     'adds D a cell or a row a reduction')
-    if order > 8 and variant not in ('', 'unrolled', 'loop', 'whole'):
+    if order > 8 and variant not in ('', 'unrolled', 'loop', 'whole',
+                                     'chunks'):
         pytest.skip('o10 and o12: the tile as the options leave it, its '
-                    'blocks written out and in one loop, and I whole')
+                    'blocks written out and in one loop, and I whole and in '
+                    'chunks')
     from harness.runner import run_case
     options = {**HIGH, **GPU_VARIANTS[variant]}
     special = dataclasses.replace(target, arch=target.arch + 'a')
