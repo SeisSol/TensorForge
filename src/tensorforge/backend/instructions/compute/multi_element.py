@@ -376,9 +376,11 @@ def _tcgen05_columns(section, step):
         # block of K of every product, both halves.  The high-order tile's
         # D in its slots (`TileRows.dslots`), A's ring behind them.
         slot = 2 * STAR_ROWS * len(step.products)
+        slots = STAR_SLOTS['tcgen05']
         if section.tile is not None:
             n *= section.tile.dslots
-        return (n + STAR_SLOTS['tcgen05'] * slot,
+            slots = section.tile.aslots
+        return (n + slots * slot,
                 tuple(n + 2 * STAR_ROWS * p for p in range(len(step.products))),
                 False)
     depths = [section.stage(p.first.tensor, (p.rows, p.depth)).depth
@@ -460,6 +462,9 @@ class MultiElementOperators(AbstractInstruction):
         #: of its slots' windows (`GroupSection.ring`).
         self.ring = None
         self.ring_slots: Dict[int, object] = {}
+        #: The high-order tile's I in chunks through a ring of its own,
+        #: where the plan streams it so (`_InputChunks`).
+        self.chunks = None
         #: The prepared rings of the steps whose B streams prepared
         #: (`_OperatorRing`), by the step's `id`.
         self.rings: Dict[int, _OperatorRing] = {}
@@ -517,14 +522,54 @@ class MultiElementOperators(AbstractInstruction):
             raise InternalError('the tile\'s input ring in a body without '
                                 'an arena for its mbarriers')
         self._ring_windows(builder, tid, threads)
+        self._input_chunks(builder, producer, arrivals, roles)
+
+    def _input_chunks(self, builder, producer, arrivals, roles) -> None:
+        """The tile's ring of I's chunks (`_InputChunks`), where the plan
+        streams I so (`element_group.chunked_input`): its slots, on 16
+        bytes, and its barriers, between the input ring's producer and its
+        consumers.  Not zeroed: the readers read the rows a copy wrote, the
+        last chunk's rounded to four floats as the copy moves them."""
+        from tensorforge.generators.element_group import (chunked_input,
+                                                          tile_input_rounds)
+        section = self._group.section
+        chunked = chunked_input(section)
+        if chunked is None:
+            return
+        tile = section.tile
+        (step,) = [s for s in section.steps if s.lowering in
+                   ('wgmma', 'tcgen05')]
+        elements = self._group.elements
+        width = chunked.cols[1] - chunked.cols[0]
+        storage = builder.alloc(section.dtype,
+                                (tile.cslots * elements * tile.chunk
+                                 * width,), MemSpace.SHARED,
+                                arena=GeneralLexicon.TOTAL_SHR_MEM,
+                                hint=_hint('ik', chunked.tensor),
+                                place_align=4, lifetime='body', handed=True)
+        ring = builder.mbarrier_ring(
+            'ik', tile.cslots, full=1, empty=arrivals,
+            leader='threadIdx.x == 0 && threadIdx.y == 0',
+            arena=GeneralLexicon.TOTAL_SHR_MEM, producer=producer,
+            consumers=roles)
+        if ring is None:
+            raise InternalError('the tile\'s ring of I\'s chunks in a body '
+                                'without an arena for its mbarriers')
+        self.chunks = _InputChunks(chunked, ring, storage, tile.chunk,
+                                   elements, tile_input_rounds(section, step))
 
     def _ring_windows(self, builder, tid, threads) -> None:
         """The producer's ring's slots' windows of every input, zeroed
         (`_ring`)."""
+        from tensorforge.generators.element_group import chunked_input
         section = self._group.section
         elements = self._group.elements
         fp = ScalarType(section.dtype)
+        chunked = chunked_input(section)
         for buffer in section.inputs:
+            if chunked is not None and buffer.tensor is chunked.tensor:
+                # In chunks through a ring of its own (`_input_chunks`).
+                continue
             key = self.ring_slots[id(buffer.tensor)] = object()
             for slot in range(section.ring):
                 window = builder.alloc(
@@ -674,6 +719,9 @@ class MultiElementOperators(AbstractInstruction):
             volumes = [chunk_volume(section, step, chunk)
                        for chunk in chunks]
             starts = [offsets[chunk[0][:2]] for chunk in chunks]
+            if section.tile is not None:
+                # A chunk's own, a block's in each pass over N.
+                starts = [offsets[tuple(chunk[0])] for chunk in chunks]
             size = max(volumes)
             slots = section.ring_slots
             storage = builder.alloc(Datatype.F32, (slots * size,),
@@ -885,8 +933,15 @@ class _Trip:
         self.section = group.section
         self.fp = ScalarType(self.section.dtype)
         self.lane = builder.thread_id('x')
-        self.slot = builder.op('rem', INDEX, builder.thread_id('y'),
-                               group.elements, hint='slot')
+        # The warp's element where a warp is one; in the tile's layouts
+        # (`_rowless`), where the warps are their roles' members, its place
+        # among the block's warps -- the modulo would put a warp past the
+        # elements in another's place: at o12's five or seven elements
+        # tcgen05's star warps 5 to 7 in the first band's, its A's full side
+        # short of their arrivals and the block hung.
+        self.slot = (builder.thread_id('y') if _rowless(self.section) else
+                     builder.op('rem', INDEX, builder.thread_id('y'),
+                                group.elements, hint='slot'))
         self.symbols = symbols
         self.operators = operators
         #: A sparse step's tables, by its terms (`MultiElementOperators`).
@@ -902,6 +957,9 @@ class _Trip:
         #: of its trips, once a ring asks for it (`_trip_count`).
         self.rings: Dict[int, object] = {}
         self.trips = None
+        #: The high-order tile's I in chunks, where it streams them
+        #: (`MultiElementOperators.chunks`, `_InputChunks`).
+        self.chunks = None
         #: The shared memory of wgmma's folded star step's ring of A, by the
         #: step's `id` (`_wgmma_star`).
         self.stars: Dict[int, object] = {}
@@ -1923,18 +1981,19 @@ class _Piece:
         self.lo = lo
         self.width = stage.width if width is None else width
 
-    def descriptors(self, b, kt, form):
+    def descriptors(self, b, kt, form, column: int = 0):
         """The descriptors of the step of K at `kt` of the piece: the upper
-        halves', and the lower halves' where the stage is split.  `at` is a
-        number, or a value where the piece's slot of a ring is one
-        (`_OperatorRing`)."""
+        halves', and the lower halves' where the stage is split -- from its
+        `column` of N on, a multiple of eight, each eight a core matrix's
+        SBO on.  `at` is a number, or a value where the piece's slot of a
+        ring is one (`_OperatorRing`)."""
         from tensorforge.backend.pir.engines import MatrixDescType
         desc = MatrixDescType(Datatype.TF32, lbo=self.stage.leading,
                               sbo=self.rows * 32, form=form)
         half = self.rows * self.width
         return [b.matrix_desc(self.buffer, _index(
-                    b, 'add', self.at, h * half + kt * 8, 'b'),
-                              desc=desc, hint='b')
+                    b, 'add', self.at, h * half + kt * 8 + column * self.rows,
+                    'b'), desc=desc, hint='b')
                 for h in range(1 + self.stage.split)]
 
 
@@ -2013,6 +2072,63 @@ def _trip_count(trip):
         'div', INDEX, bound[GROUP_KEY], trip.group.elements, hint='k'),
         block, hint='k'), grid, hint='k')
     return trip.trips
+
+
+class _InputChunks:
+    """The high-order tile's I streamed in chunks (`element_group.TileRows.
+    chunk`): a ring of its own of `cslots` slots in the block's shared
+    memory for the whole body, each a chunk of every element -- element
+    `e`'s rows `[lo, lo + rows)` of I's box, a column `rows` floats from the
+    next, the elements `rows x width` apart -- handed over by the ring's
+    barriers alone: full counting the producer's arrival and the chunk's
+    bytes, empty a consumer warp's arrival each (`_tile_consumers`), behind
+    its reads of every block of the chunk.  A trip's rounds are its chunks
+    in the order the blocks of K read them, a pass's again (`element_group.
+    tile_input_rounds`): round `i` of trip `t` is the ring's `t R + i`."""
+
+    def __init__(self, buffer, ring, storage, rows, elements, order):
+        self.buffer, self.ring, self.storage = buffer, ring, storage
+        #: Rows of K a chunk; I's columns; a slot's elements.
+        self.rows = rows
+        self.width = buffer.cols[1] - buffer.cols[0]
+        self.per_element = rows * self.width
+        self.size = elements * self.per_element
+        #: The chunk of each round of a trip.
+        self.order = order
+
+    def base(self, trip):
+        """The ring's round of the trip's first chunk."""
+        return _index(trip.builder, 'mul', _trip_count(trip),
+                      len(self.order), 'ic')
+
+    def round(self, trip, i, base):
+        """Round `i` of the trip -- a number or a value -- as the ring's
+        slot, the parity of its phase, and where the slot starts."""
+        b = trip.builder
+        slot, parity = b.ring_round(self.ring, _index(b, 'add', base, i,
+                                                      'ic'), hint='ik')
+        return slot, parity, b.op('mul', INDEX, slot, self.size, hint='ia')
+
+    def row(self, builder, h):
+        """The first row of chunk `h` of I's box, a number or a value."""
+        return _index(builder, 'add', _index(builder, 'mul', h, self.rows,
+                                             'ir'), self.buffer.rows[0], 'ir')
+
+    def take(self, trip, slot, parity) -> None:
+        """A consumer's wait for the slot's chunk as its bytes land."""
+        trip.builder.ring_take(self.ring, slot, parity,
+                               writes=[self.storage])
+
+    def release(self, trip, slot, when=None) -> None:
+        """The slot back, behind the warp's reads of it: the warp's barrier
+        and its first lane's arrival -- where `when` holds, a value the
+        warp agrees on, if given."""
+        b = trip.builder
+        b.barrier(Participants.WAVE)
+        first = b.op('eq', BOOL, trip.lane, 0, hint='first')
+        if when is not None:
+            first = b.op('and', BOOL, first, when, hint='first')
+        b.ring_release(self.ring, slot, first)
 
 
 class _OperatorRing:
@@ -2475,21 +2591,23 @@ def _star_numbers(trip, step, element, column) -> list:
     return numbers
 
 
-def _star_block(trip, step, numbers, element, k0, rows, live) -> list:
+def _star_block(trip, step, numbers, element, k0, rows, live,
+                chunk=None) -> list:
     """A thread's row of A of every product of `step` over `rows` rows of K
     from `k0` (the products' own, from their contraction's start): what
     the folded star step computes, `sum_q G(e, k, q) S_p(q, c)` -- the
     group operand `G` of the thread's element `element` read once for every
     product, 16 bytes of a column at a time where its buffer's pitch and
     the rows allow -- zero past each product's contraction and on a row
-    past the group (`live` false).  By product, `rows` values."""
+    past the group (`live` false).  By product, `rows` values.  Read from
+    the chunk of I `chunk` names where I streams in chunks
+    (`_star_source`), its first row a number."""
     from tensorforge.generators.element_group import star_mixes
     b, section, fp = trip.builder, trip.section, trip.fp
     mixes = star_mixes(section, step)
     lead = mixes[0].products[0]
     group = section.buffer(lead.first.tensor)
-    source = trip.buffers[id(group.tensor)]
-    base = b.op('mul', INDEX, element, group.per_element, hint='b')
+    source, base, top, pitch = _star_source(trip, group, element, chunk)
     start = step.products[0].depth[0]
     end = [p.depth[1] for p in step.products]
     vec = 16 // section.dtype.size()
@@ -2504,8 +2622,8 @@ def _star_block(trip, step, numbers, element, k0, rows, live) -> list:
                 xs += [None] * vec
                 continue
             at = _index(b, 'add', base, _box_index(
-                b, k, q, (group.rows[0], group.cols[0]), group.pitch), 'a')
-            if (all(span) and group.pitch % vec == 0
+                b, k, q, (top, group.cols[0]), pitch), 'a')
+            if (all(span) and pitch % vec == 0
                     and (k - group.rows[0]) % vec == 0):
                 x = b.load(source, at, type_=vector, align=16, hint='x')
                 xs += [b.extract(x, v, hint='x') for v in range(vec)]
@@ -2625,6 +2743,9 @@ class _Fold:
         self.width = step.cols[1] - step.cols[0]
         count = len(step.products)
         self.slots = STAR_SLOTS['tcgen05']
+        if section.tile is not None:
+            # The high-order tile's A slots (`TileRows.aslots`).
+            self.slots = section.tile.aslots
         stages = [section.stage(p.first.tensor, (p.rows, p.depth))
                   for p in step.products]
         depth = max(st.depth for st in stages)
@@ -2707,43 +2828,79 @@ class _Fold:
     def fill_loop(self, trip, rows, trips, every) -> None:
         """Every block's A as one loop a band (`TileRows.groups` `loop`):
         band `b` the blocks `b`, `b + bands`, ... as `fill` takes them, the
-        body written once -- the block's slot and rows of K values."""
+        body written once -- the block's slot and rows of K values.  Where
+        I streams in chunks (`_InputChunks`), a loop of the chunks around
+        it: every band takes each chunk's slot as it lands, its blocks of
+        the chunk, and gives the slot back behind them -- a band with none
+        in the chunk too, so that each round's arrivals are every band's."""
+        from tensorforge.generators.element_group import STAR_ROWS
+        b = self.builder
+        bands, band, live, element, inband, numbers = rows
+        chunks = trip.chunks
+        with b.if_(inband):
+            if chunks is None:
+                with b.for_(band, self.blocks, bands, unroll=1, hint='g',
+                            uniform=Uniformity.MULT) as loop:
+                    self._fill_one(trip, rows, trips, every, loop.induction)
+                return
+            per = chunks.rows // STAR_ROWS
+            cbase = chunks.base(trip)
+            with b.for_(0, -(-self.blocks // per), unroll=1, hint='h',
+                        uniform=Uniformity.MULT) as outer:
+                h = outer.induction
+                cslot, cparity, cat = chunks.round(trip, h, cbase)
+                chunks.take(trip, cslot, cparity)
+                lo = b.op('mul', INDEX, h, per, hint='hl')
+                # The band's first block of the chunk, `lo` on.
+                start = b.op('add', INDEX, lo, b.op('rem', INDEX, b.op(
+                    'sub', INDEX, b.op('add', INDEX, band, bands, hint='hf'),
+                    b.op('rem', INDEX, lo, bands, hint='hf'), hint='hf'),
+                    bands, hint='hf'), hint='hf')
+                end = b.op('min', INDEX, b.op('add', INDEX, lo, per,
+                                               hint='he'), self.blocks,
+                           hint='he')
+                with b.for_(start, end, bands, unroll=1, hint='g',
+                            uniform=Uniformity.MULT) as loop:
+                    self._fill_one(trip, rows, trips, every, loop.induction,
+                                   (cat, chunks.row(b, h)))
+                chunks.release(trip, cslot)
+
+    def _fill_one(self, trip, rows, trips, every, j, chunk=None) -> None:
+        """`fill_loop`'s body: block `j`'s A, a value -- the slot back from
+        the products of its last round, the band's rows of every product
+        into it, both TF32 halves, behind the engine's fence its arrival."""
         from tensorforge.backend.instructions.compute.primitives import \
             nvidia
         from tensorforge.backend.pir.engines import FenceKind
         from tensorforge.generators.element_group import STAR_ROWS
         b, step, tmem = self.builder, self.step, self.tmem
         bands, band, live, element, inband, numbers = rows
-        with b.if_(inband):
-            with b.for_(band, self.blocks, bands, unroll=1, hint='g',
-                        uniform=Uniformity.MULT) as loop:
-                j = loop.induction
-                slot, parity, at = self.round_of(trips, j)
-                # The slot back from the products of its last round.
-                b.ring_acquire(self.areas, slot, parity=parity)
-                k0 = b.op('mul', INDEX, j, STAR_ROWS, hint='k')
-                halves = [_star_quad(trip, step, numbers, element, b.op(
-                    'add', INDEX, k0, r0, hint='k'), live)
-                          for r0 in range(0, STAR_ROWS, 4)]
-                for p in range(len(step.products)):
-                    xs = [x for quad in halves for x in quad[p]]
-                    split = nvidia.tfconvert(b, xs)
-                    b.tmem_st(tmem, b.op('add', INDEX, at, 2 * STAR_ROWS * p,
-                                         hint='tc'),
-                              [_as_float(b, u) for u, _ in split])
-                    b.tmem_st(tmem, b.op('add', INDEX, at,
-                                         2 * STAR_ROWS * p + STAR_ROWS,
-                                         hint='tc'),
-                              [_as_float(b, lo) for _, lo in split])
-                b.fence(FenceKind.THREAD_SYNC, engine='tcgen05',
-                        side='before')
-                b.ring_publish(self.areas, slot, every)
+        slot, parity, at = self.round_of(trips, j)
+        # The slot back from the products of its last round.
+        b.ring_acquire(self.areas, slot, parity=parity)
+        k0 = b.op('mul', INDEX, j, STAR_ROWS, hint='k')
+        halves = [_star_quad(trip, step, numbers, element, b.op(
+            'add', INDEX, k0, r0, hint='k'), live, chunk)
+                  for r0 in range(0, STAR_ROWS, 4)]
+        for p in range(len(step.products)):
+            xs = [x for quad in halves for x in quad[p]]
+            split = nvidia.tfconvert(b, xs)
+            b.tmem_st(tmem, b.op('add', INDEX, at, 2 * STAR_ROWS * p,
+                                 hint='tc'),
+                      [_as_float(b, u) for u, _ in split])
+            b.tmem_st(tmem, b.op('add', INDEX, at,
+                                 2 * STAR_ROWS * p + STAR_ROWS, hint='tc'),
+                      [_as_float(b, lo) for _, lo in split])
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='before')
+        b.ring_publish(self.areas, slot, every)
 
-    def fill(self, trip, rows, j, slot, parity, at, every) -> None:
+    def fill(self, trip, rows, j, slot, parity, at, every,
+             chunk=None) -> None:
         """Block `j`'s A, by its band: the slot back from the products of
         its last round, the band's rows of every product into it, both
         TF32 halves, behind the engine's fence its arrival -- every thread
-        of the band (`every`)."""
+        of the band (`every`).  I from the chunk `chunk` names where it
+        streams in chunks (`_star_source`)."""
         from tensorforge.backend.instructions.compute.primitives import \
             nvidia
         from tensorforge.backend.pir.engines import FenceKind
@@ -2755,7 +2912,7 @@ class _Fold:
         with b.if_(mine):
             b.ring_acquire(self.areas, slot, parity)
             values = _star_block(trip, step, numbers, element, j * STAR_ROWS,
-                                 STAR_ROWS, live)
+                                 STAR_ROWS, live, chunk)
             for p, xs in enumerate(values):
                 split = nvidia.tfconvert(b, xs)
                 b.tmem_st(tmem, at + 2 * STAR_ROWS * p,
@@ -2785,6 +2942,32 @@ class _Fold:
             plan = _plan(piece.stage)
             for kt in range(0, rows, self.k):
                 bs = piece.descriptors(b, k0 + kt, 'tcgen05')
+                wide = (n if piece.width == piece.stage.width
+                        and not piece.lo else piece.width)
+                if wide > TCGEN05_N_MAX:
+                    # D wider than an instruction's N (o12, `element_group.
+                    # tile_tmem`): the piece's columns in products of at
+                    # most 256, each its own of D's columns -- every term of
+                    # one before the next's, a run of the plan each.
+                    for c0 in range(0, wide, TCGEN05_N_MAX):
+                        cut = piece.descriptors(b, k0 + kt, 'tcgen05', c0)
+                        column = piece.lo + c0
+                        # Each cut's columns written fresh by its first
+                        # term where the block's first product starts D.
+                        fresh = start
+                        for ia, ib in plan.products:
+                            b.tcgen05(min(TCGEN05_N_MAX, wide - c0), tmem,
+                                      cut[ib], tmem, issue=issue,
+                                      enable_input_d=0 if fresh else 1,
+                                      a_column=(at + 2 * STAR_ROWS * p
+                                                + STAR_ROWS * ia + kt),
+                                      d_column=column if d_base is None
+                                      else b.op('add', INDEX, d_base, column,
+                                                hint='dc'),
+                                      term=(ia, ib), plan=plan)
+                            fresh = False
+                    start = False
+                    continue
                 for ia, ib in plan.products:
                     # The piece's N and D's columns: the high-order tile's
                     # span of them (`element_group.tile_chunks`), else
@@ -2803,6 +2986,10 @@ class _Fold:
         if ring is not None and release:
             ring.release(trip, j, base, issue)
         return start
+
+
+#: The widest N one tcgen05.mma takes (PTX ISA, "tcgen05.mma": N to 256).
+TCGEN05_N_MAX = 256
 
 
 def _fold_bands(trip) -> int:
@@ -2958,6 +3145,10 @@ def _wgmma_star(trip, step, ring, pass_, accs, layouts, n, top) -> None:
             ring.release(trip, j, base)
 
 
+def _nothing() -> None:
+    """A `done` with nothing left to do."""
+
+
 def _wgmma_tile(trip, step, t, area, done) -> None:
     """Tile `t` of the high-order tile on wgmma (`element_group.TileRows`,
     `MultiElementSection._tile`), by its consumer warpgroup: the group's
@@ -3014,6 +3205,12 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
     column = _index(b, 'add', b.op('rem', INDEX, row, width, hint='p'),
                     step.cols[0], 'p')
     numbers = _star_numbers(trip, step, element, column)
+    if trip.chunks is not None:
+        # I streams in chunks through a ring of its own: the input slot
+        # holds the trip's star matrices alone, in registers now -- back at
+        # once, the next trip's staged under this one.
+        done()
+        done = _nothing
     # The thread's sixteen bytes of a core matrix's row: row `r` of the
     # tile, the block's rows of K `4 h` on.
     mine = b.op('add', INDEX, b.op('add', INDEX, b.op(
@@ -3026,88 +3223,229 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
     vector = ScalarType(section.dtype, 4)
     layouts = (nvidia.wgmma_a_fragment_bits(), None,
                nvidia.wgmma_d_fragment_bits(n))
+    # With passes over N (`TileRows.passes`), each pass's D in the
+    # accumulators in turn, as wide as the widest pass.
+    from tensorforge.generators.element_group import (tile_pass_bounds,
+                                                      tile_pass_chunks)
+    bounds = tile_pass_bounds(section, step)
+    widest = _round_up(max(hi - lo for lo, hi in bounds), n_)
     accs = [b.declare(fp, hint='c', uniform=Uniformity.LANE)
-            for _ in range(n // 2)]
+            for _ in range(widest // 2)]
     base = ring.base(trip, 0)
     hold = ring.hold
-    flight, start = [], True
-    if tile.groups == 'loop':
-        # The blocks as one loop (`_wgmma_groups`), its last `hold - 1`
-        # chunks given back below.
-        _wgmma_groups(trip, step, ring, base, area, done, accs,
-                      (numbers, element, live, h, mine))
-    for j in range(0 if tile.groups == 'loop' else blocks):
-        at = (j % slots) * slot_size
-        values = _star_quad(trip, step, numbers, element, _index(
-            b, 'add', b.op('mul', INDEX, h, 4, hint='k'), j * STAR_ROWS, 'k'),
-            live)
-        for p, xs in enumerate(values):
-            split = nvidia.tfconvert(b, xs)
-            for part, picked in ((0, [_as_float(b, u) for u, _ in split]),
-                                 (1, [_as_float(b, lo) for _, lo in split])):
-                b.store(area, b.pack(vector, *picked, hint='y'), _index(
-                    b, 'add', mine, at + (2 * p + part) * half, 'as'),
-                    align=16)
-        b.fence(FenceKind.PROXY)
-        # The warpgroup's: its role's.
-        b.barrier(Participants.ROLE)
-        if j + 1 == blocks:
-            # Every read of the trip's inputs is behind: the slot back.
-            done()
-        reads = []
-        for piece, k0 in _star_pieces(trip, step, ring, j, base, None):
-            p = step.products.index(piece.product)
-            rows = min(STAR_ROWS, piece.stage.depth - j * STAR_ROWS)
-            for kt in range(0, rows, 8):
-                bs = piece.descriptors(b, k0 + kt, 'wgmma')
-                upper = b.matrix_desc(area, at + (2 * p) * half + kt * 8,
-                                      desc=desc, hint='a')
-                lower = b.matrix_desc(area, at + (2 * p + 1) * half + kt * 8,
-                                      desc=desc, hint='a')
-                b.fence(FenceKind.REGISTERS, engine='wgmma', registers=accs)
-                plan = _plan(piece.stage)
-                # The piece's span: its N, D's first registers -- its tiles
-                # of N laid last first (`TileRows.descending`), so that every
-                # span's products start at the accumulators' first one.
-                span = accs[:piece.width // 2]
-                shapes = (layouts[0], None,
-                          nvidia.wgmma_d_fragment_bits(piece.width))
-                for ia, ib in plan.products:
-                    b.wgmma(piece.width, [(upper, lower)[ia]], bs[ib], span,
-                            scale_d=0 if start else 1, layouts=shapes,
-                            term=(ia, ib), plan=plan)
-                    start = False
-                reads += bs + [upper, lower]
-        b.commit_group('wgmma')
-        flight.append(([], reads))
-        if len(flight) >= hold:
-            flight = _wgmma_retire(b, flight, hold - 1, accs)
-            ring.release(trip, j - hold + 1, base)
-    if flight:
-        _wgmma_retire(b, flight, 0, accs)
-    for j in range(max(0, blocks - hold + 1), blocks):
-        ring.release(trip, j, base)
-    # D: register `i` of the lane is the tile's row `16 w + g + 8 ((i % 4) /
-    # 2)`, column `8 (i / 4) + 2 t + i % 2` of the descending order (PTX's D
-    # of m64nN): the step's column `n - 8 (i / 4 + 1) + 2 t + i % 2`, B's
-    # tiles of N laid last first (`TileRows.descending`).  A row past the
-    # tile's elements is past the group's to the writer.
-    write = _d_writer(trip, step)
+    passes = tile_pass_chunks(section, step)
+    # I in chunks (`_InputChunks`): each block's chunk and its round, taken
+    # by the pass's first block to read it, given back behind its last.
+    chunks = trip.chunks
+    if chunks is not None:
+        from tensorforge.generators.element_group import tile_input_reads
+        reads_of = tile_input_reads(section, step)
+        cbase = chunks.base(trip)
+    for pass_, ((first, count), (plo, phi)) in enumerate(zip(passes,
+                                                            bounds)):
+        last = pass_ + 1 == len(passes)
+        end = first + count
+        if pass_ and tile.groups == 'loop':
+            # The pass's D from zeros, every product adding into it.
+            for acc in accs:
+                b.assign(acc, b.const(0.0, fp))
+        flight, start = [], True
+        if tile.groups == 'loop':
+            # The pass's blocks as one loop (`_wgmma_groups`), its last
+            # `hold - 1` chunks given back below.
+            _wgmma_groups(trip, step, ring, base, area,
+                          done if last else None, accs,
+                          (numbers, element, live, h, mine), first, count)
+        for j in range(end if tile.groups == 'loop' else first, end):
+            at = (j % slots) * slot_size
+            # The chunk's block of K: the block `j` without passes.
+            k0 = ring.chunks[j][0][1]
+            chunk = None
+            if chunks is not None:
+                hh, i, take, give = reads_of[j]
+                cslot, cparity, cat = chunks.round(trip, i, cbase)
+                if take:
+                    chunks.take(trip, cslot, cparity)
+                chunk = (cat, chunks.row(b, hh))
+            values = _star_quad(trip, step, numbers, element, _index(
+                b, 'add', b.op('mul', INDEX, h, 4, hint='k'), k0, 'k'),
+                live, chunk)
+            for p, xs in enumerate(values):
+                split = nvidia.tfconvert(b, xs)
+                for part, picked in ((0, [_as_float(b, u) for u, _ in split]),
+                                     (1, [_as_float(b, lo)
+                                          for _, lo in split])):
+                    b.store(area, b.pack(vector, *picked, hint='y'), _index(
+                        b, 'add', mine, at + (2 * p + part) * half, 'as'),
+                        align=16)
+            b.fence(FenceKind.PROXY)
+            # The warpgroup's: its role's.
+            b.barrier(Participants.ROLE)
+            if chunks is not None and give:
+                # The pass's last read of the chunk behind: its slot back.
+                chunks.release(trip, cslot)
+            if last and j + 1 == end:
+                # Every read of the trip's inputs is behind: the slot back.
+                done()
+            reads = []
+            for piece, k1 in _star_pieces(trip, step, ring, j, base, None):
+                p = step.products.index(piece.product)
+                rows = min(STAR_ROWS, piece.stage.depth - k0)
+                for kt in range(0, rows, 8):
+                    bs = piece.descriptors(b, k1 + kt, 'wgmma')
+                    upper = b.matrix_desc(area, at + (2 * p) * half + kt * 8,
+                                          desc=desc, hint='a')
+                    lower = b.matrix_desc(area,
+                                          at + (2 * p + 1) * half + kt * 8,
+                                          desc=desc, hint='a')
+                    b.fence(FenceKind.REGISTERS, engine='wgmma',
+                            registers=accs)
+                    plan = _plan(piece.stage)
+                    # The piece's span: its N, D's first registers -- its
+                    # tiles of N laid last first (`TileRows.descending`),
+                    # so that every span's products start at the
+                    # accumulators' first one.
+                    span = accs[:piece.width // 2]
+                    shapes = (layouts[0], None,
+                              nvidia.wgmma_d_fragment_bits(piece.width))
+                    for ia, ib in plan.products:
+                        b.wgmma(piece.width, [(upper, lower)[ia]], bs[ib],
+                                span, scale_d=0 if start else 1,
+                                layouts=shapes, term=(ia, ib), plan=plan)
+                        start = False
+                    reads += bs + [upper, lower]
+            b.commit_group('wgmma')
+            flight.append(([], reads))
+            if len(flight) >= hold:
+                flight = _wgmma_retire(b, flight, hold - 1, accs)
+                ring.release(trip, j - hold + 1, base)
+        if flight:
+            # The pass's every product retired: its D whole.
+            flight = _wgmma_retire(b, flight, 0, accs)
+        for j in range(max(first, end - hold + 1), end):
+            ring.release(trip, j, base)
+        # D: register `i` of the lane is the tile's row `16 w + g + 8 ((i %
+        # 4) / 2)`, column `8 (i / 4) + 2 t + i % 2` of the descending
+        # order (PTX's D of m64nN): the step's column `phi - 8 (i / 4 + 1)
+        # + 2 t + i % 2`, B's tiles of N laid last first from the pass's
+        # last row `phi` (`TileRows.descending`).  A row past the tile's
+        # elements is past the group's to the writer.
+        if step.output == 'bulk':
+            # By bulk reductions, a row of D each, staged in A's slots.
+            _wgmma_bulk(trip, step, t, area, accs, w, plo, phi)
+            continue
+        write = _d_writer(trip, step)
+        quad = b.op('div', INDEX, lane, 4, hint='q')
+        inquad = b.op('rem', INDEX, lane, 4, hint='q')
+        for i in range(_round_up(phi - plo, n_) // 2):
+            rr = 8 * ((i % 4) // 2)
+            local = _index(b, 'add', b.op('add', INDEX, b.op(
+                'mul', INDEX, w, 16, hint='m'), quad, hint='m'), rr, 'm')
+            dm = b.op('select', INDEX, b.op('lt', BOOL, local, tile.used,
+                                            hint='in'),
+                      _index(b, 'add', local, tile.used * t, 'm'), M,
+                      hint='m')
+            col = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2, hint='n'),
+                       phi - 8 * (i // 4 + 1) + i % 2, hint='n')
+            write(dm, col, accs[i], ('w', pass_, rr), True)
+
+
+def _wgmma_bulk(trip, step, t, area, accs, w, plo, phi) -> None:
+    """Tile `t`'s D of a pass over N -- its rows `plo` to `phi` of the
+    step's stages -- added into the output by bulk reductions on wgmma
+    (`element_group.Step.output` `bulk`, `wgmma_bulk_geometry`): a reduction
+    a row of D, an element's column of the output, the pass's rows of it
+    and the rows around them out to sixteen bytes, which receive +0.0.
+
+    Staged in the warpgroup's slots of A (`area`), free behind the pass's
+    last wait: each warp its rows -- `16 w + g` and `16 w + g + 8`, the
+    quad `g` of lanes holding each -- in rounds of `rows` rows of a half: the
+    quad's four lanes store their cells of its row (D's register `i` the
+    step's row `phi - 8 (i / 4 + 1) + 2 l + i % 2`, the descending order),
+    the quad's first lane the rows no cell of the pass is; fenced for the
+    async proxy and the warp's barrier; the quad's first lane adds the row
+    through its element's pointer -- nothing for a row past the tile's
+    elements, nor for a masked element -- and waits for the reduction to
+    have read it, which the warp's barrier hands to the next round.  Behind
+    the last round the warpgroup meets: the next pass's or trip's blocks of
+    A write the slots again."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import wgmma_bulk_geometry
+    b, section, fp = trip.builder, trip.section, trip.fp
+    tile = section.tile
+    tensor = step.dest
+    lane = trip.lane
+    lo, hi, stride, rows = wgmma_bulk_geometry(section, step, plo, phi)
+    height = step.rows[1] - step.rows[0]
+    first = int(tensor.bbox.lower()[0])
+    width = step.cols[1] - step.cols[0]
+    # Where the step's row `n` stands in a staged row.
+    shift = step.rows[0] - first - lo
+    count = _round_up(phi - plo, 8) // 2
+    covered = {phi - 8 * (i // 4 + 1) + i % 2 + 2 * l + shift
+               for i in range(count) for l in range(4)
+               if phi - 8 * (i // 4 + 1) + i % 2 + 2 * l < height}
+    blanks = [r for r in range(hi - lo) if r not in covered]
+    zero = b.const(0.0, fp)
     quad = b.op('div', INDEX, lane, 4, hint='q')
     inquad = b.op('rem', INDEX, lane, 4, hint='q')
-    for i in range(n // 2):
-        rr = 8 * ((i % 4) // 2)
-        local = _index(b, 'add', b.op('add', INDEX, b.op(
-            'mul', INDEX, w, 16, hint='m'), quad, hint='m'), rr, 'm')
-        dm = b.op('select', INDEX, b.op('lt', BOOL, local, tile.used,
-                                        hint='in'),
-                  _index(b, 'add', local, tile.used * t, 'm'), M, hint='m')
-        col = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2, hint='n'),
-                   n - 8 * (i // 4 + 1) + i % 2, hint='n')
-        write(dm, col, accs[i], ('w', rr), True)
+    lead = b.op('eq', BOOL, inquad, 0, hint='ql')
+    for half in (0, 8):
+        for g0 in range(0, 8, rows):
+            mine = b.op('and', BOOL, b.op('ge', BOOL, quad, g0, hint='qr'),
+                        b.op('lt', BOOL, quad, g0 + rows, hint='qr'),
+                        hint='qr')
+            at = b.op('mul', INDEX, b.op('add', INDEX, b.op(
+                'mul', INDEX, w, rows, hint='qs'), b.op(
+                'sub', INDEX, quad, g0, hint='qs'), hint='qs'), stride,
+                hint='qs')
+            with b.if_(mine):
+                for i in range(count):
+                    if 8 * ((i % 4) // 2) != half:
+                        continue
+                    top = phi - 8 * (i // 4 + 1) + i % 2
+                    if top >= height:
+                        continue
+                    n = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2,
+                                                hint='n'), top, hint='n')
+                    inside = (None if top + 6 < height else
+                              b.op('lt', BOOL, n, height, hint='in'))
+                    b.store(area, accs[i], b.op('add', INDEX, at, _index(
+                        b, 'add', n, shift, 'n'), hint='qa'),
+                            predicate=inside)
+                if blanks:
+                    with b.if_(lead):
+                        for r in blanks:
+                            b.store(area, zero, _index(b, 'add', at, r,
+                                                       'qa'))
+            b.fence(FenceKind.PROXY)
+            b.barrier(Participants.WAVE)
+            local = _index(b, 'add', b.op('add', INDEX, b.op(
+                'mul', INDEX, w, 16, hint='m'), quad, hint='m'), half, 'm')
+            inside = b.op('lt', BOOL, local, tile.used, hint='in')
+            m = b.op('select', INDEX, inside, _index(
+                b, 'add', local, tile.used * t, 'm'), 0, hint='m')
+            element = b.op('div', INDEX, m, width, hint='e')
+            quantity = _index(b, 'add', b.op('rem', INDEX, m, width,
+                                             hint='j'), step.cols[0], 'j')
+            pointer, held = trip.pointer(tensor, element)
+            issue = b.op('and', BOOL, b.op('and', BOOL, mine, lead,
+                                           hint='issue'), b.op(
+                'and', BOOL, inside, held, hint='issue'), hint='issue')
+            token = b.reduce_bulk(pointer, area, elems=hi - lo, issue=issue,
+                                  dst_index=(_address(b, tensor, first + lo,
+                                                      quantity),),
+                                  src_index=(at,))
+            # The reduction's reads of the row done, in the lane that issued
+            # it; the warp's barrier hands them to its next round's stores.
+            b.wait(token)
+            b.barrier(Participants.WAVE)
+    # Every warp's reductions read: the slots of A free for the next blocks.
+    b.barrier(Participants.ROLE)
 
 
-def _wgmma_groups(trip, step, ring, base, area, done, accs, rows) -> None:
+def _wgmma_groups(trip, step, ring, base, area, done, accs, rows,
+                  first: int = 0, taken: Optional[int] = None) -> None:
     """The high-order tile's blocks of K on wgmma as one loop -- the group
     engine (`TileRows.groups` `loop`, `Options.matrix_groups`): its body
     written once, as `_wgmma_tile` writes a block out.  Block `j`'s A, two
@@ -3122,9 +3460,12 @@ def _wgmma_groups(trip, step, ring, base, area, done, accs, rows) -> None:
     wait that leaves `hold - 1` blocks in flight, and the chunk it retired
     back to the ring.  D starts at the zeros the accumulators are declared
     with, every product adding into it: none writes D fresh under a branch.
-    `done` gives the trip's input slot back behind the loop; the last
-    `hold - 1` chunks are the caller's to give back, behind the wait that
-    retires every product."""
+    `done` gives the trip's input slot back behind the loop (None: a pass
+    before the last); the last `hold - 1` chunks are the caller's to give
+    back, behind the wait that retires every product.  With passes over N
+    (`TileRows.passes`), the loop is a pass's: its `taken` chunks from
+    `first` on, each block's rows of K read off a table, its blocks with
+    no piece in the pass none of the loop's."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
     from tensorforge.backend.pir.engines import FenceKind, MatrixDescType
     from tensorforge.generators.element_group import STAR_ROWS, STAR_SLOTS
@@ -3151,13 +3492,41 @@ def _wgmma_groups(trip, step, ring, base, area, done, accs, rows) -> None:
         widths.append(hi - lo)
     table = trip.table('tw', [w // 8 for w in widths])
     hold = ring.hold
-    with b.for_(0, len(chunks), unroll=1, hint='g') as loop:
+    taken = len(chunks) if taken is None else taken
+    blocks = [chunk[0][1] // STAR_ROWS for chunk in chunks]
+    stride = blocks != list(range(len(chunks)))
+    # The blocks a pass reads, where they are no longer the chunks in turn.
+    kts = trip.table('tk', blocks) if stride else None
+    # I in chunks (`_InputChunks`): each block's chunk's round of the trip,
+    # and whether the block is its pass's last to read it, off tables.
+    ichunks = trip.chunks
+    if ichunks is not None:
+        from tensorforge.generators.element_group import tile_input_reads
+        reads_of = tile_input_reads(section, step)
+        rounds = trip.table('tq', [r[1] for r in reads_of])
+        gives = trip.table('tr', [int(r[3]) for r in reads_of])
+        cbase = ichunks.base(trip)
+        per = ichunks.rows // STAR_ROWS
+    with b.for_(first, first + taken, unroll=1, hint='g') as loop:
         j = loop.induction
         at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),
                   slot_size, hint='ga')
+        block = (b.rawexpr(f'{kts}[{{0}}]', j, type_=INDEX, pure=True,
+                           movable=True, hint='gk') if stride else j)
+        chunk = None
+        if ichunks is not None:
+            # Its chunk's slot as it lands: every block waits, a wait on a
+            # phase complete returning at once.
+            cslot, cparity, cat = ichunks.round(trip, b.rawexpr(
+                f'{rounds}[{{0}}]', j, type_=INDEX, pure=True, movable=True,
+                hint='gq'), cbase)
+            ichunks.take(trip, cslot, cparity)
+            chunk = (cat, ichunks.row(b, b.op('div', INDEX, block, per,
+                                              hint='gh')))
         values = _star_quad(trip, step, numbers, element, b.op(
             'add', INDEX, b.op('mul', INDEX, h, 4, hint='k'), b.op(
-                'mul', INDEX, j, STAR_ROWS, hint='k'), hint='k'), live)
+                'mul', INDEX, block, STAR_ROWS, hint='k'), hint='k'), live,
+            chunk)
         for p, xs in enumerate(values):
             split = nvidia.tfconvert(b, xs)
             for part, picked in ((0, [_as_float(b, u) for u, _ in split]),
@@ -3168,6 +3537,11 @@ def _wgmma_groups(trip, step, ring, base, area, done, accs, rows) -> None:
         b.fence(FenceKind.PROXY)
         # The warpgroup's: its role's.
         b.barrier(Participants.ROLE)
+        if ichunks is not None:
+            # The pass's last read of the chunk behind: its slot back.
+            ichunks.release(trip, cslot, b.op('ne', BOOL, b.rawexpr(
+                f'{gives}[{{0}}]', j, type_=INDEX, pure=True, movable=True,
+                hint='gr'), 0, hint='gr'))
         # The block's width, the warp's alike as ptxas can tell: a dispatch
         # on a value it cannot tell is would serialize every wgmma of the
         # chain (C7519, the arrives it puts in a divergent path).
@@ -3207,13 +3581,14 @@ def _wgmma_groups(trip, step, ring, base, area, done, accs, rows) -> None:
         b.matrix_wait('wgmma', hold - 1, reads=[
             x for a, bs, _ in operands for x in list(a) + bs])
         if hold > 1:
-            with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):
+            with b.if_(b.op('ge', BOOL, j, first + hold - 1, hint='gr')):
                 ring.release(trip, b.op('sub', INDEX, j, hold - 1,
                                         hint='gr'), base)
         else:
             ring.release(trip, j, base)
-    # Every block of A computed: the trip's input slot back.
-    done()
+    if done is not None:
+        # Every block of A computed: the trip's input slot back.
+        done()
     # The descriptors' buffers, for the wait that retires every product.
     reads = [b.matrix_desc(area, 0, desc=desc, hint='a')] + [
         b.matrix_desc(ring.storage, 0, desc=MatrixDescType(
@@ -3222,22 +3597,42 @@ def _wgmma_groups(trip, step, ring, base, area, done, accs, rows) -> None:
     b.matrix_wait('wgmma', 0, registers=list(accs), reads=reads)
 
 
-def _star_quad(trip, step, numbers, element, first, live) -> list:
+def _star_source(trip, group, element, chunk):
+    """Where the folded star step reads the group operand `group` of the
+    element `element`: `(buffer, the element's first cell, the row of the
+    group operand that cell holds, its pitch)` -- its box in the trip's
+    buffer; or where it streams in chunks (`_InputChunks`), the chunk
+    `chunk` gives, `(its slot's start, its first row)`."""
+    b = trip.builder
+    if chunk is None:
+        return (trip.buffers[id(group.tensor)],
+                b.op('mul', INDEX, element, group.per_element, hint='b'),
+                group.rows[0], group.pitch)
+    chunks = trip.chunks
+    at, row = chunk
+    return (chunks.storage, b.op('add', INDEX, at, b.op(
+        'mul', INDEX, element, chunks.per_element, hint='b'), hint='b'), row,
+        chunks.rows)
+
+
+def _star_quad(trip, step, numbers, element, first, live,
+               chunk=None) -> list:
     """Four rows of K of every product from row `first` of the products'
     contraction on, `first` a value on four rows: what a thread of wgmma's
     folded star step computes of its row of A (`_wgmma_star`) -- the group
     operand's four rows of a column one 16-byte read, from the group's
     first row where they lie past what the star step writes, and zero
-    there -- as `_star_block` does for a block a number gives."""
+    there -- as `_star_block` does for a block a number gives.  Read from
+    the chunk of I `chunk` names where I streams in chunks
+    (`_star_source`): from its first row there."""
     from tensorforge.generators.element_group import star_mixes
     b, section, fp = trip.builder, trip.section, trip.fp
     mixes = star_mixes(section, step)
     lead = mixes[0].products[0]
     group = section.buffer(lead.first.tensor)
-    source = trip.buffers[id(group.tensor)]
-    base = b.op('mul', INDEX, element, group.per_element, hint='b')
+    source, base, top, pitch = _star_source(trip, group, element, chunk)
     start = step.products[0].depth[0]
-    if group.pitch % 4 or (start - group.rows[0]) % 4:
+    if pitch % 4 or (start - group.rows[0]) % 4:
         raise InternalError(f'{group.tensor.alias}: rows of K a folded star '
                             f'step reads four at a time off four floats')
     k = _index(b, 'add', first, start, 'k')
@@ -3245,13 +3640,12 @@ def _star_quad(trip, step, numbers, element, first, live) -> list:
     inside = {e: [b.op('lt', BOOL, _index(b, 'add', k, v, 'k'), e,
                        hint='in') for v in range(4)] for e in set(bound)}
     # The read stays inside the group's rows: past them it reads its first.
-    read = b.op('select', INDEX, inside[max(bound)][0], k, group.rows[0],
-                hint='k')
+    read = b.op('select', INDEX, inside[max(bound)][0], k, top, hint='k')
     vector = ScalarType(section.dtype, 4)
     accs = [[None] * 4 for _ in step.products]
     for i, q in enumerate(range(*lead.depth)):
         at = _index(b, 'add', base, _box_index(
-            b, read, q, (group.rows[0], group.cols[0]), group.pitch), 'a')
+            b, read, q, (top, group.cols[0]), pitch), 'a')
         x = b.load(source, at, type_=vector, align=16, hint='x')
         xs = [b.extract(x, v, hint='x') for v in range(4)]
         for p in range(len(step.products)):
@@ -3528,6 +3922,26 @@ def _tcgen05_groups(trip, step, fold, ring, base, trips, issue,
                                 desc=desc, hint='b')
                   for k in range(1 + stage.split)]
             plan = _plan(stage)
+            if widths[-1] > TCGEN05_N_MAX:
+                # D wider than an instruction's N (o12, `element_group.
+                # tile_tmem`): a block's products in two, its first 256
+                # columns and, where the block is wider, the rest.
+                head = b.op('select', INDEX, b.op(
+                    'lt', BOOL, n, TCGEN05_N_MAX, hint='gw'), n,
+                    TCGEN05_N_MAX, hint='gh')
+                _tcgen05_cut(b, tmem, ring, start, part, p, stage, plan,
+                             at, lo, issue, fresh if first else 1, head, 0,
+                             sorted({min(w, TCGEN05_N_MAX) for w in widths}))
+                with b.if_(b.op('gt', BOOL, n, TCGEN05_N_MAX, hint='gw')):
+                    _tcgen05_cut(
+                        b, tmem, ring, start, part, p, stage, plan, at, lo,
+                        issue, fresh if first else 1,
+                        b.op('sub', INDEX, n, TCGEN05_N_MAX, hint='gt'),
+                        TCGEN05_N_MAX, sorted({w - TCGEN05_N_MAX
+                                               for w in widths
+                                               if w > TCGEN05_N_MAX}))
+                first = False
+                continue
             for ia, ib in plan.products:
                 b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
                           enable_input_d=fresh if first else 1,
@@ -3544,6 +3958,32 @@ def _tcgen05_groups(trip, step, fold, ring, base, trips, issue,
                                         hint='gr'), base, issue)
         else:
             ring.release(trip, j, base, issue)
+
+
+def _tcgen05_cut(b, tmem, ring, start, part, p, stage, plan, at, lo, issue,
+                 enable, n, column: int, widths) -> None:
+    """Product `p`'s terms of a block of tcgen05's group loop over its N
+    `n` columns from `column` on (`_tcgen05_groups`, where D is wider than
+    an instruction's N): B's descriptors that many core matrices of N on --
+    eight columns an SBO, `STAR_ROWS * 8` elements -- D's columns from the
+    block's first plus `column`, the first term `enable`, every term of the
+    cut before the next cut's, a run of the plan each."""
+    from tensorforge.backend.pir.engines import MatrixDescType
+    from tensorforge.generators.element_group import STAR_ROWS
+    desc = MatrixDescType(Datatype.TF32, lbo=stage.leading,
+                          sbo=STAR_ROWS * 32, form='tcgen05')
+    bs = [b.matrix_desc(ring.storage, b.op('add', INDEX, b.op(
+        'add', INDEX, start, b.op('mul', INDEX, part, 2 * p + k, hint='gb'),
+        hint='gb'), column * STAR_ROWS, hint='gb'), desc=desc, hint='b')
+          for k in range(1 + stage.split)]
+    d = b.op('add', INDEX, lo, column, hint='gl') if column else lo
+    for ia, ib in plan.products:
+        b.tcgen05(n, tmem, bs[ib], tmem, issue=issue, enable_input_d=enable,
+                  a_column=b.op('add', INDEX, at,
+                                2 * STAR_ROWS * p + STAR_ROWS * ia,
+                                hint='gc'),
+                  d_column=d, term=(ia, ib), plan=plan, widths=widths)
+        enable = 1
 
 
 def _tile_output(trip, step, M, base, release) -> None:
@@ -5298,6 +5738,28 @@ class MultiElementSection(AbstractInstruction):
         with roles.role('elements'):
             self._consume(trip, ring, slot, parity)
 
+    def _tile_windows(self, trip, slot) -> list:
+        """The trip's slot `slot` of the tile's input ring: each input's
+        window of it, as the trip's buffers -- I's not, where it streams in
+        chunks through a ring of its own (`trip.chunks`)."""
+        b = trip.builder
+        section = self._group.section
+        elements = self._group.elements
+        trip.chunks = self._operators.chunks
+        chunked = trip.chunks.buffer if trip.chunks is not None else None
+        windows = []
+        for buffer in section.inputs:
+            if chunked is not None and buffer.tensor is chunked.tensor:
+                continue
+            trip.buffers[id(buffer.tensor)] = window = b.alloc(
+                section.dtype, (elements * buffer.per_element,),
+                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
+                stages=section.ring, stage=slot,
+                hint=_hint('r', buffer.tensor), identity=self._operators.
+                ring_slots[id(buffer.tensor)], handed=True)
+            windows.append(window)
+        return windows
+
     def _tile(self, trip) -> None:
         """A trip of the high-order tile's own layout on wgmma
         (`element_group.rowless`, `TileRows`): the block in a role a
@@ -5348,15 +5810,7 @@ class MultiElementSection(AbstractInstruction):
             raise InternalError('the high-order tile without B\'s prepared '
                                 'ring, which its producer fills')
         slot, parity = b.ring_round(ring, _trip_count(trip))
-        elements = self._group.elements
-        for buffer in section.inputs:
-            trip.buffers[id(buffer.tensor)] = b.alloc(
-                section.dtype, (elements * buffer.per_element,),
-                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
-                stages=section.ring, stage=slot,
-                hint=_hint('r', buffer.tensor), identity=self._operators.
-                ring_slots[id(buffer.tensor)], handed=True)
-        windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
+        windows = self._tile_windows(trip, slot)
         # A's slots, a buffer each warpgroup's -- no role's accesses meet
         # another's -- in the canonical layout its products read
         # (`_wgmma_tile`).
@@ -5380,17 +5834,24 @@ class MultiElementSection(AbstractInstruction):
                 _wgmma_tile(trip, step, t, areas[t], done)
         with roles.role('producer'):
             warp = b.thread_id('y')
-            with b.if_(b.op('eq', BOOL, warp, first, hint='pin')):
+            # The two warps' arms of one branch: neither waits for the
+            # other's -- the first's rounds of I's chunks wait for blocks
+            # whose B the second fills.
+            arms = b.if_else(b.op('eq', BOOL, warp, first, hint='pin'), ())
+            with arms.then():
                 self._produce(trip, ring, slot, parity, bound[GROUP_KEY],
                               bound[MASK_KEY], warp=first)
-            issue = b.op('and', BOOL, b.op('eq', BOOL, warp, first + 1,
-                                           hint='pop'),
-                         b.op('eq', BOOL, trip.lane, 0, hint='pop'),
-                         hint='pop')
-            with b.if_(issue):
-                base = operator.base(trip, 0)
-                for j in range(len(operator.chunks)):
-                    operator.fill(trip, j, base, issue)
+                self._produce_chunks(trip, bound[GROUP_KEY], bound[MASK_KEY],
+                                     first)
+            with arms.otherwise():
+                issue = b.op('and', BOOL, b.op('eq', BOOL, warp, first + 1,
+                                               hint='pop'),
+                             b.op('eq', BOOL, trip.lane, 0, hint='pop'),
+                             hint='pop')
+                with b.if_(issue):
+                    base = operator.base(trip, 0)
+                    for j in range(len(operator.chunks)):
+                        operator.fill(trip, j, base, issue)
 
     def _tile_tcgen05(self, trip) -> None:
         """A trip of the high-order tile's own layout on tcgen05
@@ -5418,7 +5879,8 @@ class MultiElementSection(AbstractInstruction):
         from tensorforge.backend.instructions.batch_loop import (
             BatchLoop, GROUP_KEY, MASK_KEY, SCHEDULE_KEY)
         from tensorforge.backend.pir.engines import FenceKind
-        from tensorforge.generators.element_group import (TILE_TCGEN05,
+        from tensorforge.generators.element_group import (STAR_ROWS,
+                                                          TILE_TCGEN05,
                                                           WARPGROUP_WARPS,
                                                           matrix_shape)
         b = trip.builder
@@ -5440,14 +5902,7 @@ class MultiElementSection(AbstractInstruction):
         trips = _trip_count(trip)
         slot, parity = b.ring_round(ring, trips)
         elements = self._group.elements
-        for buffer in section.inputs:
-            trip.buffers[id(buffer.tensor)] = b.alloc(
-                section.dtype, (elements * buffer.per_element,),
-                MemSpace.SHARED, arena=GeneralLexicon.TOTAL_SHR_MEM,
-                stages=section.ring, stage=slot,
-                hint=_hint('r', buffer.tensor), identity=self._operators.
-                ring_slots[id(buffer.tensor)], handed=True)
-        windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
+        windows = self._tile_windows(trip, slot)
         trip.pointer = lambda tensor, element: _group_pointer(
             trip, self._context, tensor, element)
         _, n16, _ = matrix_shape('tcgen05', 100)
@@ -5481,16 +5936,39 @@ class MultiElementSection(AbstractInstruction):
         with roles.role('star'):
             b.ring_take(ring, slot, parity, writes=windows)
             held = fold.rows(trip, M)
+            if trip.chunks is not None:
+                # I streams in chunks through a ring of its own: the input
+                # slot holds the trip's star matrices alone, in registers
+                # now -- back at once, the next trip's staged under this one.
+                b.barrier(Participants.WAVE)
+                b.ring_release(ring, slot, lane0)
             every = b.const(True, BOOL)
             if tile.groups == 'loop':
                 fold.fill_loop(trip, held, trips, every)
             else:
+                # I in chunks (`_InputChunks`): every band takes a chunk's
+                # slot at its first block and gives it back behind its last.
+                chunks = trip.chunks
+                per = chunks.rows // STAR_ROWS if chunks is not None else 0
+                cbase = chunks.base(trip) if chunks is not None else None
                 for j in range(fold.blocks):
+                    chunk = None
+                    if chunks is not None:
+                        cslot, cparity, cat = chunks.round(trip, j // per,
+                                                           cbase)
+                        if j % per == 0:
+                            chunks.take(trip, cslot, cparity)
+                        chunk = (cat, chunks.row(b, j // per))
                     jslot, jparity, at = fold.round(trips, j)
-                    fold.fill(trip, held, j, jslot, jparity, at, every)
-            # Every block of A computed: the input slot back.
-            b.barrier(Participants.WAVE)
-            b.ring_release(ring, slot, lane0)
+                    fold.fill(trip, held, j, jslot, jparity, at, every,
+                              chunk)
+                    if chunks is not None and (j % per == per - 1
+                                               or j + 1 == fold.blocks):
+                        chunks.release(trip, cslot)
+            if trip.chunks is None:
+                # Every block of A computed: the input slot back.
+                b.barrier(Participants.WAVE)
+                b.ring_release(ring, slot, lane0)
         with roles.role('epilogue'):
             b.ring_take(dring, dslot, dparity)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
@@ -5515,6 +5993,8 @@ class MultiElementSection(AbstractInstruction):
                 scheduled[0].claim(b, lane0)
             self._produce(trip, ring, slot, parity, bound[GROUP_KEY],
                           bound[MASK_KEY], warp=warps['input'])
+            self._produce_chunks(trip, bound[GROUP_KEY], bound[MASK_KEY],
+                                 warps['input'])
             if scheduled is not None:
                 scheduled[0].publish(b, trips, scheduled[1], lane0)
         with roles.role('operator'):
@@ -5609,7 +6089,8 @@ class MultiElementSection(AbstractInstruction):
         section = self._group.section
         elements = self._group.elements
         lane = trip.lane
-        windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs]
+        windows = [trip.buffers[id(buf.tensor)] for buf in section.inputs
+                   if id(buf.tensor) in trip.buffers]
         b.ring_acquire(ring, slot, parity, writes=windows)
         # The producer's first warp: where the producer is a warpgroup
         # (`element_group.register_budgets`), the others keep its trips and
@@ -5623,7 +6104,11 @@ class MultiElementSection(AbstractInstruction):
         source = b.op('select', SIZE, active_of(b, element), element, group,
                       hint='e')
         tokens, nbytes, rest = [], 0, []
+        chunked = trip.chunks.buffer if trip.chunks is not None else None
         for buffer, symbol in zip(section.inputs, self._inputs):
+            if chunked is not None and buffer.tensor is chunked.tensor:
+                # Its chunks through a ring of their own (`_produce_chunks`).
+                continue
             window = trip.buffers[id(buffer.tensor)]
             if not bulk_input(buffer):
                 rest.append((buffer, symbol, window))
@@ -5652,6 +6137,61 @@ class MultiElementSection(AbstractInstruction):
                                         b.op('eq', BOOL, lane, 0),
                                         hint='first'),
                        tx=nbytes, tokens=tokens)
+
+    def _produce_chunks(self, trip, group, active_of, warp) -> None:
+        """The trip's chunks of I (`_InputChunks`), by the producer's warp
+        `warp` behind the trip's other inputs, a round at a time in the
+        trip's order (`element_group.tile_input_rounds`): the slot back from
+        its last round's consumers; lane `e` element `e` of the group -- the
+        group's first where `e` is none of the batch, as `_produce` takes it
+        -- a bulk copy a column of the chunk's rows, rounded to four floats
+        (`element_group.bulk_rows`'s rule: inside the column, `_bulk_source`
+        says); the warp's barrier, and its first lane's arrival announcing
+        the chunk's bytes on the slot's full side."""
+        from tensorforge.backend.pir.build import RingSlot
+        from tensorforge.backend.pir.core import SIZE
+        from tensorforge.generators.element_group import input_chunks
+        chunks = trip.chunks
+        if chunks is None:
+            return
+        b = trip.builder
+        section = self._group.section
+        elements = self._group.elements
+        lane = trip.lane
+        buffer = chunks.buffer
+        (symbol,) = [sym for buf, sym in zip(section.inputs, self._inputs)
+                     if buf.tensor is buffer.tensor]
+        first_warp = b.op('eq', BOOL, b.thread_id('y'), warp, hint='pw')
+        mine = b.op('and', BOOL, first_warp,
+                    b.op('lt', BOOL, lane, elements, hint='mine'),
+                    hint='mine')
+        element = b.op('add', SIZE, group, lane, hint='e')
+        source = b.op('select', SIZE, active_of(b, element), element, group,
+                      hint='e')
+        pointer = _element_pointer(b, self._context, symbol, source,
+                                   section.dtype)
+        base = b.op('mul', INDEX, lane, chunks.per_element, hint='b')
+        first = b.op('and', BOOL, first_warp, b.op('eq', BOOL, lane, 0),
+                     hint='first')
+        cbase = chunks.base(trip)
+        cuts = input_chunks(buffer, chunks.rows)
+        for i, h in enumerate(chunks.order):
+            lo, hi = cuts[h]
+            rows = -(-(hi - lo) // 4) * 4
+            slot, parity, at = chunks.round(trip, i, cbase)
+            b.ring_acquire(chunks.ring, slot, parity,
+                           writes=[chunks.storage])
+            start = b.op('add', INDEX, at, base, hint='ib')
+            tokens = [b.copy_bulk(
+                chunks.storage, pointer, barrier=RingSlot(chunks.ring, slot),
+                dst_index=(_index(b, 'add', start, c * chunks.rows, 'd'),),
+                src_index=(_address(b, buffer.tensor, lo,
+                                    buffer.cols[0] + c),),
+                elems=rows, predicate=mine) for c in range(chunks.width)]
+            b.barrier(Participants.WAVE)
+            b.ring_publish(chunks.ring, slot, first,
+                           tx=elements * chunks.width * rows
+                           * section.dtype.size(), tokens=tokens)
 
     def _produce_copies(self, trip, buffers, group, active_of) -> None:
         """The inputs no bulk copy takes, by the producer's first warp, each

@@ -294,11 +294,11 @@ def parse_matrix_star(text: str) -> str:
 
 
 #: What `Options.matrix_output` takes.
-MATRIX_OUTPUT = ('red', 'bulk', 'box')
+MATRIX_OUTPUT = ('auto', 'red', 'bulk', 'box')
 
 
 def parse_matrix_output(text: str) -> str:
-  """`red`, `bulk` or `box` (`Options.matrix_output`)."""
+  """`auto`, `red`, `bulk` or `box` (`Options.matrix_output`)."""
   value = str(text).strip().lower()
   if value not in MATRIX_OUTPUT:
     raise ValueError(f'expected one of {MATRIX_OUTPUT}, got {text!r}')
@@ -329,6 +329,39 @@ def parse_matrix_tile(text: str) -> str:
   return value
 
 
+def parse_matrix_passes(text: str) -> int:
+  """0 (`auto`) or 1 to 8 (`Options.matrix_passes`)."""
+  value = str(text).strip().lower()
+  if value == 'auto':
+    return 0
+  count = int(value)
+  if not 0 <= count <= 8:
+    raise ValueError(f'matrix_passes is auto or 1 to 8, not {count}')
+  return count
+
+
+#: `Options.matrix_input_chunks`'s value for I staged whole, a trip a slot of
+#: the input ring (`auto` is 0).
+INPUT_CHUNKS_WHOLE = -1
+
+
+def parse_matrix_input_chunks(text: str) -> int:
+  """0 (`auto`), `INPUT_CHUNKS_WHOLE` (`whole`), or rows of K, a multiple of
+  8 from 8 to 128 (`Options.matrix_input_chunks`)."""
+  value = str(text).strip().lower()
+  if value == 'auto':
+    return 0
+  if value == 'whole':
+    return INPUT_CHUNKS_WHOLE
+  rows = int(value)
+  if rows in (0, INPUT_CHUNKS_WHOLE):
+    return rows
+  if not 8 <= rows <= 128 or rows % 8:
+    raise ValueError(f'matrix_input_chunks is auto, whole or a multiple of 8 '
+                     f'from 8 to 128, not {rows}')
+  return rows
+
+
 #: What `Options.tile_schedule` takes.
 TILE_SCHEDULES = ('static', 'clc', 'auto')
 
@@ -350,11 +383,11 @@ def parse_matrix_bands(text: str) -> int:
 
 
 #: What `Options.matrix_groups` takes.
-MATRIX_GROUPS = ('loop', 'unrolled')
+MATRIX_GROUPS = ('auto', 'loop', 'unrolled')
 
 
 def parse_matrix_groups(text: str) -> str:
-  """`loop` or `unrolled` (`Options.matrix_groups`)."""
+  """`auto`, `loop` or `unrolled` (`Options.matrix_groups`)."""
   value = str(text).strip().lower()
   if value not in MATRIX_GROUPS:
     raise ValueError(f'expected one of {MATRIX_GROUPS}, got {text!r}')
@@ -2992,14 +3025,24 @@ declare('matrix_star',
             'where a section cannot, and it takes `halves` there).')
 
 declare('matrix_output',
-        default='red',
+        default='auto',
         env='TF_MATRIX_OUTPUT',
         parse=parse_matrix_output,
         doc='How a matrix step of the multi-element layout adds its D into '
-            'the element\'s output (`generators.element_group`).  `red`, the '
-            'default: a reduction a cell (`red.global.add`) through the '
-            'pointer of the row\'s element, from the accumulators -- or, on '
-            'tcgen05, from a stage of D in shared memory.  `bulk`: D staged in '
+            'the element\'s output (`generators.element_group`).  `auto`, the '
+            'default: `red`, but on the high-order tile on tcgen05 '
+            '(`matrix_tile` `high`) bulk reductions -- `bulk` where an '
+            'element\'s rows of D are fewer than 64, `box` from there on '
+            '(`element_group.tile_output`), where they keep three quarters '
+            'of the elements a reduction a cell takes -- as a GB200 measured '
+            'the tile with two star bands: at o6 bulk 3.06 ns an element, box '
+            '3.45 and red 4.67; at o8 box 6.61, bulk 7.00 and red 7.20; at '
+            'o10 box 13.33 and bulk 13.28 at twelve elements against red '
+            '17.11 at fourteen; o12, five elements against fourteen, red.  '
+            '`red`: a '
+            'reduction a cell (`red.global.add`) through the pointer of the '
+            'row\'s element, from the accumulators -- or, on tcgen05, from a '
+            'stage of D in shared memory.  `bulk`: D staged in '
             'shared memory a column of the element\'s output at a time, the '
             'rows the step writes rounded out to sixteen bytes, and each '
             'column added into the output by a bulk reduction '
@@ -3066,6 +3109,20 @@ declare('matrix_spans',
             '`dense`, every product\'s whole width, as the tilings before '
             'the tile.')
 
+declare('matrix_passes',
+        default=0,
+        env='TF_MATRIX_PASSES',
+        parse=parse_matrix_passes,
+        doc='The high-order tile\'s passes over N on wgmma (`matrix_tile` '
+            '`high`, `element_group.TileRows.passes`): D a pass\'s rows of N '
+            'at a time in the accumulators, every block of K\'s A computed '
+            'again a pass and its products of the pass\'s rows -- the order '
+            'D outer, where D whole does not fit the registers.  `auto`, the '
+            'default: the fewest whose D a consumer thread holds in '
+            '`TILE_ACCUMULATORS` registers (o12: two); 1 to 8 forced, for '
+            'tests and sweeps.  tcgen05 keeps D whole in tensor memory, its '
+            'products cut at an instruction\'s 256 columns.')
+
 declare('tile_schedule',
         default='static',
         env='TF_TILE_SCHEDULE',
@@ -3084,31 +3141,56 @@ declare('tile_schedule',
             'from it, and losses below two waves.  Where the target has none '
             '(`Target.launch_control`: sm_100 on), static.')
 
+declare('matrix_input_chunks',
+        default=0,
+        env='TF_MATRIX_INPUT_CHUNKS',
+        parse=parse_matrix_input_chunks,
+        doc='How the high-order tile stages I, the group operand its star '
+            'step reads (`matrix_tile` `high`, `element_group.TileRows.'
+            'chunk`).  `auto`, the default: in chunks of `TILE_CHUNK` (32) '
+            'rows of K where I has more, each chunk of every element a slot '
+            'of a ring of its own (`TILE_CHUNK_SLOTS`), streamed in the order '
+            'the blocks of K read them and again a pass over N -- the input '
+            'ring a trip\'s star matrices alone; `whole`: I in the input '
+            'ring\'s slot with them, a trip at a time, as before; 8 to 128 '
+            'rows (a multiple of 8, a block of K\'s) forced, for tests and '
+            'sweeps.  The hand-written kernels stream I in chunks of 32 rows '
+            'through two slots at every order.')
+
 declare('matrix_bands',
-        default=3,
+        default=2,
         env='TF_MATRIX_BANDS',
         parse=parse_matrix_bands,
         doc='The star role\'s bands of the high-order tile on tcgen05 '
             '(`matrix_tile` `high`, `element_group.TileRows.bands`): four '
             'warps a band, each band covering tensor memory\'s 128 lanes and '
-            'taking the blocks of A in turn.  3, the default, the fourteen '
-            'element warps\' twelve that mixed; fewer bands are fewer warps '
-            'of more registers each.  1 to 4; a search parameter.')
+            'taking the blocks of A in turn, at most A\'s slots of tensor '
+            'memory.  2, the default: fewer bands are fewer warps of more '
+            'registers each -- at o8 128 registers a thread and 28 B spilled '
+            'against three bands\' 96 and 288 B -- and a GB200 measured two '
+            'bands faster than three at o6 and o8 (o8: 7.20 ns an element '
+            'against 11.39; o6: 4.67 against 4.86).  1 to 4; a search '
+            'parameter.')
 
 declare('matrix_groups',
-        default='loop',
+        default='auto',
         env='TF_MATRIX_GROUPS',
         parse=parse_matrix_groups,
         doc='How the high-order tile walks its groups -- its blocks of K, a '
             'chunk of B each (`matrix_tile` `high`, `multi_element.'
-            '_wgmma_groups`): `loop`, the default, one loop over them, its '
-            'body written once -- a block\'s A, its chunk, one fence and one '
-            'dispatch on the block\'s width to the products at that '
-            'immediate N, read off a table of the generated file -- so that '
-            'the code does not grow with the groups (the hand-written '
-            'kernels\' group engine); `unrolled`, each group written out, as '
-            'before.  On wgmma; tcgen05\'s groups stay written out until its '
-            'issuing thread takes the widths at run time.')
+            '_wgmma_groups`): `auto`, the default, each group written out on '
+            'wgmma and one loop on tcgen05 (`element_group.tile_groups`), as '
+            'a GH200 and a GB200 measured them (262144 elements, ns an '
+            'element: wgmma written out at o8 11.49 against the loop\'s 13.47, '
+            'at o12 72.74 against 96.32 -- the loop\'s dispatch and its '
+            'descriptors\' arithmetic a third to a half more instructions; '
+            'tcgen05\'s loop at o8 11.39 against 13.33, at o6 4.86 against '
+            '5.27).  `loop`: one loop over them, its body written once -- a '
+            'block\'s A, its chunk, one fence and one dispatch on the block\'s '
+            'width to the products at that immediate N, read off a table of '
+            'the generated file -- so that the code does not grow with the '
+            'groups (the hand-written kernels\' group engine); `unrolled`: '
+            'each group written out.')
 
 declare('matrix_consumers',
         default=2,

@@ -45,6 +45,11 @@ SYSTEM = 'elastic-linearck'
 
 def _volume_description(order=6, precision='s'):
     import seissol_suite as fx
+    if order in (10, 12):
+        # Orders the recordings stop short of: the high-order tile's
+        # fixture, order 8's description at the order's basis.
+        import hiorder_fixture
+        return hiorder_fixture.description(order, precision)
     return fx.description(SYSTEM, f'{SYSTEM}-o{order}-{precision}',
                           'gpu_volume')
 

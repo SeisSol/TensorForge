@@ -12,9 +12,10 @@ at as many elements as tensor memory's lanes hold.
 B streams in kept spans (`Options.matrix_spans`, `element_group.
 tile_chunks`): of each product's block of K only its tiles of N from the
 first that holds an entry to the last, in the engine's granules, each
-multiplied at its own N into D's columns of it.  On wgmma the blocks are one
-loop (`Options.matrix_groups`, `multi_element._wgmma_groups`): its body
-written once, one dispatch a block on the block's width.
+multiplied at its own N into D's columns of it.  The blocks are one loop
+(`Options.matrix_groups`, `multi_element._wgmma_groups`) -- its body written
+once, one dispatch a block on the block's width -- or written out, as each
+engine measured faster (`element_group.tile_groups`).
 
 What is checked here: the plan -- the options' defaults, the rows' map, the
 group and the block the fill rule takes on each engine, the refusals and
@@ -37,6 +38,7 @@ import subprocess
 import types
 import warnings
 
+import numpy as np
 import pytest
 
 import test_multi_element as me
@@ -100,10 +102,13 @@ def test_on_wgmma_two_consumer_warpgroups_of_seven_elements(order):
     on 63 of its 64 rows -- not E/4 warpgroups each issuing 64 rows over
     9E -- and two producer warps behind them; no warp an element's, the
     batch loop's rows all a producer's; the star folded, B streamed
-    prepared through its ring, the inputs through the producer's."""
+    prepared through its ring, the inputs through the producer's -- I in
+    chunks of 32 rows of K past o4's ten (`TileRows.chunk`)."""
     group = _group(order)
     section = group.section
-    assert section.tile == eg.TileRows('wgmma', 9, 7, 2, groups='loop')
+    chunk = 32 if order > 4 else 0
+    assert section.tile == eg.TileRows('wgmma', 9, 7, 2, groups='unrolled',
+                                       chunk=chunk, cslots=2 if chunk else 0)
     assert group.elements == 14 and group.warps == 10
     assert group.rows == 0 and group.producers == 10
     assert eg.rowless(section) and not section.roles
@@ -115,24 +120,31 @@ def test_on_wgmma_two_consumer_warpgroups_of_seven_elements(order):
 
 def test_one_consumer_warpgroup_where_the_options_say_so():
     group = _group(8, matrix_consumers=1)
-    assert group.section.tile == eg.TileRows('wgmma', 9, 7, 1, groups='loop')
+    assert group.section.tile == eg.TileRows('wgmma', 9, 7, 1,
+                                             groups='unrolled', chunk=32,
+                                             cslots=2)
     assert group.elements == 7 and group.warps == 6
 
 
 @pytest.mark.parametrize('order', [4, 6, 8])
 def test_on_tcgen05_the_tile_s_own_layout_at_fourteen_elements(order):
     """sm_100a: fourteen elements on 126 of tensor memory's 128 lanes, the
-    tile's own layout -- three star bands, the epilogue warpgroup and the
-    input, operator and mma warps, 19, no warp an element's -- D in two
-    slots of tensor memory, the inputs through a ring, whatever the table's
-    group or `matrix_roles`."""
+    tile's own layout -- two star bands (`TILE_BANDS`), the epilogue
+    warpgroup and the input, operator and mma warps, 15, no warp an
+    element's -- D in two slots of tensor memory, added by bulk reductions
+    (`tile_output`: a column's at o4 and o6, the element's box at o8), the
+    inputs through a ring, whatever the table's group or `matrix_roles` --
+    I in chunks of 32 rows of K past o4's ten."""
     group = _group(order, 'sm_100a')
     section = group.section
+    chunk = 32 if order > 4 else 0
     assert section.tile == eg.TileRows('tcgen05', 9, 14, 1, groups='loop',
-                                       bands=3, dslots=2)
+                                       bands=2, dslots=2, aslots=4, chunk=chunk,
+                                       cslots=2 if chunk else 0,
+                                       output='box' if order == 8 else 'bulk')
     assert not section.roles and eg.rowless(section) and section.ring >= 1
     assert group.elements == 14 and group.rows == 0
-    assert group.warps == 4 * 3 + 4 + 3 == eg.tile_warps(section.tile)
+    assert group.warps == 4 * 2 + 4 + 3 == eg.tile_warps(section.tile)
 
 
 def test_d_s_slots_where_tensor_memory_holds_them():
@@ -147,7 +159,12 @@ def test_d_s_slots_where_tensor_memory_holds_them():
     section = _group(8, 'sm_100a').section
     (step,) = [s for s in section.steps if s.lowering == 'tcgen05']
     columns, at, _ = mm._tcgen05_columns(section, step)
+    # A's ring four slots, two a band (`_Fold`, `_fold_bands`); three at
+    # three bands, one each.
     assert (columns, at) == (2 * 128 + 4 * 48, (256, 272, 288))
+    three = _group(8, 'sm_100a', matrix_bands=3).section
+    (step3,) = [s for s in three.steps if s.lowering == 'tcgen05']
+    assert mm._tcgen05_columns(three, step3)[0] == 2 * 128 + 3 * 48
     assert mm.tmem_columns(section) == 512
     # Each slot of D a pair of mbarriers in shared memory.
     single = dataclasses.replace(section, tile=dataclasses.replace(
@@ -199,6 +216,34 @@ def test_the_epilogue_s_order_in_the_kernel(output):
     assert any(wait < k <= wait + 2 for k in at('barrier.sync'))
 
 
+def _capped(monkeypatch, cap):
+    """The plan's shared memory capped so that no group of more than `cap`
+    elements fits: the tile on fewer elements than its star warps, as
+    o12's bulk reductions (five) and I whole (seven) take it."""
+    shared = eg.shared_bytes
+    monkeypatch.setattr(eg, 'shared_bytes', lambda section, elements: (
+        shared(section, elements) if elements <= cap else 1 << 30))
+
+
+@pytest.mark.parametrize('cap', [5, 7])
+def test_fewer_elements_than_star_warps_on_the_oracle(monkeypatch, cap):
+    """tcgen05's tile on five and seven elements, fewer than its two bands'
+    eight star warps: each warp its place among the block's warps, not its
+    element -- the modulo put warps 5 to 7 in the first band's place, the
+    second band's A short of their arrivals, and the block hung (J3, o12
+    bulk, box and I whole on a GB200).  Three trips and more, against NumPy
+    without a race, and bit for bit what fourteen elements give."""
+    _, whole = _on_the_oracle('sm_100a', 4, 31)
+    _capped(monkeypatch, cap)
+    gen, got = _on_the_oracle('sm_100a', 4, 31)
+    assert gen.built._element_group.elements == cap
+    assert (got == whole).all()
+    src = gen.get_kernel()
+    # The bands by the warp, the batch loop's lanes by the element.
+    assert re.search(r'_band = threadIdx\.y / 4;', src)
+    assert f'threadIdx.y % {cap};' in src
+
+
 def test_two_bands_over_o6_s_blocks_on_the_oracle():
     """Two star bands over o6's five blocks of K, two trips: each band its
     blocks two apart, the second band's three past the first's -- where
@@ -208,8 +253,64 @@ def test_two_bands_over_o6_s_blocks_on_the_oracle():
 
 
 def test_two_bands_are_fewer_warps():
-    group = _group(8, 'sm_100a', matrix_bands=2)
+    group = _group(8, 'sm_100a')
     assert group.section.tile.bands == 2 and group.warps == 15
+    three = _group(8, 'sm_100a', matrix_bands=3)
+    assert three.section.tile.bands == 3 and three.warps == 19
+
+
+def test_the_tile_s_defaults_on_tcgen05():
+    """What a GB200 measured (JD, 262144 elements): two star bands -- o8
+    7.20 ns an element against three's 11.39, o6 4.67 against 4.86 -- and
+    D added by bulk reductions -- o6 a column's 3.06 against the box's 3.45
+    and a reduction a cell's 4.67, o8 the box's 6.61 against 7.00 and 7.20
+    -- so `matrix_bands` 2 and `matrix_output` `auto`: bulk where an
+    element's rows of D are fewer than `TILE_BOX_ROWS`, box from there on,
+    a reduction a cell where the bulk reductions' staged D would take the
+    group more than a quarter of its elements (o12) and on wgmma -- o10's
+    box at twelve elements 13.33 against red's 17.11 at fourteen.  `auto`
+    is `red` everywhere else: a kernel without the tile is the kernel it
+    was."""
+    from tensorforge.common.options import parse_matrix_output, registry
+    assert registry()['matrix_bands'].default == eg.TILE_BANDS == 2
+    assert registry()['matrix_output'].default == 'auto'
+    assert parse_matrix_output('Auto') == 'auto'
+    context = me._context('sm_100a', 's', multi_element='force', **HIGH)
+    assert eg.TILE_BOX_ROWS == 64
+    assert [eg.tile_output('tcgen05', rows, context)
+            for rows in (20, 56, 63, 64, 120, 220)] == [
+        'bulk', 'bulk', 'bulk', 'box', 'box', 'box']
+    assert eg.tile_output('wgmma', 120, context) == 'red'
+    for asked in ('red', 'bulk', 'box'):
+        asked_context = me._context('sm_100a', 's', multi_element='force',
+                                    **{**HIGH, 'matrix_output': asked})
+        assert eg.tile_output('tcgen05', 120, asked_context) == asked
+    assert [_group(o, 'sm_100a').section.tile.output
+            for o in (4, 6, 8, 10, 12)] == ['bulk', 'bulk', 'box', 'box',
+                                             'red']
+    # Where they keep three quarters of a reduction a cell's elements:
+    # o10's twelve of fourteen, which a GB200 measured faster; not o12's
+    # five.
+    assert eg.TILE_OUTPUT_KEEP == 0.75
+    assert _group(10, 'sm_100a').elements == 12
+    assert _group(10, 'sm_100a', matrix_output='red').elements == 14
+    assert _group(12, 'sm_100a', matrix_output='box').elements == 5
+    assert _group(12, 'sm_100a').elements == 14
+    # Three bands asked: at o12 two, on A's two slots of tensor memory.
+    assert _group(12, 'sm_100a', matrix_bands=3).section.tile.bands == 2
+    assert _group(8, 'sm_90a').section.tile.output == 'red'
+
+    def body(gen):
+        # The kernel but its name and the options' comment, which lists
+        # `red` asked now that it is not the default.
+        text = re.sub(r'kernel_kernel_[0-9a-f]+', 'kernel', gen.get_kernel())
+        return [line for line in text.splitlines()
+                if not line.strip().startswith('// options:')]
+    for arch in ('sm_90a', 'sm_100a'):
+        auto = tma._kernel(arch, 'volume', 6, 's')
+        red = tma._kernel(arch, 'volume', 6, 's', matrix_output='red')
+        assert body(auto) == body(red)
+        assert 'matrix_output' not in auto.get_kernel()
 
 
 def test_the_option_off_is_the_kernel_without_it():
@@ -243,8 +344,9 @@ def test_the_kernel_says_what_the_tile_took():
     src = _kernel(8, 'sm_100a').get_kernel()
     (note, _) = [line.strip() for line in src.splitlines()
                  if line.strip().startswith('// tile:')]
-    assert 'warps 0 to 11 its star bands' in note
-    assert '(2 slots of D)' in note and 'warp 18 issues' in note
+    assert 'warps 0 to 7 its star bands' in note
+    assert '(2 slots of D)' in note and 'warp 14 issues' in note
+    assert 'staged in shared memory, a bulk reduction an element' in note
 
 
 # -- the kernel ------------------------------------------------------------------ #
@@ -270,12 +372,13 @@ def test_the_kernel_splits_the_block_into_its_roles():
     assert '__syncthreads()' not in loop
     assert re.search(r'mbarrierInit\(&me_ring\[\d+ \+ r\], 8\)', src)
     assert re.search(r'mbarrierInit\(&bk\d+_ring\[\d+ \+ r\], 8\)', src)
-    # Each tile's group loop at o8: a block's nine products -- three of
-    # 3xTF32 of each of its three -- once for each of the blocks' six
-    # widths; written out, 99: nine of each of the eleven blocks.
-    assert src.count('wgmma.mma_async') == 2 * 6 * 9
-    unrolled = _kernel(8, matrix_groups='unrolled').get_kernel()
-    assert unrolled.count('wgmma.mma_async') == 2 * 99
+    # Each tile's blocks written out at o8, as the options leave them: 99
+    # products, nine of each of the eleven blocks -- three of 3xTF32 of
+    # each of its three; the group loop's a block's nine once for each of
+    # the blocks' six widths.
+    assert src.count('wgmma.mma_async') == 2 * 99
+    loop = _kernel(8, matrix_groups='loop').get_kernel()
+    assert loop.count('wgmma.mma_async') == 2 * 6 * 9
 
 
 def _bodies(**options):
@@ -284,17 +387,24 @@ def _bodies(**options):
         if k != 'matrix_engine'})
 
 
-def test_the_rings_hand_over_between_the_roles():
+@pytest.mark.parametrize('chunks', ['auto', 'whole'])
+def test_the_rings_hand_over_between_the_roles(chunks):
     """The rings' acts by role (`pir.rings.handoffs`): the producer fills
-    both, the inputs' and B's, and the tiles drain both."""
-    uses = tro._uses(_bodies())
+    them all -- the inputs', B's, and with I in chunks theirs -- and the
+    tiles drain them all.  With I in chunks the input ring is the star
+    matrices', a cell a copy of the producer's warp, none a bulk copy
+    into the slot; with I whole the producer's bulk copies are I's."""
+    uses = tro._uses(_bodies(matrix_input_chunks=chunks))
     inputs = uses['me_ring']
     (b,) = [u for name, u in uses.items() if name.startswith('bk')]
-    for use in (inputs, b):
+    rings = [inputs, b] + ([uses['ik_ring']] if chunks == 'auto' else [])
+    assert ('ik_ring' in uses) == (chunks == 'auto')
+    for use in rings:
         assert (use.spec.producer, use.spec.consumers) == (
             'producer', ('tile0', 'tile1'))
-        assert use.roles('acquire') == use.roles('copy') == use.roles(
-            'publish') == ('producer',)
+        assert use.roles('acquire') == use.roles('publish') == ('producer',)
+        assert use.roles('copy') == (() if use is inputs and chunks == 'auto'
+                                     else ('producer',))
         assert use.roles('take') == use.roles('release') == ('tile0',
                                                              'tile1')
 
@@ -336,14 +446,14 @@ def test_tcgen05_s_rings_hand_over_between_its_roles():
 def test_tcgen05_s_kernel_text():
     """o8: the five roles by the warp, D's ring of two slots -- full the
     products' commit, empty the epilogue's four warps -- the products'
-    commit onto its full side, the inputs' ring drained by the bands' twelve
-    warps."""
+    commit onto its full side, the inputs' ring drained by the two bands'
+    eight warps."""
     src = _kernel(8, 'sm_100a').get_kernel()
-    assert re.search(r'bool v\d+_star = threadIdx\.y < 12;', src)
+    assert re.search(r'bool v\d+_star = threadIdx\.y < 8;', src)
     assert re.search(r'mbarrierInit\(&td\w*\[\d+ \+ r\], 4\)', src)
     assert re.search(r'mbarrierInit\(&td\w*\[r\], 1\)', src)
     assert re.search(r'tcgen05CommitOn\(&td\w*\[v\w+\], ', src)
-    assert re.search(r'mbarrierInit\(&me_ring\[\d+ \+ r\], 12\)', src)
+    assert re.search(r'mbarrierInit\(&me_ring\[\d+ \+ r\], 8\)', src)
 
 
 # -- the oracle ------------------------------------------------------------------ #
@@ -459,7 +569,7 @@ def test_the_group_loop_computes_what_the_unrolled_groups_do(arch):
     wgmma the loop's D started at the accumulators' zeros where the
     unrolled groups' first product writes it fresh, on tcgen05 N and D's
     columns values."""
-    _, loop = _on_the_oracle(arch, 4, 17)
+    _, loop = _on_the_oracle(arch, 4, 17, matrix_groups='loop')
     _, unrolled = _on_the_oracle(arch, 4, 17, matrix_groups='unrolled')
     assert (loop == unrolled).all()
 
@@ -638,14 +748,39 @@ def test_the_kernel_says_what_the_spans_keep():
                if line.strip().startswith('// tile:'))
 
 
-def test_the_groups_option_defaults_to_the_loop():
+def test_the_groups_option_defaults_to_what_each_engine_measured():
+    """`auto`: the blocks written out on wgmma, which a GH200 measured
+    faster than the loop at o6 to o12 (o8 11.49 ns an element against
+    13.47, o12 72.74 against 96.32 at one warpgroup) -- but the loop for
+    two warpgroups past o8's rows, which do not hold them -- and the loop
+    on tcgen05, which a GB200 measured faster (o8 11.39 against 13.33);
+    either as asked."""
     from tensorforge.common.options import parse_matrix_groups, registry
-    assert registry()['matrix_groups'].default == 'loop'
-    assert [parse_matrix_groups(t) for t in ('loop', 'Unrolled')] == [
-        'loop', 'unrolled']
+    assert registry()['matrix_groups'].default == 'auto'
+    assert [parse_matrix_groups(t) for t in ('auto', 'loop', 'Unrolled')] == [
+        'auto', 'loop', 'unrolled']
     with pytest.raises(ValueError):
         parse_matrix_groups('rolled')
     assert _group(8, 'sm_100a').section.tile.groups == 'loop'
+    assert _group(8, 'sm_90a').section.tile.groups == 'unrolled'
+    for engine in ('wgmma', 'tcgen05'):
+        for asked in ('loop', 'unrolled'):
+            context = me._context('sm_90a', 's', multi_element='force',
+                                  **{**HIGH, 'matrix_groups': asked})
+            assert eg.tile_groups(engine, context) == asked
+    assert _group(8, 'sm_90a', matrix_groups='loop').section.tile.groups == (
+        'loop')
+    # Two warpgroups past o8 the loop: the blocks written out do not fit the
+    # registers ptxas leaves ten warps; one warpgroup takes them written out.
+    assert eg.TILE_UNROLLED_ROWS == 128
+    context = me._context('sm_90a', 's', multi_element='force', **HIGH)
+    assert [eg.tile_groups('wgmma', context, tiles, rows)
+            for tiles, rows in ((2, 120), (2, 128), (2, 220), (1, 364))] == [
+        'unrolled', 'unrolled', 'loop', 'unrolled']
+    assert [_group(o, 'sm_90a').section.tile.groups for o in (10, 12)] == [
+        'loop', 'loop']
+    assert _group(10, 'sm_90a', matrix_consumers=1).section.tile.groups == (
+        'unrolled')
 
 
 @pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
@@ -654,7 +789,7 @@ def test_the_group_loop_takes_one_width_a_block(arch, order):
     """In the group loop a block's products are one width, its key in the
     dispatch: the union of their kept spans -- every entry still in its
     product's piece of its block -- the first block whole."""
-    section, step, chunks = _chunks(order, arch)
+    section, step, chunks = _chunks(order, arch, matrix_groups='loop')
     assert section.tile.groups == 'loop'
     stages = eg._step_stages(section, step)
     for chunk in chunks:
@@ -668,11 +803,12 @@ def test_the_group_loop_takes_one_width_a_block(arch, order):
 
 
 def test_the_kernel_walks_the_blocks_in_one_loop():
-    """o8: each tile's eleven blocks one rolled loop, their widths a table
-    of the generated file read once a block, one dispatch on them: six
-    widths, a branch each -- the widths 40 to 120 as the spans give them."""
-    section, step, chunks = _chunks(8)
-    src = _kernel(8).get_kernel()
+    """o8 in the group loop: each tile's eleven blocks one rolled loop,
+    their widths a table of the generated file read once a block, one
+    dispatch on them: six widths, a branch each -- the widths 40 to 120 as
+    the spans give them; tcgen05's as the options leave it."""
+    section, step, chunks = _chunks(8, matrix_groups='loop')
+    src = _kernel(8, matrix_groups='loop').get_kernel()
     assert len(re.findall(r'#pragma unroll 1\s*for \(int32_t \w+ = 0; '
                           r'\w+ < 11; \+\+\w+\)', src)) == 2
     (table,) = re.findall(r'const int32_t (tf_tw_\w+)\[11\] = \{([^}]*)\}',
@@ -681,11 +817,14 @@ def test_the_kernel_walks_the_blocks_in_one_loop():
     assert eighths == [(chunk[0][4] - chunk[0][3]) // 8 for chunk in chunks]
     assert sorted(set(eighths)) == [5, 9, 11, 13, 14, 15]
     assert src.count(f'{table[0]}[') == 2 + 1
-    # tcgen05: the star role's band loop and the mma role's, one block's
-    # nine products, N and D's first column read off two tables.
+    # tcgen05: the star role's band loop -- in a loop of I's chunks
+    # (`TileRows.chunk`) -- and the mma role's, one block's nine products,
+    # N and D's first column read off two tables.
     section, step, chunks = _chunks(8, 'sm_100a')
     src = _kernel(8, 'sm_100a').get_kernel()
-    assert src.count('#pragma unroll 1') == 2
+    assert src.count('#pragma unroll 1') == 3
+    assert _kernel(8, 'sm_100a', matrix_input_chunks='whole').get_kernel(
+        ).count('#pragma unroll 1') == 2
     assert src.count('tcgen05.mma.cta_group') == 9
     spans = [chunk[0][3:] for chunk in chunks]
     for prefix, numbers in (('tl', [lo for lo, _ in spans]),
@@ -700,12 +839,15 @@ def test_tcgen05_s_epilogue_by_bulk_reductions(output):
     """`matrix_output` asked on tcgen05: the tile's epilogue stages D in
     shared memory and adds it by bulk reductions -- a column, or an
     element's box, a reduction -- no reduction a cell; the box counted in
-    the plan's shared memory, at o8 beside one slot of the inputs' ring
-    where two do not fit.  wgmma's tile keeps a reduction a cell, and says
-    so."""
+    the plan's shared memory, at o8 beside two slots of the inputs' ring
+    with I in chunks, one with I whole, where two do not fit.  wgmma's tile
+    takes `bulk` a row of D a reduction, and declines the box, saying so."""
+    whole = _group(8, 'sm_100a', matrix_output=output,
+                   matrix_input_chunks='whole')
+    assert whole.section.ring == 1
     group = _group(8, 'sm_100a', matrix_output=output)
     (step,) = [s for s in group.section.steps if s.lowering == 'tcgen05']
-    assert step.output == output and group.section.ring == 1
+    assert step.output == output and group.section.ring == 2
     section = group.section
     plain = dataclasses.replace(section, steps=tuple(
         dataclasses.replace(s, output='') for s in section.steps))
@@ -721,12 +863,16 @@ def test_tcgen05_s_epilogue_by_bulk_reductions(output):
     assert f'a bulk reduction {what}' in ''.join(
         l for l in src.splitlines() if l.strip().startswith('// tile:'))
     wgmma = _group(8, 'sm_90a', matrix_output=output)
+    if output == 'bulk':
+        # A row of D a reduction on wgmma (`multi_element._wgmma_bulk`).
+        assert any(s.output == 'bulk' for s in wgmma.section.steps)
+        return
     assert not any(s.output for s in wgmma.section.steps)
     notes = eg.output_notes(wgmma.section, me._context(
         'sm_90a', 's', multi_element='force',
         **{**HIGH, 'matrix_output': output}))
-    assert any('the high-order tile on wgmma adds D a cell at a time' in n
-               for n in notes)
+    assert any('the high-order tile on wgmma adds D a cell at a time, or a '
+               'row a reduction (`bulk`)' in n for n in notes)
 
 
 @pytest.mark.parametrize('output', ['bulk', 'box'])
@@ -735,18 +881,20 @@ def test_tcgen05_s_bulk_epilogue_on_the_oracle(output):
     in each trip behind the reductions' reads of the last, the masked
     elements of the last trip added nowhere -- against NumPy, without a
     race, and bit for bit what a reduction a cell gives."""
-    _, red = _on_the_oracle('sm_100a', 4, 31)
+    _, red = _on_the_oracle('sm_100a', 4, 31, matrix_output='red')
     _, bulk = _on_the_oracle('sm_100a', 4, 31, matrix_output=output)
     assert (bulk == red).all()
 
 
 @pytest.mark.parametrize('options', [{}, {'matrix_groups': 'unrolled'},
-                                     {'matrix_bands': 2}])
+                                     {'matrix_bands': 3},
+                                     {'matrix_output': 'red'}])
 def test_three_trips_of_tcgen05_s_layout_on_the_oracle(options):
     """Thirty-one elements, three trips: D's slots in turn, the first
     taken again in the third trip behind the epilogue's release of it, the
     inputs' ring of two slots likewise -- which the oracle's ring order
-    checks -- with the group loop, the blocks written out and two bands."""
+    checks -- with the group loop, the blocks written out, three bands and
+    D added a cell at a time."""
     gen, _ = _on_the_oracle('sm_100a', 4, 31, **options)
     assert gen.built._element_group.section.tile.dslots == 2
 
@@ -842,14 +990,14 @@ def test_tcgen05_s_tile_keeps_the_static_grid_without_launch_control(
 
 def test_the_scheduled_kernel_and_its_launch():
     """o6 on tcgen05 under clc: the blocks' loop by the tiles the ring hands
-    every warp -- 19 of them giving each slot back -- one claim and one
-    next tile a trip, by the input warp's lane 0, and the launch a block a
-    tile; under auto the launcher's choice from two waves of the device on;
-    static as before."""
+    every warp -- 15 of them at two bands giving each slot back -- one claim
+    and one next tile a trip, by the input warp's lane 0, and the launch a
+    block a tile; under auto the launcher's choice from two waves of the
+    device on; static as before."""
     src = _kernel(6, 'sm_100a', tile_schedule='clc').get_kernel()
     assert src.count('tensorforge::tileClaim(') == 1
     assert src.count('tensorforge::tileNext(') == 1
-    assert re.search(r'mbarrierInit\(&tq_ring\[2 \+ r\], 19\)', src)
+    assert re.search(r'mbarrierInit\(&tq_ring\[2 \+ r\], 15\)', src)
     assert re.search(r'mbarrierInit\(&tc_ring\[r\], 1\)', src)
     assert re.search(r'while \(true\)', src)
     launch = _kernel(6, 'sm_100a', tile_schedule='clc').get_launcher()
@@ -906,6 +1054,412 @@ def test_the_oracle_refuses_a_block_granted_twice():
                        tile_schedule='clc')
 
 
+# -- orders 10 and 12 (H4) ------------------------------------------------------- #
+
+@pytest.mark.parametrize('order', [10, 12])
+def test_the_fixture_s_volume_at_high_orders(order):
+    """SeisSol's volume at o10 and o12 from the fixture (`hiorder_fixture`):
+    order 8's description at the order's basis -- the functions padded to
+    64 bytes, the derivatives' columns the order below's -- each operator on
+    its pattern, no value zero, its rows of Q from its first entry to its
+    last."""
+    import hiorder_fixture as hf
+    n, m = hf.basis(order), hf.basis(order - 1)
+    assert (n, m) == {10: (220, 165), 12: (364, 286)}[order]
+    desc = hf.description(order)
+    tensors = {t['name']: t for t in desc['tensors']}
+    assert tensors['I']['storage']['shape'] == [-(-n // 16) * 16, 9]
+    for d in range(3):
+        name = f'kDivM({d})'
+        where = hf.pattern(order, name)
+        entries = tensors[name]['values']['data']
+        assert len(entries) == int(where.sum()) > 0
+        assert all(v != 0 for _, v in entries)
+        assert not where[:, m:].any()
+        rows = np.nonzero(where.any(axis=1))[0]
+        (op,) = [o for o in desc['operations'] if o['result']['name'] == 'Q'
+                 and o['args'][0]['name'] == name]
+        assert op['result']['bbox'] == [[int(rows[0]), 0],
+                                        [int(rows[-1]) + 1, 9]]
+    assert me._descrs('volume', order, 's') is not None
+
+
+def test_tensor_memory_s_slots_at_high_orders():
+    """D's and A's slots in tensor memory, the most of D's first: o8 two
+    and four, o10 one and four, o12 one and two (368 + 4 x 48 = 560 past
+    512), past o12 none (the passes)."""
+    assert [eg.tile_tmem(n, 3) for n in (128, 224, 368, 464)] == [
+        (2, 4), (1, 4), (1, 2), None]
+
+
+@pytest.mark.parametrize('order,chunks,elements,slots', [
+    (10, 'auto', 14, (1, 4, 4, 1)), (12, 'auto', 14, (1, 2, 2, 2)),
+    (10, 'whole', 14, (1, 4, 3, 1)), (12, 'whole', 7, (1, 2, 2, 1))])
+def test_the_tile_on_tcgen05_at_high_orders(order, chunks, elements, slots):
+    """o10 and o12 on tcgen05 (N 224 and 368): D one slot, A four and two
+    (tensor memory's, the two bands' own alike), B's ring and the inputs'
+    -- the search trying B's slots from the options' down, then the
+    inputs' -- and at o12 a step wider than an instruction's N taken, its
+    products cut at 256.  With I in chunks (`TileRows.chunk`) fourteen
+    elements at both, B's ring four slots at o10; with I whole three, and
+    at o12 seven elements -- each with D added a cell at a time, asked."""
+    group = _group(order, 'sm_100a', matrix_input_chunks=chunks,
+                   matrix_output='red')
+    tile = group.section.tile
+    assert group.elements == elements
+    assert bool(tile.chunk) == (chunks == 'auto')
+    assert (tile.dslots, tile.aslots, group.section.ring_slots,
+            group.section.ring) == slots
+    # A band its own slots of A's ring: two bands, at o12 on its two.
+    assert tile.bands == 2 and tile.output == 'red'
+
+
+@pytest.mark.parametrize('order,chunks,tiles,slots', [
+    (10, 'auto', 2, 3), (12, 'auto', 2, 3), (10, 'whole', 1, 3),
+    (12, 'whole', 1, 3)])
+def test_wgmma_at_high_orders(order, chunks, tiles, slots):
+    """o10 and o12 on wgmma: with I in chunks two consumer warpgroups,
+    fourteen elements, B's ring at three slots; with I whole one of seven
+    -- two warpgroups' I whole does not fit."""
+    group = _group(order, 'sm_90a', matrix_input_chunks=chunks)
+    assert group.section.tile.tiles == tiles
+    assert group.elements == 7 * tiles
+    assert group.section.ring_slots == slots
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_products_cut_at_an_instruction_s_n_on_the_oracle(monkeypatch,
+                                                          groups):
+    """tcgen05's products of a span wider than an instruction's N cut in
+    two -- the first 256 columns and the rest, each its own of D's columns
+    and B's core matrices that far on -- here at 16 (o4's 32 columns in two
+    halves): bit for bit what whole products give, both against NumPy."""
+    from tensorforge.backend.instructions.compute import multi_element as mm
+    _, whole = _on_the_oracle('sm_100a', 4, 17, matrix_groups=groups)
+    monkeypatch.setattr(mm, 'TCGEN05_N_MAX', 16)
+    gen, cut = _on_the_oracle('sm_100a', 4, 17, matrix_groups=groups)
+    assert gen.get_kernel().count('tcgen05.mma.cta_group') == 2 * (
+        9 if groups == 'loop' else 18)
+    assert (cut == whole).all()
+
+
+def test_the_passes_option_and_how_many():
+    """`matrix_passes`: auto by default -- on wgmma the fewest whose D a
+    consumer thread holds in `TILE_ACCUMULATORS` registers, each at most an
+    instruction's 256 rows (o8 and o10 one, o12's 368 rows two) -- forced 1
+    to 8; tcgen05 one, D whole in tensor memory."""
+    from tensorforge.common.options import parse_matrix_passes, registry
+    assert registry()['matrix_passes'].default == 0
+    assert [parse_matrix_passes(x) for x in ('auto', '1', '3')] == [0, 1, 3]
+    with pytest.raises(ValueError):
+        parse_matrix_passes('9')
+    assert [_group(o, 'sm_90a').section.tile.passes for o in (8, 10, 12)] == [
+        1, 1, 2]
+    assert _group(4, 'sm_90a', matrix_passes=3).section.tile.passes == 3
+    assert _group(12, 'sm_100a').section.tile.passes == 1
+
+
+@pytest.mark.parametrize('passes,spans', [(2, 'kept'), (3, 'kept'),
+                                          (2, 'dense')])
+def test_a_pass_s_pieces_hold_its_rows_of_b(passes, spans):
+    """With passes over N each pass's rows `[plo, phi)` in the engine's
+    granules, the passes in turn over the stage; a block's piece of a pass
+    its span cut to the pass's rows and on wgmma on to `phi`, the pass's
+    first block's first piece whole over the pass; every entry of B in
+    exactly one piece -- of the pass whose rows hold it -- a block with
+    none in a pass no chunk of it; and the chunks' table offsets their
+    own, a block's piece of each pass apart."""
+    section, step, chunks = _chunks(6, 'sm_90a', matrix_passes=passes,
+                                    matrix_spans=spans)
+    bounds = eg.tile_pass_bounds(section, step)
+    stages = eg._step_stages(section, step)
+    assert len(bounds) == passes and bounds[0][0] == 0
+    assert bounds[-1][1] == stages[0].width
+    assert all(a[1] == b[0] for a, b in zip(bounds, bounds[1:]))
+    assert all(lo % 8 == 0 for lo, _ in bounds)
+    ranges = eg.tile_pass_chunks(section, step)
+    assert sum(count for _, count in ranges) == len(chunks)
+    for (first, count), (plo, phi) in zip(ranges, bounds):
+        mine = chunks[first:first + count]
+        assert mine[0][0][3:] == (plo, phi)
+        for chunk in mine:
+            for p, k0, rows, lo, hi in chunk:
+                assert plo <= lo < hi == phi
+    for p, product in enumerate(step.products):
+        stage = stages[p]
+        (r0, r1), (d0, d1) = stage.window
+        pattern = product.first.tensor.nonzero_pattern
+        for kk in range(d0, d1):
+            for row in range(r0, r1):
+                if not pattern.is_nz((row, kk)):
+                    continue
+                n, k = row - stage.n0, kk - d0
+                held = [None for c in chunks for q, k0, rows, lo, hi in c
+                        if q == p and k0 <= k < k0 + rows and lo <= n < hi]
+                assert len(held) == 1, (p, row, kk)
+    _, _, offsets = eg.prepared_table(section, step, 90)
+    starts = [offsets[tuple(chunk[0])] for chunk in chunks]
+    assert len(set(starts)) == len(starts)
+
+
+@pytest.mark.parametrize('narrow', ['first', 'last'])
+@pytest.mark.parametrize('passes', [2, 3])
+def test_a_pass_s_first_piece_is_whole_over_the_pass(monkeypatch, passes,
+                                                     narrow):
+    """A pass's first piece whole over the pass's rows whatever its
+    product's own span -- it writes the pass's D first, every row fresh --
+    here with the first block's spans narrowed: from their second granule
+    on (the first pass's first piece would start past the pass's first
+    row), or to their last granule (the last pass's first piece the first
+    block's, narrower than the pass).  The volume's operators have entries
+    on every row of N in the first block, so that only this shows the rule
+    (`tile_chunks`)."""
+    kept = eg.kept_span
+
+    def narrowed(section, step, product, k0, rows, granule):
+        span = kept(section, step, product, k0, rows, granule)
+        if k0 != 0 or span is None or span[1] - span[0] <= granule:
+            return span
+        return ((span[0] + granule, span[1]) if narrow == 'first'
+                else (span[1] - granule, span[1]))
+    monkeypatch.setattr(eg, 'kept_span', narrowed)
+    section, step, chunks = _chunks(6, 'sm_90a', matrix_passes=passes,
+                                    matrix_spans='kept')
+    granule = section.tile.granule
+    shown = 0
+    for (first, _), (plo, phi) in zip(eg.tile_pass_chunks(section, step),
+                                      eg.tile_pass_bounds(section, step)):
+        p, k0, rows = chunks[first][0][:3]
+        lo, _ = narrowed(section, step, p, k0, rows, granule)
+        shown += lo > plo
+        assert chunks[first][0][3:] == (plo, phi)
+    assert shown
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+@pytest.mark.parametrize('passes', [2, 3])
+def test_passes_compute_what_one_does_on_the_oracle(passes, groups):
+    """wgmma's passes over N on the oracle, o4's 24 rows in two and in three
+    (one of eight rows): each pass's D from fresh, its blocks' A computed
+    again, its D's columns read back from the pass's last row, and a block
+    with no entry in a pass skipped -- bit for bit what one pass gives, both
+    against NumPy over two trips."""
+    _, one = _on_the_oracle('sm_90a', 4, 17, matrix_groups=groups)
+    gen, got = _on_the_oracle('sm_90a', 4, 17, matrix_passes=passes,
+                              matrix_groups=groups)
+    assert gen.built._element_group.section.tile.passes == passes
+    assert (got == one).all()
+
+
+@pytest.mark.parametrize('passes', [2, 3])
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_a_pass_reads_its_own_rows_of_d_back(passes, groups):
+    """Each pass reads back its own rows of D alone -- o4's 24 rows in a
+    pass of 8 and one of 16, or three of 8 -- so that over the passes the
+    kernel adds every row of D once: as many reductions as one pass's, no
+    register of a narrower pass read past its rows into another's."""
+    one = _kernel(4, matrix_groups=groups).get_kernel()
+    src = _kernel(4, matrix_groups=groups, matrix_passes=passes).get_kernel()
+    assert src.count('red.global.add') == one.count('red.global.add') > 0
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_one_input_slot_through_the_passes_on_the_oracle(monkeypatch,
+                                                         groups):
+    """The input ring at one slot under two passes over N: the slot given
+    back behind the last pass's blocks alone -- every pass reads the trip's
+    inputs again -- so that the next trip's inputs land in it only once the
+    last pass has read them; over three trips, against NumPy and bit for
+    bit what one pass gives, which the oracle's ring order checks."""
+    monkeypatch.setattr(eg, 'PRODUCER_SLOTS', ())
+    _, one = _on_the_oracle('sm_90a', 4, 31, matrix_groups=groups)
+    gen, got = _on_the_oracle('sm_90a', 4, 31, matrix_passes=2,
+                              matrix_groups=groups)
+    section = gen.built._element_group.section
+    assert (section.ring, section.tile.passes) == (1, 2)
+    assert (got == one).all()
+
+
+
+# -- I in chunks ------------------------------------------------------------------ #
+
+def test_the_input_chunks_option_parses():
+    from tensorforge.common.options import (INPUT_CHUNKS_WHOLE,
+                                            parse_matrix_input_chunks,
+                                            registry)
+    assert registry()['matrix_input_chunks'].default == 0
+    assert [parse_matrix_input_chunks(t) for t in
+            ('auto', 'WHOLE', '8', '32', '128', 0, -1)] == [
+        0, INPUT_CHUNKS_WHOLE, 8, 32, 128, 0, INPUT_CHUNKS_WHOLE]
+    for text in ('4', '12', '136', 'half'):
+        with pytest.raises(ValueError):
+            parse_matrix_input_chunks(text)
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+def test_i_in_chunks_where_it_has_more_rows_than_one(arch):
+    """`auto`: I in chunks of 32 rows of K through a ring of two slots where
+    it has more rows -- o6's 35 in two chunks, o8's 84 in three, the last
+    20 -- whole at o4's ten; `whole` as before; forced, o4's ten in chunks
+    of eight, the second two rows.  A trip's rounds every chunk in turn."""
+    def tile(order, **options):
+        return _group(order, arch, **options).section.tile
+    assert (tile(4).chunk, tile(4).cslots) == (0, 0)
+    assert (tile(6).chunk, tile(6).cslots) == (32, eg.TILE_CHUNK_SLOTS) \
+        == (32, 2)
+    assert tile(8, matrix_input_chunks='whole').chunk == 0
+    for order, cuts in ((6, ((0, 32), (32, 35))),
+                        (8, ((0, 32), (32, 64), (64, 84)))):
+        section = _group(order, arch).section
+        (step,) = [s for s in section.steps
+                   if s.lowering in eg.ASYNC_LOWERINGS]
+        buffer = eg.chunked_input(section)
+        assert buffer.tensor.alias == 'I'
+        assert eg.input_chunks(buffer, 32) == cuts
+        assert eg.tile_input_rounds(section, step) == tuple(range(len(cuts)))
+    forced = _group(4, arch, matrix_input_chunks=8).section
+    assert forced.tile.chunk == 8
+    assert eg.input_chunks(eg.chunked_input(forced), 8) == ((0, 8), (8, 10))
+
+
+def test_a_pass_reads_its_own_chunks_again():
+    """wgmma's passes over N at o12: the first pass's blocks of K those
+    with an entry in its rows -- the first six chunks of I -- the second's
+    all nine, fifteen rounds a trip; each block's chunk, the round it reads
+    and whether it is the pass's first or last to read it, which take the
+    round and give it back, each round exactly once."""
+    section = _group(12, 'sm_90a').section
+    (step,) = [s for s in section.steps if s.lowering == 'wgmma']
+    rounds = eg.tile_input_rounds(section, step)
+    assert rounds == tuple(range(6)) + tuple(range(9))
+    reads = eg.tile_input_reads(section, step)
+    assert len(reads) == len(eg.tile_chunks(section, step))
+    assert all(rounds[i] == h for h, i, _, _ in reads)
+    assert sorted(i for _, i, take, _ in reads if take) == list(range(15))
+    assert sorted(i for _, i, _, give in reads if give) == list(range(15))
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+def test_the_chunks_in_the_plan_s_shared_memory(arch):
+    """I's ring of chunks counted in the block's shared memory in place of
+    I in every slot of the input ring: two slots of the fourteen elements'
+    32 rows of its nine columns, and a pair of mbarriers a slot."""
+    section = _group(8, arch).section
+    whole = dataclasses.replace(section, tile=dataclasses.replace(
+        section.tile, chunk=0, cslots=0))
+    assert eg.chunked_input(whole) is None
+    i = eg.chunked_input(section)
+    assert eg.shared_bytes(section, 14) - eg.shared_bytes(whole, 14) == (
+        4 * 14 * (2 * 32 * 9 - section.ring * i.per_element) + 2 * 2 * 8)
+
+
+@pytest.mark.parametrize('arch,consumers', [('sm_90a', 8), ('sm_100a', 8)])
+def test_the_chunk_ring_s_text(arch, consumers):
+    """o8: I's ring of two slots, full counting the producer's arrival,
+    empty a consumer warp's each -- wgmma's two warpgroups' eight, tcgen05's
+    two bands' eight; a chunk's copies a column of 32 rows of every
+    element, 16128 bytes announced, the last chunk's 20 rows 10080; the
+    input ring no bulk copy, the star matrices its alone, and its slot
+    given back before the first chunk is waited for -- the star numbers in
+    registers by then."""
+    src = _kernel(8, arch).get_kernel()
+    assert 'mbarrierInit(&ik_ring[r], 1)' in src
+    assert f'mbarrierInit(&ik_ring[2 + r], {consumers})' in src
+    copies = re.findall(r'bulkCopyOn\(&ik_ring\[\w+\], [^,]+, [^,]+, '
+                        r'(\d+), ', src)
+    assert sorted(set(copies)) == ['128', '80'] and len(copies) == 3 * 9
+    assert re.findall(r'mbarrierExpect\(&ik_ring\[\w+\], (\d+)u', src) == [
+        '16128', '16128', '10080']
+    assert 'bulkCopyOn(&me_ring' not in src
+    assert src.index('mbarrierArrive(&me_ring[') < \
+        src.index('mbarrierWait(&ik_ring[')
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_i_in_chunks_computes_what_i_whole_does_on_the_oracle(arch, groups):
+    """o4's ten rows of I in chunks of eight -- two, the second two rows, a
+    copy of four -- over two trips: each chunk's slot taken by its first
+    block and given back behind its last, by every consumer warp, and the
+    input ring's slot back once the star numbers are read; bit for bit
+    what I whole gives, both against NumPy, without a race."""
+    _, whole = _on_the_oracle(arch, 4, 17, matrix_groups=groups,
+                              matrix_input_chunks='whole')
+    gen, got = _on_the_oracle(arch, 4, 17, matrix_groups=groups,
+                              matrix_input_chunks=8)
+    assert gen.built._element_group.section.tile.chunk == 8
+    assert (got == whole).all()
+
+
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_chunks_of_two_blocks_on_the_oracle(arch, groups):
+    """o6's 35 rows of I in chunks of sixteen, two blocks of K a chunk --
+    as the default's 32 rows take four: a chunk's slot taken at its first
+    block and given back behind its second, the group loop's rounds and
+    gives off its tables by the chunk, not the block -- over three trips,
+    the chunks' ring of two slots taken again; bit for bit what I whole
+    gives, both against NumPy, without a race."""
+    _, whole = _on_the_oracle(arch, 6, 31, matrix_groups=groups,
+                              matrix_input_chunks='whole')
+    gen, got = _on_the_oracle(arch, 6, 31, matrix_groups=groups,
+                              matrix_input_chunks=16)
+    assert gen.built._element_group.section.tile.chunk == 16
+    assert (got == whole).all()
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_each_pass_s_chunks_on_the_oracle(groups):
+    """wgmma's passes over N with I in chunks: o4's 24 rows of N in three
+    passes, each streaming its blocks' chunks of eight rows again -- a pass
+    whose blocks read one chunk one round -- over two trips, bit for bit
+    what I whole gives."""
+    _, whole = _on_the_oracle('sm_90a', 4, 17, matrix_groups=groups,
+                              matrix_passes=3, matrix_input_chunks='whole')
+    gen, got = _on_the_oracle('sm_90a', 4, 17, matrix_groups=groups,
+                              matrix_passes=3, matrix_input_chunks=8)
+    section = gen.built._element_group.section
+    (step,) = [s for s in section.steps if s.lowering == 'wgmma']
+    assert section.tile.passes == 3
+    assert len(eg.tile_input_rounds(section, step)) > 2
+    assert (got == whole).all()
+
+
+@pytest.mark.parametrize('bands', [2, 3])
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_every_band_gives_every_chunk_back_on_the_oracle(monkeypatch, bands,
+                                                         groups):
+    """tcgen05's bands over o6's five blocks with I in chunks of eight, a
+    block a chunk -- each chunk one band's to read, every band's to take
+    and give back -- over three trips, the input ring at one slot, its
+    slot back at once: bit for bit what I whole gives."""
+    monkeypatch.setattr(eg, 'PRODUCER_SLOTS', ())
+    _, whole = _on_the_oracle('sm_100a', 6, 31, matrix_groups=groups,
+                              matrix_bands=bands,
+                              matrix_input_chunks='whole')
+    gen, got = _on_the_oracle('sm_100a', 6, 31, matrix_groups=groups,
+                              matrix_bands=bands, matrix_input_chunks=8)
+    section = gen.built._element_group.section
+    assert (section.tile.chunk, section.tile.bands, section.ring) == (
+        8, bands, 1)
+    assert (got == whole).all()
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_the_star_slot_back_at_once_on_the_oracle(monkeypatch, groups):
+    """wgmma with the input ring at one slot and I in chunks: the next
+    trip's star matrices staged as soon as every consumer warp has read
+    this trip's, under its blocks -- over three trips, bit for bit what I
+    whole gives."""
+    monkeypatch.setattr(eg, 'PRODUCER_SLOTS', ())
+    _, whole = _on_the_oracle('sm_90a', 4, 31, matrix_groups=groups,
+                              matrix_input_chunks='whole')
+    gen, got = _on_the_oracle('sm_90a', 4, 31, matrix_groups=groups,
+                              matrix_input_chunks=8)
+    assert gen.built._element_group.section.ring == 1
+    assert (got == whole).all()
+
+
 # -- A's slots, each band's own ------------------------------------------------- #
 
 def _a_slots(src):
@@ -924,8 +1478,8 @@ def test_the_star_bands_own_their_slots_of_a(bands, slots):
     `j`'s slot `j % slots` is band `j % bands`'s and every round of a slot
     one band's.  Without it a band asks for a slot's round two phases
     ahead of the slot's empty side, which a wait on the parity passes: the
-    hardware race of GB200's J2 (three bands, the default, wrong and hung
-    where two bands were right)."""
+    hardware race of GB200's J2 (three bands, the default then, wrong and
+    hung where two bands were right)."""
     src = _kernel(8, 'sm_100a', matrix_bands=bands).get_kernel()
     assert _a_slots(src) == slots
 
@@ -942,6 +1496,95 @@ def test_the_ring_model_sees_the_tile_s_race(blocks):
     assert ring_model.violations(3, 4, blocks, sync='none') > 0
     assert ring_model.violations(3, 3, blocks, sync='none') == 0
     assert ring_model.violations(2, 4, blocks, sync='none') == 0
+
+
+# -- the bulk epilogue on wgmma ------------------------------------------------------ #
+
+@pytest.mark.parametrize('order', [8, 12])
+def test_wgmma_s_bulk_epilogue_plan(order):
+    """`matrix_output` `bulk` on wgmma's tile: a row of D -- an element's
+    column of the output -- a bulk reduction, a pass's rows of it out to
+    sixteen bytes, staged in the warpgroup's slots of A, free behind the
+    pass's last wait: no shared memory past what `red` takes.  o8: rows 0
+    to 120, 124 floats apart (an odd number of sixteen bytes), eight rows a
+    warp a round; o12's two passes each its own rows."""
+    red = _group(order)
+    group = _group(order, matrix_output='bulk')
+    section = group.section
+    (step,) = [s for s in section.steps if s.lowering == 'wgmma']
+    assert step.output == 'bulk'
+    assert group.shared_bytes == red.shared_bytes
+    assert eg.output_volume(section, group.elements) == 0
+    geometry = [eg.wgmma_bulk_geometry(section, step, lo, hi)
+                for lo, hi in eg.tile_pass_bounds(section, step)]
+    assert geometry == ([(0, 120, 124, 8)] if order == 8 else
+                        [(0, 188, 188, 8), (184, 364, 180, 8)])
+
+
+def test_wgmma_s_bulk_epilogue_text():
+    """o8: a bulk reduction a round of a warp's rows -- two tiles, the
+    rows' two halves of eight, one round each -- no reduction a cell; each
+    round fenced for the async proxy behind the rows' stores, and the
+    warpgroup meeting behind the last before the next blocks of A."""
+    src = _kernel(8, matrix_output='bulk').get_kernel()
+    assert src.count('tensorforge::bulkReduceAdd') == 2 * 2
+    assert 'red.global.add.f32' not in src
+    lines = src.splitlines()
+
+    def at(text):
+        return [k for k, line in enumerate(lines) if text in line]
+    stores = [k for k in at('_astar') if '] = ' in lines[k]]
+    for reduce in at('tensorforge::bulkReduceAdd('):
+        # The round's stores, then the fence, then the reduction: the
+        # async proxy reads the slots only behind a fence of them.
+        store = max(k for k in stores if k < reduce)
+        fences = [k for k in at('fenceProxyAsync') if store < k < reduce]
+        assert fences, (store, reduce)
+    red = _kernel(8).get_kernel()
+    assert 'tensorforge::bulkReduceAdd' not in red
+    assert 'red.global.add.f32' in red
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+@pytest.mark.parametrize('count,passes', [(17, 1), (31, 1), (17, 3)])
+def test_wgmma_s_bulk_epilogue_on_the_oracle(groups, count, passes):
+    """D by bulk reductions a row on wgmma's tile against a reduction a cell
+    over o4's elements -- two and three trips, the last's elements past the
+    batch masked, and in three passes over N -- bit for bit, both against
+    NumPy, without a race: the slots of A staged and read again behind the
+    reductions' reads."""
+    options = dict(matrix_groups=groups)
+    if passes > 1:
+        options['matrix_passes'] = passes
+    _, red = _on_the_oracle('sm_90a', 4, count, **options)
+    gen, bulk = _on_the_oracle('sm_90a', 4, count, matrix_output='bulk',
+                               **options)
+    (step,) = [s for s in gen.built._element_group.section.steps
+               if s.lowering == 'wgmma']
+    assert step.output == 'bulk'
+    assert (bulk == red).all()
+
+
+@pytest.mark.parametrize('rows', [1, 2, 4])
+def test_wgmma_s_bulk_epilogue_in_rounds_on_the_oracle(monkeypatch, rows):
+    """A warp's rows of D staged `rows` at a time, as where A's slots hold
+    no more -- past the orders the volume reaches, so forced here
+    (`wgmma_bulk_geometry`): each round's quads alone staging, at their
+    place in the round, the slots handed on by the warp's barrier -- bit for
+    bit what a reduction a cell gives over two trips, against NumPy without
+    a race, a reduction a round of each half."""
+    geometry = eg.wgmma_bulk_geometry
+
+    def fewer(section, step, plo, phi):
+        lo, hi, stride, _ = geometry(section, step, plo, phi)
+        return lo, hi, stride, rows
+    _, red = _on_the_oracle('sm_90a', 4, 17, matrix_groups='loop')
+    monkeypatch.setattr(eg, 'wgmma_bulk_geometry', fewer)
+    gen, bulk = _on_the_oracle('sm_90a', 4, 17, matrix_output='bulk',
+                               matrix_groups='loop')
+    assert gen.get_kernel().count('tensorforge::bulkReduceAdd(') == (
+        2 * 2 * (8 // rows))
+    assert (bulk == red).all()
 
 
 # -- the build and the hardware ------------------------------------------------- #
@@ -975,26 +1618,47 @@ def _ptxas(arch, tmp_path, order=8, **options):
 
 
 @pytest.mark.parametrize('arch,engine,products,options', [
-    ('sm_90a', 'HGMMA', 2 * 6 * 9, {}),
-    ('sm_90a', 'HGMMA', 2 * 99, {'matrix_groups': 'unrolled'}),
+    ('sm_90a', 'HGMMA', 2 * 99, {}),
+    ('sm_90a', 'HGMMA', 2 * 6 * 9, {'matrix_groups': 'loop'}),
     ('sm_100a', 'UTCHMMA', 9, {}),
-    ('sm_100a', 'UTCHMMA', 9, {'matrix_bands': 2}),
+    ('sm_100a', 'UTCHMMA', 9, {'matrix_bands': 3}),
     ('sm_100a', 'UTCHMMA', 9, {'matrix_output': 'bulk'}),
+    ('sm_100a', 'UTCHMMA', 9, {'matrix_output': 'red'}),
     ('sm_100a', 'UTCHMMA', 9, {'tile_schedule': 'clc'}),
+    ('sm_100a', 'UTCHMMA', 9, {'order': 10}),
+    ('sm_100a', 'UTCHMMA', 18, {'order': 12}),
+    ('sm_90a', 'HGMMA', 2 * 72, {'order': 10, 'matrix_groups': 'loop'}),
+    ('sm_90a', 'HGMMA', 2 * 162, {'order': 12, 'matrix_groups': 'loop'}),
+    ('sm_90a', 'HGMMA', 72, {'order': 10, 'matrix_input_chunks': 'whole',
+                             'matrix_groups': 'loop'}),
+    ('sm_90a', 'HGMMA', 162, {'order': 12, 'matrix_input_chunks': 'whole',
+                              'matrix_groups': 'loop'}),
+    ('sm_100a', 'UTCHMMA', 18, {'order': 12,
+                                'matrix_input_chunks': 'whole'}),
+    ('sm_90a', 'HGMMA', 216, {'matrix_passes': 2, 'matrix_groups': 'loop'}),
+    ('sm_90a', 'HGMMA', 2 * 6 * 9, {'matrix_output': 'bulk',
+                                    'matrix_groups': 'loop'}),
     ('sm_100a', 'UTCHMMA', 99, {'matrix_groups': 'unrolled'})])
 def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     """o8 built: every product an instruction of the engine's, as many as
-    the text has -- wgmma's group loop's six widths' nine each, tcgen05's
-    nine, its N a value, or written out the 33 kept pieces' three each,
-    every tile's -- and none of them
+    the text has -- wgmma's blocks written out, the 33 kept pieces' three
+    each, or its group loop's six widths' nine each, tcgen05's nine, its N
+    a value, or written out 99, every tile's -- and none of them
     serialized by ptxas: no C7510 (a wgmma serialized for a register's
     use), C7511, C7514, C7517 or C7519 (for an arrive in a divergent path:
     the group loop's dispatch on a width ptxas cannot tell is the warp's
-    alike) in its report."""
+    alike) in its report.  tcgen05's o8 as the options leave it adds D by
+    one bulk reduction an element (`tile_output`), a column's where asked;
+    wgmma's a round of a warp's rows a reduction where asked; no reduction
+    a cell."""
     sass, report = _ptxas(arch, tmp_path, **options)
-    if options.get('matrix_output') == 'bulk':
-        # D by one bulk reduction a thread, no reduction a cell.
-        assert len(re.findall(r'\bUBLKRED\b', sass)) == 1
+    output = options.get('matrix_output', 'box' if arch == 'sm_100a'
+                         and options.get('order', 8) == 8 else 'red')
+    if output in ('bulk', 'box'):
+        # D by bulk reductions -- tcgen05's one a thread, wgmma's a round of
+        # a warp's rows -- no reduction a cell.
+        assert len(re.findall(r'\bUBLKRED\b', sass)) == (
+            1 if arch == 'sm_100a' else 2 * 2)
         assert not re.search(r'\bREDG\b', sass)
     if engine == 'HGMMA':
         assert len(re.findall(r'\bHGMMA\.64x\d+x8\b', sass)) == products
@@ -1005,15 +1669,20 @@ def test_the_build_reads_back(arch, engine, products, options, tmp_path):
 
 
 #: The tile's variants on the GPU: as the options leave it, its blocks
-#: written out, and tcgen05's own levers -- two star bands, D added by bulk
-#: reductions a column and an element's box.
+#: written out and in one loop, I whole in the input ring rather than in
+#: chunks, and
+#: tcgen05's own levers -- three star bands, D added a cell at a time, by
+#: bulk reductions a column and an element's box.
 GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
-                'b2': {'matrix_bands': 2}, 'bulk': {'matrix_output': 'bulk'},
+                'loop': {'matrix_groups': 'loop'},
+                'whole': {'matrix_input_chunks': 'whole'},
+                'b3': {'matrix_bands': 3}, 'red': {'matrix_output': 'red'},
+                'bulk': {'matrix_output': 'bulk'},
                 'box': {'matrix_output': 'box'}}
 
 
 @pytest.mark.parametrize('variant', sorted(GPU_VARIANTS))
-@pytest.mark.parametrize('order', [6, 8])
+@pytest.mark.parametrize('order', [6, 8, 10, 12])
 def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
                                       tensorforge_include):
     """On a GH200 (wgmma) or GB200 (tcgen05): the volume in the high-order
@@ -1022,9 +1691,12 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
     (`test_multi_element._described`)."""
     if target.backend != 'cuda' or target.arch not in ('sm_90', 'sm_100'):
         pytest.skip('no GPU with wgmma or tcgen05')
-    if target.arch == 'sm_90' and variant in ('b2', 'bulk', 'box'):
+    if target.arch == 'sm_90' and variant in ('b3', 'red', 'box'):
         pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands and '
-                    'adds D a cell at a time')
+                    'adds D a cell or a row a reduction')
+    if order > 8 and variant not in ('', 'unrolled', 'loop', 'whole'):
+        pytest.skip('o10 and o12: the tile as the options leave it, its '
+                    'blocks written out and in one loop, and I whole')
     from harness.runner import run_case
     options = {**HIGH, **GPU_VARIANTS[variant]}
     special = dataclasses.replace(target, arch=target.arch + 'a')
@@ -1045,16 +1717,17 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
                            result.detail)
 
 
-@pytest.mark.parametrize('variant', ['', 'unrolled', 'bulk', 'box'])
+@pytest.mark.parametrize('variant', ['', 'unrolled', 'red', 'bulk', 'box'])
 @pytest.mark.parametrize('order', [6, 8])
 def test_many_trips_of_the_tile_on_the_gpu(order, variant, target, cache_root,
                                            tensorforge_include):
     """On a GB200, where J2 found three bands on two input slots wrong and
     hung (A's ring's slots in turn among the bands): the tile over 65537
     elements on a twentieth of the grid the device holds -- some 650 trips a
-    block (`Options.resident_grid`) -- three bands, bit for bit what two
-    bands give over the same elements (the same products in the same
-    order), each output form against its own."""
+    block (`Options.resident_grid`) -- three bands (the default J2 ran),
+    bit for bit what two bands (the default now) give over the same
+    elements (the same products in the same order), each output form
+    against its own."""
     if target.backend != 'cuda' or target.arch != 'sm_100':
         pytest.skip('no GPU with tcgen05')
     import numpy as np
