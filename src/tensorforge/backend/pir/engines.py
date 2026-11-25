@@ -3523,6 +3523,20 @@ def tcgen05_refusal(s: Stmt) -> Optional[str]:
                 isinstance(v, Value) and isinstance(v.type, MatrixDescType)
                 and v.type.form == 'tcgen05'):
             return f'{name} through {v!r}, no descriptor of tcgen05\'s format'
+    names = tuple(s.attr('scalars') or ())
+    scalars = s.args[3:]
+    runtime = names[2:]
+    if names[:2] != ('enable_input_d', 'issue') or len(scalars) != len(names) \
+            or any(x not in ('n', 'a_column', 'd_column') for x in runtime) \
+            or len(set(runtime)) != len(runtime):
+        return ('the scalars of a tcgen05.mma are enable_input_d and issue, '
+                'then N and the columns that are values')
+    if 'n' in runtime:
+        widths = s.attr('widths')
+        if not widths or any(w not in TCGEN05_N for w in widths) \
+                or max(widths) != shape[1]:
+            return (f'a tcgen05.mma whose N is a value of {widths!r}: each '
+                    f'of 16, 32, ..., 256, the widest its shape')
     columns = {'d_column': (c, shape[1])}
     if src_a is Source.TMEM:
         columns['a_column'] = (a, shape[2])
@@ -3530,14 +3544,14 @@ def tcgen05_refusal(s: Stmt) -> Optional[str]:
         at = s.attr(key)
         if not _is_tmem(buffer):
             return f'{buffer!r} is no buffer of tensor memory'
+        # A column that is a value: the static part here, the cells it
+        # reaches the oracle's to check where the product runs.
+        reach = 0 if key in runtime else width
         if not isinstance(at, int) or at < 0 \
-                or at + width > buffer.type.shape[1]:
+                or at + reach > buffer.type.shape[1]:
             return (f'{key} {at!r} and {width} columns past the '
                     f'{buffer.type.shape[1]} of {buffer}')
-    scalars = s.args[3:]
-    if s.attr('scalars') != ('enable_input_d', 'issue') or len(scalars) != 2:
-        return 'the scalars of a tcgen05.mma are enable_input_d and issue'
-    enable, issue = scalars
+    enable, issue = scalars[:2]
     if not isinstance(enable, Value) and enable not in (0, 1):
         return f'enable-input-d is 0 or 1 or a value of either, not {enable!r}'
     if not isinstance(issue, Value):
@@ -3582,21 +3596,34 @@ def _lower_tcgen05(s: Stmt, env: Spelling) -> Lowered:
     if why is not None:
         raise IRError(why)
     (a,), (b,), (c,) = fragments(s)
-    enable, issue = s.args[3:]
+    enable, issue = s.args[3:5]
+    runtime = dict(zip(tuple(s.attr('scalars'))[2:], s.args[5:]))
     tmem_a = sources_of(s)[0] is Source.TMEM
 
     def at(buffer, key):
         column = s.attr(key)
-        return f'{env.name(buffer)} + {column}u' if column else env.name(buffer)
+        text = f'{env.name(buffer)} + {column}u' if column else \
+            env.name(buffer)
+        if key in runtime:
+            # A column that is a value: the address in its register.
+            text += f' + static_cast<uint32_t>({env.name(runtime[key])})'
+        return text
 
     def flag(v):
         return f'static_cast<uint32_t>({env.name(v)})'
 
+    shape = s.attr('shape')
+    if 'n' in runtime:
+        # N a value: the instruction descriptor in a register, N >> 3 from
+        # bit 17 put into the rest of it.
+        idesc = ('r', f'{tcgen05_idesc((shape[0], 0, shape[2])):#010x}u | '
+                      f'((static_cast<uint32_t>({env.name(runtime["n"])}) '
+                      f'>> 3) << 17)')
+    else:
+        idesc = ('n', f'{tcgen05_idesc(shape):#010x}u')
     operands = [('r', at(c, 'd_column')),
                 ('r', at(a, 'a_column')) if tmem_a else ('l', env.name(a)),
-                ('l', env.name(b)),
-                ('n', f'{tcgen05_idesc(s.attr("shape")):#010x}u'),
-                ('r', flag(issue))]
+                ('l', env.name(b)), idesc, ('r', flag(issue))]
     if isinstance(enable, Value):
         operands.append(('r', flag(enable)))
         head, predicate = 'setp.ne.b32 p, %5, 0;\\n', 'p'
@@ -3859,9 +3886,10 @@ def _check_commit_group(s: Stmt) -> List[str]:
                     f'set up, not {obj!r}']
         if obj.slots:
             # Onto a ring's slot: the slot, then the thread that issued.
-            if s.attr('side') != 'empty':
+            if s.attr('side') not in ('empty', 'full'):
                 return [f'{s.op}: {engine} commits onto the empty side of a '
-                        f'ring\'s slot, which its producer waits on, not '
+                        f'ring\'s slot, which its producer waits on, or its '
+                        f'full side, which its consumers do, not '
                         f'{s.attr("side")!r}']
             if len(s.args) != 2 or not isinstance(s.args[1], Value):
                 return [f'{s.op}: {engine} commits onto a ring\'s slot what '
@@ -3920,7 +3948,8 @@ def _check_tmem(s: Stmt) -> List[str]:
     if not _is_tmem(buffer):
         diag.append(f'{s.op}: {buffer!r} is no buffer of tensor memory')
     if s.op in (Op.TMEM_LD, Op.TMEM_ST):
-        count = len(s.target) if s.op == Op.TMEM_LD else len(s.args) - 1
+        count = len(s.target) if s.op == Op.TMEM_LD else (
+            len(s.args) - 1 - bool(s.attr('runtime_column')))
         if count not in TMEM_COUNTS:
             diag.append(f'{s.op}: {count} columns a thread, where the '
                         f'instruction moves one of {TMEM_COUNTS}')
@@ -3955,7 +3984,11 @@ def _lower_tmem_dealloc(s: Stmt, env: Spelling) -> Lowered:
 def _tmem_address(s: Stmt, env: Spelling) -> str:
     """The warp's quarter of the lanes, from `column` on: a warp reaches
     the lanes 32 (w % 4) to 32 (w % 4) + 31 alone (PTX ISA, "Tensor
-    Memory": "Access restrictions")."""
+    Memory": "Access restrictions").  A store's column may be a value, the
+    operand behind the buffer (`tmem_st`)."""
+    if s.attr('runtime_column'):
+        return (f'tensorforge::tmemWarpAddress({env.name(s.args[0])}, '
+                f'static_cast<uint32_t>({env.name(s.args[1])}))')
     return (f'tensorforge::tmemWarpAddress({env.name(s.args[0])}, '
             f'{s.attr("column")}u)')
 
@@ -3985,7 +4018,7 @@ def _lower_tmem_st(s: Stmt, env: Spelling) -> Lowered:
     """`tcgen05.st.sync.aligned.32x32b.x{N}.b32` and the wait for it: thread
     t of a warp the lane 32 (w % 4) + t, N columns from `column` on."""
     _tcgen05_available(env)
-    values = s.args[1:]
+    values = s.args[2:] if s.attr('runtime_column') else s.args[1:]
     count = len(values)
     if count not in TMEM_COUNTS:
         raise IRError(f'a store of {count} columns of tensor memory a '
@@ -4182,13 +4215,15 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            lower={'cuda': _lower_tmem_dealloc, '': _lower_tmem_dealloc,
                   '*': _no_tmem},
            arrival=Uniformity.BLOCK, check=_check_tmem),
-    OpSpec(Op.TMEM_LD, operands=(Slot('column', _INT),),
+    OpSpec(Op.TMEM_LD, operands=(Slot('column', _INT),
+                                 Slot('runtime_column', (bool,), False)),
            results=('values',), effect=Effect.READ, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other',
            lower={'cuda': _lower_tmem_ld, '': _lower_tmem_ld,
                   '*': _no_tmem}, check=_check_tmem),
-    OpSpec(Op.TMEM_ST, operands=(Slot('column', _INT),),
+    OpSpec(Op.TMEM_ST, operands=(Slot('column', _INT),
+                                 Slot('runtime_column', (bool,), False)),
            results=(), effect=Effect.WRITE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other',
@@ -4263,7 +4298,8 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
                                     Slot('sources', (tuple,), False),
                                     Slot('scalars', (tuple,), False),
                                     Slot('a_column', _INT, False),
-                                    Slot('d_column', _INT, False)),
+                                    Slot('d_column', _INT, False),
+                                    Slot('widths', (tuple,), False)),
            results=('d',), effect=Effect.NONE, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe=_matrix_pipe, lower={'*': _lower_matrix_mac},
@@ -4833,15 +4869,17 @@ def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
 
 def commit_group(engine: str, obj: Optional[Value] = None,
                  issue: Optional[Value] = None,
-                 slot: Optional[Any] = None) -> Stmt:
+                 slot: Optional[Any] = None, side: str = 'empty') -> Stmt:
     """Close what `engine` issued since its last commit into one group
     (`COMMIT_ENGINES`): `wgmma.commit_group`; tcgen05's onto the mbarrier
     `obj` (`IRBuilder.bulk_channel`), what the thread `issue` picks issued
-    -- or, `slot` given, onto the empty side of that slot of the ring `obj`
+    -- or, `slot` given, onto a side of that slot of the ring `obj`
     (`mbarrier_ring`), which the products arrive at once complete: the
-    consumer's release of the slot, for its producer to fill again.
-    Pinned and asynchronous; the object named in `object`, as a bulk copy
-    names it."""
+    empty side, the consumer's release of the slot, for its producer to
+    fill again; or the full side, the producer's publish of what the
+    products write into the slot, for its consumers to take (tensor
+    memory's D, `multi_element`'s high-order tile).  Pinned and
+    asynchronous; the object named in `object`, as a bulk copy names it."""
     if engine not in COMMIT_ENGINES:
         raise IRError(f'{engine!r} commits no groups; '
                       f'{", ".join(sorted(COMMIT_ENGINES))} do')
@@ -4854,7 +4892,10 @@ def commit_group(engine: str, obj: Optional[Value] = None,
         attrs += (('object', obj),)
         args = (issue,)
         if slot is not None:
-            attrs += (('side', 'empty'), ('scope', _ring_scope(obj)))
+            if side not in ('empty', 'full'):
+                raise IRError(f'a commit onto the {side!r} side of a ring\'s '
+                              f'slot; its sides are empty and full')
+            attrs += (('side', side), ('scope', _ring_scope(obj)))
             args = (slot, issue)
     elif obj is not None or issue is not None or slot is not None:
         raise IRError(f'{engine} commits onto its counter')
@@ -4882,17 +4923,27 @@ def tmem_dealloc(tmem: Value) -> Stmt:
                  accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))
 
 
-def tmem_ld(tmem: Value, column: int, targets: Sequence[Value]) -> Stmt:
+def tmem_ld(tmem: Value, column: Any, targets: Sequence[Value]) -> Stmt:
     """A warp's load of `len(targets)` columns of its quarter of `tmem`'s
-    lanes, from `column` on, into `targets`."""
+    lanes, from `column` on, into `targets`: a number, or a value -- the
+    operand behind the buffer, `column` 0 and `runtime_column` set."""
+    if isinstance(column, Value):
+        return _stmt(Op.TMEM_LD, (('column', 0), ('runtime_column', True)),
+                     args=(tmem, column), target=tuple(targets),
+                     accesses=(Access(Effect.READ, MemSpace.TMEM, tmem),))
     return _stmt(Op.TMEM_LD, (('column', int(column)),), args=(tmem,),
                  target=tuple(targets),
                  accesses=(Access(Effect.READ, MemSpace.TMEM, tmem),))
 
 
-def tmem_st(tmem: Value, column: int, values: Sequence[Any]) -> Stmt:
+def tmem_st(tmem: Value, column: Any, values: Sequence[Any]) -> Stmt:
     """A warp's store of `values` to its quarter of `tmem`'s lanes, one
-    column each from `column` on."""
+    column each from `column` on: a number, or a value -- the operand behind
+    the buffer, `column` 0 and `runtime_column` set."""
+    if isinstance(column, Value):
+        return _stmt(Op.TMEM_ST, (('column', 0), ('runtime_column', True)),
+                     args=(tmem, column) + tuple(values),
+                     accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))
     return _stmt(Op.TMEM_ST, (('column', int(column)),),
                  args=(tmem,) + tuple(values),
                  accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))

@@ -317,6 +317,58 @@ def parse_matrix_roles(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_tile` takes.
+MATRIX_TILE = ('off', 'high')
+
+
+def parse_matrix_tile(text: str) -> str:
+  """`off` or `high` (`Options.matrix_tile`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_TILE:
+    raise ValueError(f'expected one of {MATRIX_TILE}, got {text!r}')
+  return value
+
+
+def parse_matrix_bands(text: str) -> int:
+  """1 to 4 (`Options.matrix_bands`)."""
+  value = int(str(text).strip())
+  if not 1 <= value <= 4:
+    raise ValueError(f'matrix_bands is 1 to 4, not {value}')
+  return value
+
+
+#: What `Options.matrix_groups` takes.
+MATRIX_GROUPS = ('loop', 'unrolled')
+
+
+def parse_matrix_groups(text: str) -> str:
+  """`loop` or `unrolled` (`Options.matrix_groups`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_GROUPS:
+    raise ValueError(f'expected one of {MATRIX_GROUPS}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_spans` takes.
+MATRIX_SPANS = ('kept', 'dense')
+
+
+def parse_matrix_spans(text: str) -> str:
+  """`kept` or `dense` (`Options.matrix_spans`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_SPANS:
+    raise ValueError(f'expected one of {MATRIX_SPANS}, got {text!r}')
+  return value
+
+
+def parse_matrix_consumers(text: str) -> int:
+  """1 to 4 (`Options.matrix_consumers`)."""
+  value = int(str(text).strip())
+  if not 1 <= value <= 4:
+    raise ValueError(f'matrix_consumers is 1 to 4, not {value}')
+  return value
+
+
 def parse_matrix_ring_rows(text: str) -> int:
   """A positive multiple of 8 (`Options.matrix_ring_rows`)."""
   value = int(str(text).strip())
@@ -2921,6 +2973,74 @@ declare('matrix_roles',
             'tcgen05 (sm_100a); elsewhere the plan says why not, and the '
             'kernel\'s comment (`element_group.roles_refusal`, '
             '`roles_notes`).  A demonstrator of the roles, not measured yet.')
+
+declare('matrix_tile',
+        default='off',
+        env='TF_MATRIX_TILE',
+        parse=parse_matrix_tile,
+        doc='The high-order tile of the multi-element layout\'s asynchronous '
+            'tiling (`element_group.TileRows`, `tile_refusal`).  `off`, the '
+            'default: the tilings as before.  `high`: the section\'s one '
+            'asynchronous step with its star step folded in and B streamed '
+            'prepared (`matrix_star` `engine`, `matrix_ring` `prepared`, '
+            'which it implies for that step), the group\'s rows dense on the '
+            'engine\'s rows -- on wgmma (sm_90a) a tile of whole elements a '
+            'consumer warpgroup, `matrix_consumers` of them sharing the '
+            'operator ring, and producer warps staging the inputs and '
+            'filling the ring; on tcgen05 (sm_100a) the three roles '
+            '(`matrix_roles` `three`) at as many elements as tensor memory\'s '
+            'lanes hold.  Where the section cannot take it, the plan says '
+            'why, and the kernel\'s comment (`element_group.tile_notes`).  '
+            'Not measured yet.')
+
+declare('matrix_spans',
+        default='kept',
+        env='TF_MATRIX_SPANS',
+        parse=parse_matrix_spans,
+        doc='What of B the high-order tile streams and multiplies a block of '
+            'K (`matrix_tile` `high`, `element_group.tile_chunks`): `kept`, '
+            'the default, each product\'s kept span -- its tiles of N from '
+            'its first nonzero one to its last, in the engine\'s granules -- '
+            'the block\'s first product whole, so that D starts fresh; '
+            '`dense`, every product\'s whole width, as the tilings before '
+            'the tile.')
+
+declare('matrix_bands',
+        default=3,
+        env='TF_MATRIX_BANDS',
+        parse=parse_matrix_bands,
+        doc='The star role\'s bands of the high-order tile on tcgen05 '
+            '(`matrix_tile` `high`, `element_group.TileRows.bands`): four '
+            'warps a band, each band covering tensor memory\'s 128 lanes and '
+            'taking the blocks of A in turn.  3, the default, the fourteen '
+            'element warps\' twelve that mixed; fewer bands are fewer warps '
+            'of more registers each.  1 to 4; a search parameter.')
+
+declare('matrix_groups',
+        default='loop',
+        env='TF_MATRIX_GROUPS',
+        parse=parse_matrix_groups,
+        doc='How the high-order tile walks its groups -- its blocks of K, a '
+            'chunk of B each (`matrix_tile` `high`, `multi_element.'
+            '_wgmma_groups`): `loop`, the default, one loop over them, its '
+            'body written once -- a block\'s A, its chunk, one fence and one '
+            'dispatch on the block\'s width to the products at that '
+            'immediate N, read off a table of the generated file -- so that '
+            'the code does not grow with the groups (the hand-written '
+            'kernels\' group engine); `unrolled`, each group written out, as '
+            'before.  On wgmma; tcgen05\'s groups stay written out until its '
+            'issuing thread takes the widths at run time.')
+
+declare('matrix_consumers',
+        default=2,
+        env='TF_MATRIX_CONSUMERS',
+        parse=parse_matrix_consumers,
+        doc='The consumer warpgroups of the high-order tile on wgmma '
+            '(`matrix_tile` `high`), each its own tile of 64 rows of whole '
+            'elements, the group their elements: 2, the default, as the '
+            'hand-written kernels run them (one warpgroup alone reached 70 '
+            'to 90 % of the TF32 rate on a GH200); 1 to 4.  The fill rule '
+            'takes fewer where the group does not fit.')
 
 declare('matrix_ring_rows',
         default=16,

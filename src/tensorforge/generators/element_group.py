@@ -577,6 +577,11 @@ class GroupSection:
     #: warpgroup that issues and writes D behind that; '' where the element
     #: warps do everything.
     roles: str = ''
+    #: The high-order tile's rows where the section takes it (`TileRows`,
+    #: `Options.matrix_tile`): on wgmma the block's own layout -- consumer
+    #: warpgroups over dense rows and producer warps, no warp an element's --
+    #: and on tcgen05 the three roles' (`roles`); None elsewhere.
+    tile: Optional['TileRows'] = None
 
     @property
     def chained(self) -> bool:
@@ -696,6 +701,10 @@ class ElementGroup:
     section: GroupSection
     shared_bytes: int
     lanes: Optional['Lanes'] = None
+    #: Why the section did not take the high-order tile the options asked
+    #: for (`tile_plan`), for the kernel's comment (`tile_notes`); '' where
+    #: it did or nobody asked.
+    tile_note: str = ''
 
     @property
     def threads(self) -> int:
@@ -711,7 +720,12 @@ class ElementGroup:
         """The block's producer warps: one where the section's inputs come
         through a ring (`GroupSection.ring`), behind the element warps -- a
         warpgroup where it gives its registers to them, as `setmaxnreg`
-        moves a warpgroup's (`GroupSection.registers`)."""
+        moves a warpgroup's (`GroupSection.registers`).  In the high-order
+        tile's own layout on wgmma (`rowless`) every warp of the block: none
+        is an element's, and each takes the group's trips as a producer's
+        does (the batch loop's `producer_rows`)."""
+        if rowless(self.section):
+            return self.warps
         if self.section.roles:
             # The operator producer's warp and the mma role's warpgroup
             # behind the element warps (`roles_refusal`).
@@ -723,10 +737,21 @@ class ElementGroup:
     @property
     def warps(self) -> int:
         """The block's warps: one an element and the producer's, or the lanes
-        form's shares."""
+        form's shares -- in the high-order tile's layout on wgmma its
+        consumer warpgroups and the producer's warps (`tile_warps`)."""
         if self.lanes is not None:
             return self.lanes.warps
+        if rowless(self.section):
+            return tile_warps(self.section.tile)
         return self.elements + self.producers
+
+    @property
+    def rows(self) -> int:
+        """The block's rows that are an element's own, the batch loop's
+        (`BatchLoop`'s `element_rows`): a warp an element, the producer's
+        rows past them -- none in the high-order tile's layout on wgmma,
+        whose rows are the engine's (`rowless`)."""
+        return 0 if rowless(self.section) else self.elements
 
 
 def _operations(descrs: Sequence) -> list:
@@ -1672,7 +1697,8 @@ def lower(section: GroupSection, context, matrix: bool = True,
           double: bool = True, ring: int = 0,
           registers: int = 0, halves: int = 0,
           prepared: bool = False, star: str = '',
-          output: str = 'red', roles: str = '') -> GroupSection:
+          output: str = 'red', roles: str = '',
+          tile: Optional['TileRows'] = None) -> GroupSection:
     """The section with each step's lowering for the context's target --
     the FMA forms only, where `matrix` is off; the lanes form's `lane` for
     every step, where `lanes` is on -- and the stages those lowerings read,
@@ -1693,7 +1719,10 @@ def lower(section: GroupSection, context, matrix: bool = True,
     asynchronous step that can take it (`fuse`).  `output` `bulk` or `box`:
     D added into the output by bulk reductions where a matrix step can
     (`output_refusal`).  `roles` `three`: the block in the three roles
-    where the section takes them (`roles_refusal`).
+    where the section takes them (`roles_refusal`).  `tile`: the high-order
+    tile's rows (`TileRows`, `tile_plan`, which checks the section takes
+    it) -- on tcgen05 in the three roles, on wgmma in its own layout with
+    the inputs through a producer's ring of `ring` slots (`rowless`).
     The matrix tiling is NVIDIA's: elsewhere every step takes an FMA form,
     as below sm_80."""
     from tensorforge.backend.instructions.compute.primitives import nvidia
@@ -1729,6 +1758,10 @@ def lower(section: GroupSection, context, matrix: bool = True,
             ring_rows=int(options.matrix_ring_rows))
         staged = _held(staged, context)
     pitched = _pitched(staged)
+    if tile is not None and not lanes:
+        tiled = dataclasses.replace(pitched, tile=tile, doubled=0)
+        return _held(dataclasses.replace(_bulk_pitched(tiled),
+                                         ring=int(ring or 1)), context)
     if roles and not lanes:
         roled = dataclasses.replace(pitched, roles=roles, doubled=0)
         if roles_refusal(roled, context) is None:
@@ -1869,6 +1902,438 @@ def roles_notes(group: 'ElementGroup', context) -> List[str]:
         why = ('the roles\' plan does not fit the group the fill rule '
                'chose, which this one does')
     return [f'matrix_roles={asked} declined: {why}']
+
+
+# -- the high-order tile ------------------------------------------------------ #
+
+@dataclass(frozen=True)
+class TileRows:
+    """The high-order tile's rows (`Options.matrix_tile` `high`): the
+    group's rows -- an element's quantities, element after element -- on
+    the engine's rows densely, `per` whole elements a tile of `m` rows,
+    `tiles` tiles, a tile's rows past its elements padding.  Row `r` of
+    tile `t` is the group's row `used * t + r`: element `per * t + r //
+    width`, quantity `r % width` -- an element's rows crossing warps where
+    they fall so, each row the mixing's and the epilogue's own.
+
+    On wgmma a tile is a consumer warpgroup's m64 (`Options.
+    matrix_consumers` of them), and the block its own layout (`rowless`):
+    the consumer warpgroups, each a role of its own, and the producer's
+    warps behind them (`tile_warps`), no warp an element's.  On tcgen05 the
+    one M of 128 rows, tensor memory's lanes, in the three roles
+    (`GroupSection.roles`), `per` elements as many as hold."""
+
+    engine: str
+    #: An element's rows: the step's columns, its quantities.
+    width: int
+    per: int
+    tiles: int
+    #: What of B a block streams and multiplies (`Options.matrix_spans`,
+    #: `tile_chunks`): `kept` spans, or `dense` whole widths.
+    spans: str = 'kept'
+    #: How the blocks of K are walked (`Options.matrix_groups`): one `loop`
+    #: whose body dispatches on a block's width, each product of a block
+    #: then of that width (`tile_chunks`), or `unrolled`.
+    groups: str = 'unrolled'
+    #: tcgen05's: the star role's bands of four warps, each covering
+    #: tensor memory's 128 lanes, the blocks of A taken in turn; and D's
+    #: slots in tensor memory, two where they fit beside A's ring
+    #: (`TMEM_BUDGET`), the epilogue of a trip under the next one's products.
+    bands: int = 0
+    dslots: int = 1
+
+    @property
+    def granule(self) -> int:
+        """The rows of N a span is made of: the engine's N, a multiple of
+        8 on wgmma and of 16 on tcgen05 at its M of 128 -- whose D column
+        a span starts at, too."""
+        return 16 if self.engine == 'tcgen05' else 8
+
+    @property
+    def descending(self) -> bool:
+        """Whether B's pieces lay their tiles of N last first, each span
+        running to its stage's last row (`tile_chunks`): on wgmma, so that
+        every span's products start at the accumulators' first register --
+        D's fragment gives a register the same column whatever N, but
+        ptxas serializes the wgmmas of a chain whose accumulators start
+        elsewhere (C7511).  On tcgen05 a span starts at its own column of
+        tensor memory instead (`d_column`)."""
+        return self.engine == 'wgmma'
+
+    @property
+    def m(self) -> int:
+        """A tile's rows: the engine's M."""
+        return TCGEN05_ROWS if self.engine == 'tcgen05' else 64
+
+    @property
+    def elements(self) -> int:
+        return self.per * self.tiles
+
+    @property
+    def used(self) -> int:
+        """A tile's rows its elements take."""
+        return self.per * self.width
+
+    def place(self, element: int, quantity: int) -> Tuple[int, int]:
+        """`(tile, row)` of the group's element `element`, quantity
+        `quantity`."""
+        return element // self.per, (element % self.per) * self.width \
+            + quantity
+
+
+#: The producer's warps of the high-order tile on wgmma (`rowless`): the
+#: first stages the trip's inputs into the input ring, a bulk copy a column
+#: of an element a lane (`compute.multi_element`'s `_produce`), the second
+#: fills the prepared operator ring.
+TILE_PRODUCER_WARPS = 2
+
+
+def tile_asked(context) -> str:
+    """The tile the options ask for (`Options.matrix_tile`)."""
+    return getattr(context.get_user_options(), 'matrix_tile', 'off')
+
+
+def spans_asked(context) -> str:
+    """What of B the options ask the tile to stream (`Options.
+    matrix_spans`): whole widths wherever known zeros are not skipped
+    (`Options.skip_known_zeros`), as `kept_tiles` keeps every tile then."""
+    options = context.get_user_options()
+    if not getattr(options, 'skip_known_zeros', True):
+        return 'dense'
+    return getattr(options, 'matrix_spans', 'kept')
+
+
+def groups_asked(context) -> str:
+    """How the options ask the tile to walk its groups (`Options.
+    matrix_groups`)."""
+    return getattr(context.get_user_options(), 'matrix_groups', 'unrolled')
+
+
+def kept_span(section: GroupSection, step: Step, product: int, k0: int,
+              rows: int, granule: int) -> Optional[Tuple[int, int]]:
+    """`(lo, hi)`: the rows of N of product `product`'s stage, from its
+    grid's first (`Stage.n0`), that hold an entry of its operator inside
+    the product's window at rows `k0` to `k0 + rows` of K -- from the first
+    such row to the last, in whole `granule`s, within the stage's width --
+    or None where none does; the whole width where the operator's pattern
+    says nothing (`Tensor.nonzero_pattern`)."""
+    p = step.products[product]
+    stage = _step_stages(section, step)[product]
+    pattern = getattr(p.first.tensor, 'nonzero_pattern', None)
+    if pattern is None:
+        return 0, stage.width
+    (r0, r1), (d0, d1) = stage.window
+    cols = range(d0 + k0, min(d1, d0 + k0 + rows))
+    found = [n for n in range(stage.width)
+             if r0 <= stage.n0 + n < r1
+             and any(pattern.is_nz((stage.n0 + n, kk)) for kk in cols)]
+    if not found:
+        return None
+    lo = found[0] - found[0] % granule
+    hi = min(stage.width, -(-(found[-1] + 1) // granule) * granule)
+    return lo, hi
+
+
+def _tile_pieces(section: GroupSection, step: Step) -> Tuple[
+        Tuple[Tuple[int, ...], ...], ...]:
+    """`tile_chunks`'s chunks, a block of K with no piece an empty one."""
+    tile = section.tile
+    stages = _step_stages(section, step)
+    out = []
+    for chunk in ring_chunks(section, step):
+        pieces = []
+        for p, k0, rows in chunk:
+            span = ((0, stages[p].width) if tile is None
+                    or tile.spans != 'kept'
+                    else kept_span(section, step, p, k0, rows, tile.granule))
+            if span is None:
+                continue
+            if not out and not pieces:
+                span = (0, stages[p].width)
+            if tile is not None and tile.descending:
+                # On to the stage's last row, the first of the descending
+                # order (`TileRows.descending`).
+                span = (span[0], stages[p].width)
+            pieces.append((p, k0, rows) + span)
+        if pieces and tile is not None and tile.groups == 'loop':
+            # One width a block, the dispatch's key: every product of it
+            # the union of their spans, zeros where its own is narrower or
+            # it has none.
+            lo = min(piece[3] for piece in pieces)
+            hi = max(piece[4] for piece in pieces)
+            pieces = [(p, k0, rows, lo, hi) for p, k0, rows in chunk]
+        out.append(tuple(pieces))
+    return tuple(out)
+
+
+def tile_chunks(section: GroupSection, step: Step) -> Tuple[
+        Tuple[Tuple[int, ...], ...], ...]:
+    """The chunks the high-order tile streams `step`'s B in
+    (`ring_chunks`'s, a block of K of every product a chunk), each piece
+    `(product, k0, rows, lo, hi)` -- the rows of N `lo` to `hi` of the
+    product's stage: its kept span (`kept_span`) where the tile keeps them
+    (`TileRows.spans`), its whole width where it does not; on wgmma the
+    span on to the stage's last row, its tiles laid last first
+    (`TileRows.descending`).  The first
+    piece of the first block whole, as its product is the first to write D
+    -- every column fresh from it on; a product with no entry in a block
+    no piece of it.  A block with none at all, an inactive group, the tile
+    refuses for now (`tile_refusal`): the volume's operators have none at
+    a pass of the whole of N."""
+    chunks = _tile_pieces(section, step)
+    if not all(chunks):
+        raise ValueError(f'{step.dest.alias}: a block of K with no entry of '
+                         f'any product')
+    return chunks
+
+
+def rowless(section: GroupSection) -> bool:
+    """Whether the block runs the high-order tile's own layout, no warp an
+    element's (`TileRows`): wgmma's consumer warpgroups over dense rows and
+    the producer's warps; tcgen05's star bands, epilogue warpgroup and
+    input, operator and mma warps (`TILE_TCGEN05`)."""
+    return section.tile is not None
+
+
+def tile_warps(tile: TileRows) -> int:
+    """The warps of the high-order tile's own layout: on wgmma a warpgroup a
+    tile and the producer's (`TILE_PRODUCER_WARPS`); on tcgen05 the star
+    role's bands of four, the epilogue warpgroup and a warp each of the
+    input, operator and mma roles (`TILE_TCGEN05`)."""
+    if tile.engine == 'tcgen05':
+        return WARPGROUP_WARPS * (tile.bands + 1) + len(TILE_TCGEN05) - 2
+    return WARPGROUP_WARPS * tile.tiles + TILE_PRODUCER_WARPS
+
+
+#: The roles of the high-order tile's own layout on tcgen05, in the block's
+#: order of warps: the star bands (4 x bands), the epilogue warpgroup -- both
+#: on a warpgroup's boundary, each warp reaching its quarter of tensor
+#: memory's lanes -- then the input warp (the trip's inputs into their ring,
+#: a trip ahead), the operator warp (B's prepared ring) and the mma warp
+#: (its first lane issues).
+TILE_TCGEN05 = ('star', 'epilogue', 'input', 'operator', 'mma')
+
+#: The star role's bands on tcgen05 (`TileRows.bands`): three cover the
+#: fourteen elements' blocks, as the element warps' did.
+TILE_BANDS = 3
+
+#: The columns of tensor memory the high-order tile's plan may take: a
+#: block's 512 on sm_100a -- one number, for the target to give later
+#: (Rubin: 576).
+TMEM_BUDGET = 512
+
+
+def tile_dslots(tile_n: int, products: int, budget: int = TMEM_BUDGET) -> int:
+    """D's slots in tensor memory for a step of N `tile_n` (rounded to 16):
+    two where they fit beside A's ring of `STAR_SLOTS` slots, both TF32
+    halves of every product a slot -- o8: 2 x 128 + 192 = 448 of 512 --
+    else one (o10: 2 x 224 + 192 = 640; o12's 368 needs the passes)."""
+    ring = STAR_SLOTS['tcgen05'] * 2 * STAR_ROWS * products
+    return 2 if 2 * tile_n + ring <= budget else 1
+
+
+def tile_refusal(section: GroupSection, context) -> Optional[str]:
+    """Why the section cannot take the high-order tile (`Options.
+    matrix_tile` `high`), or None where it can: an F32 section of one
+    asynchronous step -- wgmma or tcgen05 -- with its star step folded in
+    (`folded`), the only other steps that fold, and B streamed prepared
+    (`Stage.prepared`, the operators carrying their numbers); D added a
+    cell at a time, not by bulk reductions (yet); on wgmma a tile holding
+    a whole element, its columns at most 64."""
+    if tile_asked(context) != 'high':
+        return 'the option is off'
+    if section.dtype is not Datatype.F32:
+        return (f'{section.dtype.name} sections have no asynchronous engine '
+                f'(the tile is 3xTF32)')
+    steps = [s for s in section.steps if s.lowering in ASYNC_LOWERINGS]
+    if len(steps) != 1:
+        return (f'{len(steps)} steps on the asynchronous engines; the tile '
+                f'takes one')
+    step = steps[0]
+    if not folded(section, step):
+        why = fuse_refusal(section, step)
+        return (f'the star step is not folded into {step.dest.alias}\'s '
+                f'products' + (f': {why}' if why else ''))
+    others = sorted({s.lowering for s in section.steps
+                     if s.lowering not in ASYNC_LOWERINGS + ('fused',)})
+    if others:
+        return (f'steps of {", ".join(others)} beside the asynchronous one; '
+                f'the tile takes its folded star and it alone')
+    stages = _step_stages(section, step)
+    if not all(st.prepared and st.streamed for st in stages):
+        return ('B does not stream prepared: '
+                + (step_refusal(step) or 'its stages are not split'))
+    if step.output and step.lowering == 'wgmma':
+        return ('D is added by bulk reductions; the tile on wgmma adds it a '
+                'cell at a time')
+    width = step.cols[1] - step.cols[0]
+    if step.lowering == 'wgmma' and width > 64:
+        return f'an element\'s {width} rows are past a warpgroup\'s 64'
+    if section.tile is not None:
+        empty = [i for i, chunk in enumerate(_tile_pieces(section, step))
+                 if not chunk]
+        if empty:
+            return (f'block{"s" if len(empty) > 1 else ""} '
+                    f'{", ".join(map(str, empty))} of K hold no entry of '
+                    f'{step.dest.alias}\'s operators: an inactive group, '
+                    f'which the tile does not skip yet')
+    return None
+
+
+def tile_lowered(section: GroupSection, context, tile, ring: int = 0):
+    """The classified `section` lowered for the high-order tile `tile`
+    (`lower`), the input ring's `ring` slots on wgmma: what the plan sized
+    (`tile_plan`) and the generator lowers again."""
+    # tcgen05's epilogue adds D by bulk reductions where the options ask
+    # for them (`Options.matrix_output`, `multi_element._tile_output`);
+    # wgmma's a cell at a time.
+    output = ('red' if tile is None or tile.engine != 'tcgen05'
+              else output_asked(context))
+    return lower(section, context, split=True, streamed=True, prepared=True,
+                 star='engine', output=output, tile=tile, ring=ring)
+
+
+def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
+        Optional['ElementGroup'], str]:
+    """The high-order tile's group of `section` (`Options.matrix_tile`
+    `high`), or None and why not.
+
+    The tile's own search, not the table's halving: on wgmma the most
+    consumer warpgroups the options give (`matrix_consumers`) and fewer,
+    each `64 // w` whole elements (`TileRows`), the input ring's slots the
+    deepest first (`PRODUCER_SLOTS`, then one); on tcgen05 as many elements
+    as tensor memory's 128 lanes hold, `128 // w`, and one fewer at a time
+    down to `MIN_ELEMENTS`.  The first that fits the block's shared memory
+    and threads."""
+    probe = tile_lowered(section, context, None)
+    steps = [s for s in probe.steps if s.lowering in ASYNC_LOWERINGS]
+    if len(steps) != 1:
+        return None, (f'{len(steps)} steps on the asynchronous engines; the '
+                      f'tile takes one')
+    step = steps[0]
+    engine = step.lowering
+    width = step.cols[1] - step.cols[0]
+    m = TCGEN05_ROWS if engine == 'tcgen05' else 64
+    per = m // width
+    why = None
+    hw = context.target.hw
+    if engine == 'wgmma':
+        consumers = int(getattr(context.get_user_options(),
+                                'matrix_consumers', 2))
+        for tiles in range(consumers, 0, -1):
+            tile = TileRows('wgmma', width, max(1, per), tiles,
+                            spans_asked(context), groups_asked(context))
+            for slots in PRODUCER_SLOTS + (1,):
+                lowered = tile_lowered(section, context, tile, slots)
+                why = tile_refusal(lowered, context)
+                if why is not None:
+                    return None, why
+                need = shared_bytes(lowered, tile.elements)
+                if (need <= budget and 32 * tile_warps(tile)
+                        <= hw.max_threads_per_block):
+                    return ElementGroup(tile.elements, lowered, need), ''
+        return None, (f'no group of the tile fits: one warpgroup\'s '
+                      f'{per} elements take '
+                      f'{shared_bytes(lowered, tile.elements)} B of shared '
+                      f'memory, more than the {budget} B a block has')
+    if per < MIN_ELEMENTS:
+        return None, (f'tensor memory\'s {TCGEN05_ROWS} lanes hold {per} '
+                      f'elements of {width} rows, fewer than {MIN_ELEMENTS}')
+    _, n16, _ = matrix_shape('tcgen05', 100)
+    tile_n = -(-(step.rows[1] - step.rows[0]) // n16) * n16
+    dslots = tile_dslots(tile_n, len(step.products))
+    for elements in range(min(per, TCGEN05_ROWS // width), MIN_ELEMENTS - 1,
+                          -1):
+        bands = int(getattr(context.get_user_options(), 'matrix_bands',
+                            TILE_BANDS))
+        tile = TileRows('tcgen05', width, elements, 1, spans_asked(context),
+                        groups_asked(context), bands, dslots)
+        for slots in PRODUCER_SLOTS[1:] + (1,):
+            lowered = tile_lowered(section, context, tile, slots)
+            why = tile_refusal(lowered, context)
+            if why is not None:
+                return None, why
+            need = shared_bytes(lowered, elements)
+            if (need <= budget
+                    and 32 * tile_warps(tile) <= hw.max_threads_per_block):
+                return ElementGroup(elements, lowered, need), ''
+    return None, (f'no group of the tile fits: {MIN_ELEMENTS} elements take '
+                  f'{shared_bytes(lowered, MIN_ELEMENTS)} B of shared memory, '
+                  f'more than the {budget} B a block has')
+
+
+def _tile_output_note(section: GroupSection) -> str:
+    """How the tcgen05 tile's epilogue adds D into the output: a cell at a
+    time, or staged in shared memory and added by bulk reductions -- a
+    column, or an element's box, a reduction (`Step.output`)."""
+    output = output_of(section)
+    if output == 'bulk':
+        return 'staged in shared memory, a bulk reduction a column'
+    if output == 'box':
+        return 'staged in shared memory, a bulk reduction an element'
+    return 'a reduction a cell'
+
+
+def tile_notes(group: 'ElementGroup', context) -> List[str]:
+    """What the kernel's comment says of the high-order tile where the
+    options ask for it (`Options.matrix_tile`): its rows and warps, or why
+    the section did not take it (`ElementGroup.tile_note`)."""
+    asked = tile_asked(context)
+    if asked == 'off':
+        return []
+    tile = group.section.tile
+    if tile is None:
+        return [f'matrix_tile={asked} declined: '
+                f'{group.tile_note or "the plan took another layout"}']
+    rows = (f'{tile.elements} elements, {tile.tiles} tile'
+            f'{"s" if tile.tiles > 1 else ""} of {tile.per} on '
+            f'{tile.used} of {tile.m} rows')
+    if tile.engine == 'wgmma':
+        c = WARPGROUP_WARPS * tile.tiles
+        return [f'the high-order tile: {rows}; warps 0 to {c - 1} its '
+                f'consumer warpgroups, each a tile -- A computed into its own '
+                f'slots, the products, D added a cell at a time -- sharing B\'s '
+                f'prepared ring; warp {c} stages the inputs into a ring of '
+                f'{group.section.ring} slot'
+                f'{"s" if group.section.ring > 1 else ""}, warp {c + 1} fills '
+                f'B\'s ring', _spans_note(group.section)]
+    b = WARPGROUP_WARPS * tile.bands
+    return [f'the high-order tile: {rows}; warps 0 to {b - 1} its star '
+            f'bands, A into tensor memory; warps {b} to {b + 3} the epilogue, '
+            f'D out of tensor memory under the next trip\'s products '
+            f'({tile.dslots} slot{"s" if tile.dslots > 1 else ""} of D), '
+            f'{_tile_output_note(group.section)}; '
+            f'warp {b + 4} stages the inputs into a ring of '
+            f'{group.section.ring} slot'
+            f'{"s" if group.section.ring > 1 else ""}, warp {b + 5} fills '
+            f'B\'s ring, warp {b + 6} issues', _spans_note(group.section)]
+
+
+def _spans_note(section: GroupSection) -> str:
+    """The kernel's word on what of B the high-order tile streams and
+    multiplies (`tile_chunks`): the kept spans' share of the dense pieces'
+    rows of N and their widths, or B dense."""
+    (step,) = [s for s in section.steps if s.lowering in ASYNC_LOWERINGS]
+    if section.tile.spans != 'kept':
+        return ('B dense, every product\'s whole width a block of K'
+                + ('; the blocks one loop' if section.tile.groups == 'loop'
+                   else ''))
+    stages = _step_stages(section, step)
+    chunks = tile_chunks(section, step)
+    kept = sum(rows * (hi - lo) for chunk in chunks
+               for _, _, rows, lo, hi in chunk)
+    dense = sum(rows * stages[p].width for chunk in chunks
+                for p, _, rows, _, _ in chunk)
+    widths = sorted({hi - lo for chunk in chunks for *_, lo, hi in chunk})
+    shown = (f'{len(widths)} widths from {widths[0]} to {widths[-1]}'
+             if len(widths) > 1 else f'one width, {widths[0]}')
+    walk = (f'; the {len(chunks)} blocks of K one loop, a dispatch on their '
+            f'width' if section.tile.groups == 'loop' else '')
+    return (f'B in kept spans: {round(100 * kept / dense)} % of the dense '
+            f'rows of N, {shown}' + (', each to the stage\'s last row, its '
+                                     'tiles last first'
+                                     if section.tile.descending else '')
+            + walk)
 
 
 def producer_refusal(section: GroupSection, context) -> Optional[str]:
@@ -2124,7 +2589,10 @@ def star_volume(section: GroupSection, elements: int) -> int:
     for step in section.steps:
         if step.lowering != 'wgmma' or not folded(section, step):
             continue
-        groups = max(1, elements // WARPGROUP_WARPS)
+        # A warpgroup a tile of the high-order tile's (`rowless`), else
+        # every warpgroup of the element warps.
+        groups = (section.tile.tiles if rowless(section)
+                  else max(1, elements // WARPGROUP_WARPS))
         total += (groups * STAR_SLOTS['wgmma'] * 64 * STAR_ROWS * 2
                   * len(step.products))
     return total
@@ -2308,6 +2776,9 @@ def output_notes(section: GroupSection, context) -> List[str]:
                 why = ('its staged columns do not fit beside the group '
                        'the fill rule chose -- its size and its lowering\'s '
                        'other choices kept')
+            if section.tile is not None:
+                why = (f'the high-order tile on {section.tile.engine} adds D '
+                       f'a cell at a time')
             notes.append(f'matrix_output={asked} declined for '
                          f'{step.dest.alias}: {why}; a reduction a cell')
             continue
@@ -2343,7 +2814,9 @@ def ring_volume(section: GroupSection) -> int:
         if stages[0].prepared:
             total += section.ring_slots * max(
                 chunk_volume(section, step, chunk)
-                for chunk in ring_chunks(section, step))
+                for chunk in (tile_chunks(section, step)
+                              if section.tile is not None
+                              else ring_chunks(section, step)))
             total += 2 * section.ring_slots * 8 // section.dtype.size()
             continue
         width = max(st.width for st in stages)
@@ -2438,7 +2911,10 @@ def chunk_volume(section: GroupSection, step: Step, chunk) -> int:
     """Elements a chunk of a step's prepared ring holds: each piece's rows
     of its stage's width, both halves."""
     stages = _step_stages(section, step)
-    return sum(rows * stages[p].width * 2 for p, _, rows in chunk)
+    # A piece of the high-order tile's names its rows of N (`tile_chunks`).
+    return sum(piece[2] * ((piece[4] - piece[3]) if len(piece) > 3
+                           else stages[piece[0]].width) * 2
+               for piece in chunk)
 
 
 def prepared(section: GroupSection) -> bool:
@@ -2530,26 +3006,35 @@ def prepared_table(section: GroupSection, step: Step, sm: int, form=None):
     if not all(st.prepared for st in stages):
         raise ValueError(f'{step.dest.alias}: a step whose B is not prepared')
     if stages[0].streamed:
-        pieces = [piece for chunk in ring_chunks(section, step)
+        pieces = [piece for chunk in (tile_chunks(section, step)
+                                      if section.tile is not None
+                                      else ring_chunks(section, step))
                   for piece in chunk]
     else:
         pieces = [(p, 0, st.depth) for p, st in enumerate(stages)]
     parts, offsets, at = [], {}, 0
-    for p, k0, rows in pieces:
+    for piece in pieces:
+        p, k0, rows = piece[:3]
         stage = stages[p]
+        # The rows of N it holds: the stage's width, or the high-order
+        # tile's span of it (`tile_chunks`).
+        lo, hi = piece[3:] or (0, stage.width)
         values = np.asarray(stage.tensor.get_values(), dtype=np.float64)
         (r0, r1), (d0, d1) = stage.window
-        block = np.zeros((rows, stage.width))
+        block = np.zeros((rows, hi - lo))
         for k in range(rows):
             col = d0 + k0 + k
             if col >= d1:
                 continue
-            for n in range(stage.width):
+            for n in range(lo, hi):
                 row = stage.n0 + n
                 if r0 <= row < r1:
-                    block[k, n] = values[row, col]
+                    block[k, n - lo] = values[row, col]
+        if section.tile is not None and section.tile.descending:
+            # The span's tiles of N last first (`TileRows.descending`).
+            block = block.reshape(rows, -1, 8)[:, ::-1, :].reshape(rows, -1)
         laid = forms.lay(form, block,
-                         forms.canonical_k_major(rows, stage.width))
+                         forms.canonical_k_major(rows, hi - lo))
         offsets[(p, k0)] = at
         at += laid.size
         parts.append(laid)
@@ -2595,17 +3080,26 @@ def shared_bytes(section: GroupSection, elements: int) -> int:
     operators += sum(2 * STAR_SLOTS['tcgen05'] * 8 // size
                      for s in section.steps
                      if s.lowering == 'tcgen05' and folded(section, s))
+    if section.tile is not None and section.tile.engine == 'tcgen05':
+        # The tile's D in its slots of tensor memory: a pair of mbarriers a
+        # slot (`compute.multi_element._tile_tcgen05`).
+        operators += 2 * section.tile.dslots * 8 // size
     # tcgen05's D staged in shared memory for every element warp to write
     # (`compute.multi_element._tcgen05`): the widest step's rows of the
     # element, an odd number of floats apart -- for bulk reductions, the
     # columns of the output they add (`output_geometry`), past the others.
+    # Not in the high-order tile, whose roles add D from tensor memory a
+    # cell at a time.
     per_element += max(((s.cols[1] - s.cols[0]) * ((s.rows[1] - s.rows[0]) | 1)
                         for s in section.steps if s.lowering == 'tcgen05'
-                        and not s.output),
+                        and not s.output and section.tile is None),
                        default=0)
     operators += output_volume(section, elements)
+    # The high-order tile's pointers are computed where its epilogue needs
+    # them (`compute.multi_element._group_pointer`): no table.
+    tables = 0 if section.tile is not None else len(section.pointer_tables)
     return (size * (operators + elements * per_element)
-            + POINTER_BYTES * elements * len(section.pointer_tables))
+            + POINTER_BYTES * elements * tables)
 
 
 def table_elements(section: GroupSection) -> int:
@@ -3661,6 +4155,13 @@ def fill(section: GroupSection, context,
         return None, ('a chained section is the lanes form\'s alone (its '
                       'phases one after another, `GroupSection.phases`)')
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
+    # The high-order tile ahead of everything where the options ask for it
+    # and the section takes it (`tile_plan`); where it does not, the plans
+    # below, and `plan` says why in the group (`tile_notes`).
+    if tile_asked(context) == 'high':
+        found, _ = tile_plan(section, context, budget)
+        if found is not None:
+            return found, ''
     # The matrix tiling, with B in TF32 halves where that costs no group
     # size -- the halves take twice B's room -- then the FMA forms.  An
     # asynchronous engine's tiling is followed by mma_sync's, for a group
@@ -4105,6 +4606,16 @@ def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
             'slots' if taken.mapping is not None else 'lanes'))
         return group
     group, _ = fill(section, context)
+    if (group is not None and group.section.tile is None
+            and tile_asked(context) == 'high'):
+        # Why the high-order tile the options asked for was not taken, for
+        # the kernel's comment (`tile_notes`).
+        budget = (context.target.hw.max_local_mem_size_per_block
+                  - SHARED_RESERVE)
+        _, why = (tile_plan(section, context, budget) if group.lanes is None
+                  else (None, 'the lanes form was asked for'))
+        group = dataclasses.replace(group, tile_note=why or
+                                    'the plan took another layout')
     return group
 
 
@@ -4117,6 +4628,11 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'MATRIX', 'MATRIX_LOWERINGS', 'MIN_ELEMENTS', 'POINTER_BYTES',
            'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
            'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
+           'TILE_PRODUCER_WARPS', 'TileRows', 'rowless', 'tile_asked',
+           'groups_asked', 'kept_span', 'spans_asked', 'tile_chunks',
+           'TILE_BANDS', 'TILE_TCGEN05', 'TMEM_BUDGET', 'tile_dslots',
+           'tile_lowered', 'tile_notes', 'tile_plan', 'tile_refusal',
+           'tile_warps',
            'TF32_HALVES_BY_WHOLE', 'async_plan', 'async_terms',
            'precision_notes',
            'prefer_mma_sync',

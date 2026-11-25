@@ -6998,7 +6998,292 @@ GROUPS = {
          sub(ORACLE, '                if not _same(self.mem.peek(base, slot), value):\n',
              '                if not _same(self.mem.read(base, slot), value):\n', 1)),
     ]),
-    'foldslots': ('tests/test_three_roles.py -n 6', [
+    # --- the high-order tile, H1: dense rows, consumer warpgroups (tensorforge-hotile)
+    'hirows': ('tests/test_hiorder_tile.py -n 6', [
+        ("a tile's rows of A from the instruction's 64, not its elements'",
+         sub(ME_SECTION, "    m = _index(b, 'add', r, tile.used * t, 'm')\n",
+             "    m = _index(b, 'add', r, tile.m * t, 'm')\n", 1)),
+        ("a tile's rows of D from the instruction's 64, not its elements'",
+         sub(ME_SECTION, "                  _index(b, 'add', local, tile.used * t, 'm'), M, hint='m')\n",
+             "                  _index(b, 'add', local, tile.m * t, 'm'), M, hint='m')\n", 1)),
+        ("the tile's rings counting a warpgroup's arrival, not a warp's",
+         sub(ME_SECTION, '    return (WARPGROUP_WARPS * tiles,\n', '    return (tiles,\n', 1)),
+        ("the inputs staged by the operator ring's warp",
+         sub(ME_SECTION, '                              bound[MASK_KEY], warp=first)\n',
+             '                              bound[MASK_KEY], warp=first + 1)\n', 1)),
+        ("a tile's role counting half its threads",
+         sub(ME_SECTION, "    roles = tuple(Role(f'tile{t}', lanes * WARPGROUP_WARPS,\n",
+             "    roles = tuple(Role(f'tile{t}', lanes * 2,\n", 1)),
+        ("both tiles' A in one buffer",
+         sub(ME_SECTION, '                _wgmma_tile(trip, step, t, areas[t], done)\n',
+             '                _wgmma_tile(trip, step, t, areas[0], done)\n', 1)),
+        ("the input slot given back behind the first block of A",
+         sub(ME_SECTION, '        if j + 1 == blocks:\n'
+                         "            # Every read of the trip's inputs is behind: the slot back.\n",
+             '        if j == 0:\n'
+             "            # Every read of the trip's inputs is behind: the slot back.\n", 1)),
+        ("a tile's rows past its elements taken as theirs",
+         sub(ME_GROUP, '        return self.per * self.width\n',
+             '        return self.per * self.width + 1\n', 1)),
+        ("the block's rows an element's in the tile's layout",
+         sub(ME_GROUP, '        return 0 if rowless(self.section) else self.elements\n',
+             '        return self.elements\n', 1)),
+        ("one consumer warpgroup fewer than the options give",
+         sub(ME_GROUP, '        for tiles in range(consumers, 0, -1):\n',
+             '        for tiles in range(consumers - 1, 0, -1):\n', 1)),
+        ("the generator lowering the section again without its tile",
+         sub(GEN, '      if planned.tile is not None:\n'
+                  "        # The high-order tile's own lowering (`element_group.tile_plan`).\n",
+             '      if False:\n'
+             "        # The high-order tile's own lowering (`element_group.tile_plan`).\n", 1)),
+        ("the batch loop's rows of a block all an element's",
+         sub(BATCHLOOP, '            if mults != self._element_rows + self._producer_rows:\n',
+             '            if mults != self._group_size + self._producer_rows:\n', 1)),
+    ]),
+    # --- the high-order tile, H2: B in kept spans (tensorforge-hotile)
+    'hispans': ('tests/test_hiorder_tile.py -n 6', [
+        ("a span starting where its first entry is, off the engine's granule",
+         sub(ME_GROUP, '    lo = found[0] - found[0] % granule\n', '    lo = found[0]\n', 1)),
+        ("a span's last granule dropped",
+         sub(ME_GROUP, '    hi = min(stage.width, -(-(found[-1] + 1) // granule) * granule)\n',
+             '    hi = min(stage.width, (found[-1] + 1) // granule * granule)\n', 1)),
+        ("the first block's first piece not whole",
+         sub(ME_GROUP, '            if not out and not pieces:\n                span = (0, stages[p].width)\n',
+             '', 1)),
+        ("every block's first piece whole",
+         sub(ME_GROUP, '            if not out and not pieces:\n', '            if not pieces:\n', 1)),
+        ("the spans the options ask for not the tile's on wgmma",
+         sub(ME_GROUP, "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
+                       "                            spans_asked(context), groups_asked(context))\n",
+             "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
+                       "                            'dense', groups_asked(context))\n", 1)),
+        ("the spans kept where known zeros are not skipped",
+         sub(ME_GROUP, "    if not getattr(options, 'skip_known_zeros', True):\n        return 'dense'\n", '', 1)),
+        ("an inactive group taken",
+         sub(ME_GROUP, '        if empty:\n            return (f\'block{"s" if len(empty) > 1 else ""} \'\n',
+             '        if False:\n            return (f\'block{"s" if len(empty) > 1 else ""} \'\n', 1)),
+        ("the table's span read from the stage's first row",
+         sub(ME_GROUP, '            for n in range(lo, hi):\n', '            for n in range(0, hi - lo):\n', 1)),
+        ("a chunk counted at its stages' widths",
+         sub(ME_GROUP, '    return sum(piece[2] * ((piece[4] - piece[3]) if len(piece) > 3\n',
+             '    return sum(piece[2] * ((piece[4] - piece[3]) if False\n', 1)),
+        ("a piece's lower halves past the stage's width, not its span's",
+         sub(ME_SECTION, '        half = self.rows * self.width\n',
+             '        half = self.rows * self.stage.width\n', 1)),
+        ("a chunk's pieces the stage's width apart in its slot",
+         sub(ME_SECTION, '            offset += 2 * rows * (hi - lo)\n',
+             '            offset += 2 * rows * stage.width\n', 1)),
+        ("a wgmma span's products into D's registers of its columns, not from the first",
+         sub(ME_SECTION, '                span = accs[:piece.width // 2]\n',
+             '                span = accs[piece.lo // 2:(piece.lo + piece.width) // 2]\n', 1)),
+        ("a wgmma span short of its stage's last row",
+         sub(ME_GROUP, '            if tile is not None and tile.descending:\n'
+                       '                # On to the stage\'s last row, the first of the descending\n'
+                       '                # order (`TileRows.descending`).\n'
+                       '                span = (span[0], stages[p].width)\n', '', 1)),
+        ("the wgmma spans' tiles laid first first in the table",
+         sub(ME_GROUP, '        if section.tile is not None and section.tile.descending:\n'
+                       '            # The span\'s tiles of N last first (`TileRows.descending`).\n',
+             '        if False:\n'
+             '            # The span\'s tiles of N last first (`TileRows.descending`).\n', 1)),
+        ("D's columns read back in the ascending order on wgmma",
+         sub(ME_SECTION, "                   n - 8 * (i // 4 + 1) + i % 2, hint='n')\n",
+             "                   8 * (i // 4) + i % 2, hint='n')\n", 1)),
+        ("a span's products into D's slot's first columns on tcgen05",
+         sub(ME_SECTION, "                                  'add', INDEX, d_base, piece.lo, hint='dc'),\n",
+             "                                  'add', INDEX, d_base, 0, hint='dc'),\n", 1)),
+        ("a span multiplied at the step's N on tcgen05",
+         sub(ME_SECTION, '                    b.tcgen05(n if piece.width == piece.stage.width\n'
+                         '                              and not piece.lo else piece.width, tmem,\n',
+             '                    b.tcgen05(n, tmem,\n', 1)),
+        ("the spans' option defaulting to dense",
+         sub(OPTIONS, "declare('matrix_spans',\n        default='kept',\n",
+             "declare('matrix_spans',\n        default='dense',\n", 1)),
+    ]),
+    # --- the high-order tile, H3: the group engine on wgmma (tensorforge-hotile)
+    'higroups': ('tests/test_hiorder_tile.py tests/test_tcgen05.py -n 6', [
+        ("every block's A into the first slot",
+         sub(ME_SECTION, "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n",
+             "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, 1, hint='gs'),\n", 1)),
+        ("every block mixing the first rows of K",
+         sub(ME_SECTION, "                'mul', INDEX, j, STAR_ROWS, hint='k'), hint='k'), live)\n",
+             "                'mul', INDEX, j, 0, hint='k'), hint='k'), live)\n", 1)),
+        ("every block dispatched at the first block's width",
+         sub(ME_SECTION, "            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,\n",
+             "            f'{table}[{{0}}]', 0, type_=INDEX, pure=True, movable=True,\n", 1)),
+        ("the dispatch on a width ptxas cannot tell is the warp's alike",
+         sub(ME_SECTION, "        eighths = b.lane_broadcast(b.rawexpr(\n"
+                         "            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,\n"
+                         "            hint='gw'), 0, 32, hint='gw')\n",
+             "        eighths = b.rawexpr(\n"
+             "            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,\n"
+             "            hint='gw')\n", 1)),
+        ("a product's lower halves of B read where its upper ones are",
+         sub(ME_SECTION, "                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),\n"
+                         "                                desc=bdesc, hint='b')\n",
+             "                'mul', INDEX, part, 2 * p, hint='gb'), hint='gb'),\n"
+             "                                desc=bdesc, hint='b')\n", 1)),
+        ("the loop's wait leaving every block in flight",
+         sub(ME_SECTION, "        b.matrix_wait('wgmma', hold - 1, reads=[\n",
+             "        b.matrix_wait('wgmma', hold, reads=[\n", 1)),
+        ("the chunk in hand given back behind the wait",
+         sub(ME_SECTION, "                ring.release(trip, b.op('sub', INDEX, j, hold - 1,\n"
+                         "                                        hint='gr'), base)\n",
+             "                ring.release(trip, b.op('sub', INDEX, j, 0,\n"
+             "                                        hint='gr'), base)\n", 1)),
+        ("the dispatch's leaves the narrowest width's alone",
+         sub(ME_SECTION, '        for width in sorted(set(widths)):\n',
+             '        for width in sorted(set(widths))[:1]:\n', 1)),
+        ("each of the loop's products writing D fresh",
+         sub(ME_SECTION, '                        b.wgmma(width, [a[ia]], bs[ib], accs[:width // 2],\n'
+                         '                                scale_d=1, layouts=shapes, term=(ia, ib),\n',
+             '                        b.wgmma(width, [a[ia]], bs[ib], accs[:width // 2],\n'
+             '                                scale_d=0, layouts=shapes, term=(ia, ib),\n', 1)),
+        ("the group loop left to the compiler to unroll",
+         sub(ME_SECTION, "    with b.for_(0, len(chunks), unroll=1, hint='g') as loop:\n"
+                         "        j = loop.induction\n"
+                         "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n",
+             "    with b.for_(0, len(chunks), unroll=True, hint='g') as loop:\n"
+             "        j = loop.induction\n"
+             "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n", 1)),
+        # tcgen05's group engine
+        ("tcgen05's block products into D's first columns",
+         sub(ME_SECTION, '                          d_column=lo, term=(ia, ib), plan=plan,\n',
+             '                          d_column=0, term=(ia, ib), plan=plan,\n', 1)),
+        ("tcgen05's blocks at the widest N",
+         sub(ME_SECTION, '                b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,\n'
+                         '                          enable_input_d=fresh if first else 1,\n',
+             '                b.tcgen05(widths[-1], tmem, bs[ib], tmem, issue=issue,\n'
+             '                          enable_input_d=fresh if first else 1,\n', 1)),
+        ("the star role's loop taking a slot of A not given back",
+         sub(ME_SECTION, '                b.ring_acquire(self.areas, slot, parity=parity)\n', '', 1)),
+        ("tcgen05's every block writing D fresh",
+         sub(ME_SECTION, '                          enable_input_d=fresh if first else 1,\n',
+             '                          enable_input_d=0 if first else 1,\n', 1)),
+        ("tcgen05's lower halves of A read where the upper ones are",
+         sub(ME_SECTION, '                                        2 * STAR_ROWS * p + STAR_ROWS * ia,\n',
+             '                                        2 * STAR_ROWS * p,\n', 1)),
+        ("tcgen05's lower halves of B read where the upper ones are",
+         sub(ME_SECTION, "                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),\n"
+                         "                                desc=desc, hint='b')\n",
+             "                'mul', INDEX, part, 2 * p, hint='gb'), hint='gb'),\n"
+             "                                desc=desc, hint='b')\n", 1)),
+        ("the star role's loop mixing the first rows of K",
+         sub(ME_SECTION, "                k0 = b.op('mul', INDEX, j, STAR_ROWS, hint='k')\n",
+             "                k0 = b.op('mul', INDEX, j, 0, hint='k')\n", 1)),
+        ("a slot of A's ring used once a trip in the loop's parity",
+         sub(ME_SECTION, "            'mul', INDEX, trips, uses, hint='ta'), b.op(\n",
+             "            'mul', INDEX, trips, 1, hint='ta'), b.op(\n", 1)),
+        # the PIR's values of N and of the columns (tcgen05, tmem_st)
+        ("a value of N put into the descriptor unshifted",
+         sub(ENGINES, "                      f'>> 3) << 17)')\n",
+             "                      f') << 17)')\n", 1)),
+        ("a column that is a value left out of its address",
+         sub(ENGINES, "            text += f' + static_cast<uint32_t>({env.name(runtime[key])})'\n",
+             '            pass\n', 1)),
+        ("a store's column that is a value stored as a column's value",
+         sub(ENGINES, "    values = s.args[2:] if s.attr('runtime_column') else s.args[1:]\n",
+             '    values = s.args[1:]\n', 1)),
+        ("the widths of a value of N unchecked",
+         sub(ENGINES, '        if not widths or any(w not in TCGEN05_N for w in widths) \\\n',
+             '        if not widths or False \\\n', 1)),
+        ("a value of N's statement as wide as its narrowest width",
+         sub(BUILD, '            widest = max(int(w) for w in widths)\n',
+             '            widest = min(int(w) for w in widths)\n', 1)),
+        ("the groups the options ask for not the tile's on wgmma",
+         sub(ME_GROUP, '                            spans_asked(context), groups_asked(context))\n',
+             "                            spans_asked(context), 'unrolled')\n", 1)),
+        ("a block's products at their own spans in the loop",
+         sub(ME_GROUP, "        if pieces and tile is not None and tile.groups == 'loop':\n",
+             '        if False:\n', 1)),
+        ("the groups' option defaulting to written out",
+         sub(OPTIONS, "declare('matrix_groups',\n        default='loop',\n",
+             "declare('matrix_groups',\n        default='unrolled',\n", 1)),
+    ]),
+    # --- the high-order tile, H3c: tcgen05's own layout, D in two slots (tensorforge-hotile)
+    'hioverlap': ('tests/test_hiorder_tile.py -n 6', [
+        ("every trip's D in the first slot",
+         sub(ME_SECTION, "        dbase = b.op('mul', INDEX, dslot, n, hint='db')\n",
+             "        dbase = b.op('mul', INDEX, dslot, 0, hint='db')\n", 1)),
+        ("the mma warp not waiting for D's slot back",
+         sub(ME_SECTION, '                b.ring_acquire(dring, dslot, dparity)\n', '', 1)),
+        ("the epilogue reading D ahead of its products",
+         sub(ME_SECTION, '            b.ring_take(dring, dslot, dparity)\n', '', 1)),
+        ("the products committed onto D's empty side",
+         sub(ME_SECTION, "            b.commit_group('tcgen05', object=dring, issue=lane0, slot=dslot,\n"
+                         "                           side='full')\n",
+             "            b.commit_group('tcgen05', object=dring, issue=lane0, slot=dslot,\n"
+             "                           side='empty')\n", 1)),
+        ("the epilogue reading the first slot of D",
+         sub(ME_SECTION, '            _tcgen05_role_epilogue(trip, step, M, base=dbase)\n',
+             '            _tcgen05_role_epilogue(trip, step, M, base=None)\n', 1)),
+        ("A's ring behind one slot of D",
+         sub(ME_SECTION, '        if section.tile is not None:\n            n *= section.tile.dslots\n', '', 1)),
+        ("D's slots one where two fit",
+         sub(ME_GROUP, '    return 2 if 2 * tile_n + ring <= budget else 1\n', '    return 1\n', 1)),
+        ("the budget of tensor memory past a block's",
+         sub(ME_GROUP, 'TMEM_BUDGET = 512\n', 'TMEM_BUDGET = 1024\n', 1)),
+        ("the bands the options ask for not the tile's",
+         sub(ME_GROUP, "        bands = int(getattr(context.get_user_options(), 'matrix_bands',\n"
+                       "                            TILE_BANDS))\n",
+             '        bands = TILE_BANDS\n', 1)),
+        ("the star bands from the element count",
+         sub(ME_SECTION, '            # The high-order tile\'s star bands (`TileRows.bands`).\n'
+                         '            bands = trip.section.tile.bands\n',
+             '            # The high-order tile\'s star bands (`TileRows.bands`).\n'
+             '            bands = bands\n', 1)),
+        ("the inputs' ring filled by wgmma's producer role",
+         sub(ME_SECTION, "        producer = 'input' if section.tile.engine == 'tcgen05' else 'producer'\n",
+             "        producer = 'producer'\n", 1)),
+        ("a commit onto a ring's full side taken for a release",
+         sub(Path('src/tensorforge/backend/pir/rings.py'),
+             "            return 'publish', 'full'\n",
+             "            return 'release', 'empty'\n", 1)),
+        # the epilogue by bulk reductions
+        ("the tile's bulk epilogue asked and a reduction a cell taken",
+         sub(ME_GROUP, "    output = ('red' if tile is None or tile.engine != 'tcgen05'\n"
+                       "              else output_asked(context))\n",
+             "    output = 'red'\n", 1)),
+        ("a row of D staged one column of the box past its own",
+         sub(ME_SECTION, "    at = b.op('mul', INDEX, row, stride, hint='d')\n    staged = {}\n",
+             "    at = b.op('mul', INDEX, row + 1, stride, hint='d')\n    staged = {}\n", 1)),
+        ("D's slot given back ahead of its last loads",
+         subs(ME_SECTION,
+              ("        column = b.op('add', INDEX, base, c0, hint='dc')\n",
+               "        if not c0:\n            release()\n"
+               "        column = b.op('add', INDEX, base, c0, hint='dc')\n"),
+              ('        if c0 >= end:\n            # The row of D in registers: the slot back to the mma warp.\n'
+               '            release()\n', ''))),
+        ("the box's stores not fenced for the async proxy",
+         sub(ME_SECTION, "    b.fence(FenceKind.PROXY)\n    b.barrier(Participants.ROLE)\n"
+                         "    element = b.op('div', INDEX, row, width, hint='e')\n",
+             "    b.barrier(Participants.ROLE)\n"
+             "    element = b.op('div', INDEX, row, width, hint='e')\n", 1)),
+        ("a masked element's columns added too",
+         sub(ME_SECTION, "    issue = b.op('and', BOOL, live, held, hint='issue')\n",
+             '    issue = live\n', 1)),
+        ("an element's box added by each of its columns' threads",
+         sub(ME_SECTION, "        issue = b.op('and', BOOL, issue, b.op('eq', BOOL, quantity, 0,\n",
+             "        issue = b.op('or', BOOL, issue, b.op('eq', BOOL, quantity, 0,\n", 1)),
+        ("the tile's reductions not waited for",
+         sub(ME_SECTION, "    # The reductions' reads of the box done, in the thread that issued them.\n"
+                         "    b.wait(token)\n",
+             '', 1)),
+        ("a thread's lane of tensor memory its warp's, not its quarter's",
+         sub(ME_SECTION, "    quarter = b.op('rem', INDEX, b.thread_id('y'), 4, hint='q')\n",
+             "    quarter = b.op('rem', INDEX, b.thread_id('y'), 8, hint='q')\n", 1)),
+        ("the box written again ahead of the reductions' reads",
+         sub(ME_SECTION, "    # The box's next writes, the next trip's, behind every reduction's reads\n"
+                         "    # of it: an element's box is read by one thread and written by all of\n"
+                         "    # its columns'.\n    b.barrier(Participants.ROLE)\n",
+             '', 1)),
+        ("a load of tensor memory at a value column at its first",
+         sub(ENGINES, "        return _stmt(Op.TMEM_LD, (('column', 0), ('runtime_column', True)),\n"
+                      "                     args=(tmem, column), target=tuple(targets),\n",
+             "        return _stmt(Op.TMEM_LD, (('column', 0),),\n"
+             "                     args=(tmem,), target=tuple(targets),\n", 1)),
+    ]),
+    'foldslots': ('tests/test_three_roles.py tests/test_hiorder_tile.py -n 6', [
         ("the bands' slots of A in turn between roles",
          sub(ME_SECTION, "        if named:\n            # Between roles, each slot one band's (`_fold_bands`): a slot's\n",
              "        if False:\n            # Between roles, each slot one band's (`_fold_bands`): a slot's\n", 1)),
@@ -7008,6 +7293,9 @@ GROUPS = {
         ("the bands counted in eights of the element warps",
          sub(ME_SECTION, '    return max(1, trip.group.elements // 4)\n',
              '    return max(1, trip.group.elements // 8)\n', 1)),
+        ("the tile's bands not the owners of A's slots",
+         sub(ME_SECTION, '    if tile is not None:\n        return tile.bands\n',
+             '    if tile is not None:\n        return 1\n', 1)),
     ]),
 }
 
