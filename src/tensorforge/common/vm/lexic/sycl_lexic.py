@@ -61,8 +61,9 @@ class SyclLexic(Lexic):
     #: the context sets.
     self.block_runs = False
     #: Whether a body reads 2D blocks under SPMD (`tensorforge::
-    #: subGroupBlock2d`, `pir.block_reads.load_block2d`): set by what builds
-    #: them, which nothing does yet.
+    #: subGroupBlock2d`, `pir.block_reads.load_block2d`): the context sets it
+    #: where the DPAS path reads its operator copies so
+    #: (`Options.sycl_dpas_block2d`).
     self.block2d = False
     #: Whether a kernel may call DPAS from the SPMD lowering
     #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
@@ -113,6 +114,44 @@ class SyclLexic(Lexic):
             f"  if (gridsize == 0) {{\n"
             f"    gridsize = {units};\n"
             f"  }}\n"
+            f"}}")
+
+  def sub_group_size(self, lanes):
+    """The sub-group a kernel of `lanes`-lane multiplications states
+    (`kernel_definition`): the smallest of the stated sizes the lanes fit
+    in and divide, else the first that holds them, else the largest; 16
+    for a kernel of no multiplication.  None under the explicit vector,
+    whose work-item is a hardware thread of its own."""
+    if self._explicit_simd:
+      return None
+    sizes = self._sub_groups
+    return (smallest_sub_group(sizes, lanes) or
+            next((s for s in sizes if s >= lanes),
+                 sizes[-1])) if lanes else 16
+
+  def core_launch_size(self, threads, group_threads, group_rows, parts=1,
+                       block=1):
+    """Declares `gridsize` as `get_launch_size` does, for `threads`
+    hardware threads an Xe-core (`Options.sycl_core_threads`): the
+    Xe-cores are `max_compute_units` over the vector engines one holds
+    (`gpu_eu_count_per_subslice`, 8 where the device does not say), a
+    work-group `group_threads` hardware threads and `group_rows`
+    multiplications, in `parts` of the batch, its items in dependent
+    blocks of `block` (`tensorforge::coreGrid`).  Asked once per launcher,
+    as the device's other answers are."""
+    ptr = GeneralLexicon.STREAM_PTR_STR
+    queue = f"static_cast<{self.stream_type} *>({ptr})"
+    return (f"static std::size_t gridsize = 0;\n"
+            f"if (gridsize == 0 && {ptr} != nullptr) {{\n"
+            f"  const sycl::device device = {queue}->get_device();\n"
+            f"  std::size_t engines = 8;\n"
+            f"  if (device.has(sycl::aspect::ext_intel_gpu_eu_count_per_subslice)) {{\n"
+            f"    engines = device.get_info<sycl::ext::intel::info::device::gpu_eu_count_per_subslice>();\n"
+            f"  }}\n"
+            f"  const std::size_t cores = device.get_info<sycl::info::device::max_compute_units>() "
+            f"/ std::max<std::size_t>(engines, 1);\n"
+            f"  gridsize = tensorforge::coreGrid(cores, {int(threads)}, {int(group_threads)}, "
+            f"{int(group_rows)}, {int(parts)}, {int(block)});\n"
             f"}}")
 
   def set_shmem_size(self, func_name, shmem):
@@ -215,10 +254,7 @@ class SyclLexic(Lexic):
         # within one would read undefined lanes: on the CPU the kernel writes
         # nothing, or 1e27 (chain_five).  A kernel of no multiplication asks
         # for 16.
-        sizes = self._sub_groups
-        size = (smallest_sub_group(sizes, lanes) or
-                next((s for s in sizes if s >= lanes),
-                     sizes[-1])) if lanes else 16
+        size = self.sub_group_size(lanes)
         add_items = (f'[[intel::reqd_sub_group_size({size})]] '
                      f'[[intel::kernel_args_restrict]]')
     else:
@@ -533,6 +569,14 @@ class SyclLexic(Lexic):
                         height, pitch, x, y):
     if self._explicit_simd or self._sub_groups is None:
       return None
+    if (self.dpas and elem == 'float' and (rows, cols) == (16, 16)
+        and not transpose):
+      # A DPAS tile of an operator surface (`Options.sycl_dpas_block2d`),
+      # in OpenCL's own vector, as the path holds its fragments
+      # (`tensorforge::dpasBlock2d`).
+      return ('tensorforge::NativeFloat16',
+              f'tensorforge::dpasBlock2d(item.get_sub_group(), {base}, '
+              f'{width}, {height}, {pitch}, {x}, {y})')
     count = cols if transpose else rows
     kind = elem if count == 1 else f'sycl::vec<{elem}, {count}>'
     flag = 'true' if transpose else 'false'

@@ -105,6 +105,16 @@ class Tensor:
         #: holds, for the host; this says how the kernel addresses it
         #: (`Symbol._slot_major_index`).
         self.slot_major = None
+        #: `(columns, group)` where `storage_order` is a 2D surface read by
+        #: block messages (`primitives.intel_spmd.surface_order`,
+        #: `Options.sycl_dpas_block2d`): rows of `columns` slots, the parts
+        #: planar `group` slots at a time -- a tile's first part, then its
+        #: second, then the next tile's -- where `storage_planar` alone has
+        #: them planar over the whole order.  The order says which cell each
+        #: slot holds, for the host; this how the parts lie, and that the
+        #: kernel reads the operand a block of rows at a time
+        #: (`MatmulOperands.A_block2d`), never a slot by its address.
+        self.storage_surface = None
         #: The `matrix.packing.Packing` `storage_order` leaves out the box's
         #: empty cells by, or `None` where the box is stored whole.
         #:
@@ -484,6 +494,9 @@ class Tensor:
         # wants where a lane holds several neighbouring slots; adjacent is
         # right where one lane reads one element.
         planar = int(self.storage_elements()) if self.storage_planar else 0
+        if self.storage_surface is not None:
+            # Planar a group at a time (`storage_surface`).
+            planar = int(self.storage_surface[1])
         form = forms.stored(self.storage_parts)
         return tuple(float(v) for v in form.store(
             np.asarray(out, dtype=np.float32), planar=planar))
@@ -548,6 +561,7 @@ class Tensor:
         twin.storage_order = self.storage_order
         twin.simt_interleave = self.simt_interleave
         twin.slot_major = self.slot_major
+        twin.storage_surface = self.storage_surface
         twin.packing = self.packing
         twin.packing_table = self.packing_table
         twin.packing_table_param = self.packing_table_param
@@ -582,6 +596,7 @@ class Tensor:
         is_similar &= self.storage_parts == other.storage_parts
         is_similar &= self.storage_planar == other.storage_planar
         is_similar &= self.storage_order == other.storage_order
+        is_similar &= self.storage_surface == other.storage_surface
         is_similar &= self.packing == other.packing
         return is_similar
 
@@ -596,6 +611,7 @@ class Tensor:
         parts = f' /{self.storage_parts}' if self.storage_parts != 1 else ''
         parts += ' planar' if self.storage_planar and self.storage_parts != 1 else ''
         parts += ' ordered' if self.storage_order is not None else ''
+        parts += ' surface' if self.storage_surface is not None else ''
         parts += f' {self.packing.kind}-packed' if self.packing is not None else ''
         return f'{self.name} {"×".join(str(d) for d in self.shape)}({"×".join(str(d) for d in self.bbox.sizes())}) {self.bbox} {self.addressing}{parts}'
 

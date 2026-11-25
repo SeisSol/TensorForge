@@ -38,6 +38,12 @@ class Context:
     if hasattr(self.target.lexic, 'dpas'):
       from tensorforge.backend.instructions.compute.primitives import intel_spmd
       self.target.lexic.dpas = intel_spmd.asked(self._options.sycl_dpas)
+    if hasattr(self.target.lexic, 'block2d'):
+      # The DPAS path's operator copies read as 2D surfaces
+      # (`Options.sycl_dpas_block2d`): their header is the DPAS one.
+      self.target.lexic.block2d = bool(
+          getattr(self.target.lexic, 'dpas', False)
+          and self._options.sycl_dpas_block2d)
     #: The permutation each staged window is built with, by the window's
     #: symbol, where `pir.banks.propose` chose one from a body built without
     #: (`Options.swizzle` `decide`; `AbstractShrMemWrite._swizzle`).  Kept

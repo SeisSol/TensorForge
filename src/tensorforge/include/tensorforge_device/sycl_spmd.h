@@ -201,10 +201,43 @@ inline float roundTF32(float x) {
 #if defined(__clang__)
 typedef float NativeFloat4 __attribute__((ext_vector_type(4)));
 typedef float NativeFloat8 __attribute__((ext_vector_type(8)));
+typedef float NativeFloat16 __attribute__((ext_vector_type(16)));
 #else
 typedef sycl::vec<float, 4> NativeFloat4;
 typedef sycl::vec<float, 8> NativeFloat8;
+typedef sycl::vec<float, 16> NativeFloat16;
 #endif
+
+/// One DPAS tile of an operator laid out as a 2D surface
+/// (`Options.sycl_dpas_block2d`, `intel_spmd.surface_order`): sixteen rows of
+/// sixteen floats from column `x` and row `y` of the surface at `base` --
+/// `width` bytes wide, `height` rows high, rows `pitch` bytes apart -- read
+/// by the sub-group `group`, 16 wide and full, in one 2D block message:
+/// work-item `l` gets column `x + l`, the upper halves of its eight steps and
+/// then the lower, in OpenCL's own vector, which the B fragments are taken out
+/// of.  `subGroupBlock2d`'s read, written by the builtin straight into the
+/// vector: through that helper's private array and `sycl::vec`, IGC 2.42.6
+/// copied the halves out of every block and spilled SeisSol's order-6 volume
+/// (14 kB, 9 214 references), and this way nothing.
+inline NativeFloat16 dpasBlock2d(const sycl::sub_group &group,
+                                 const float *base, int width, int height,
+                                 int pitch, int x, int y) {
+  NativeFloat16 share;
+#if defined(__SYCL_DEVICE_ONLY__)
+  (void)group;
+  intel_sub_group_2d_block_read_32b_16r16x1c(
+      (__attribute__((opencl_global)) void *)(const_cast<float *>(base)), width,
+      height, pitch, tensorforgeInt2{x, y},
+      (__attribute__((opencl_private)) std::uint32_t *)(&share));
+#else
+  const auto read = subGroupBlock2d<float, 16, 16, false>(group, base, width,
+                                                          height, pitch, x, y);
+  for (int k = 0; k < 16; ++k) {
+    share[k] = read[k];
+  }
+#endif
+  return share;
+}
 
 /// `acc + A B` by DPAS over the sub-group `group`, which has to be 16 wide and
 /// converged: every work-item hands in its share of A, B and the accumulator

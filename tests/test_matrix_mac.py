@@ -633,7 +633,8 @@ def test_esimd_dpas_in_a_kernel_updates_its_accumulator():
     with contextlib.redirect_stdout(io.StringIO()):
         gen = Generator(mod.descr_list(), Context(
             arch='pvc', backend='esimd', fp_type=Datatype.F32,
-            options=Options(tensor_cores=True)))
+            options=Options(tensor_cores=True,
+                            enable_move_loads=False)))   # moves_refused
         gen.generate()
     lines = [line.strip() for line in gen.get_kernel().splitlines()
              if 'intel_xmx::dpas<' in line]

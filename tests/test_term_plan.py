@@ -500,12 +500,16 @@ PATHS = {
                                    'hip', {}, 'bf16x6'),
     'Intel SPMD DPAS': (lambda: _seissol('gpu_volume'), 'pvc', 'oneapi',
                         {'sycl_dpas': True}, '3xtf32/b'),
+    # DPAS under the explicit vector only with the transfers in place
+    # (`intel.moves_refused`).
     'Intel ESIMD DPAS': (lambda: _case('local_flux.py'), 'pvc', 'esimd',
                          {'tensor_cores': True, 'lanes_per_mult': 16,
-                          'prepare_operands': False}, '3xtf32/b'),
+                          'prepare_operands': False,
+                          'enable_move_loads': False}, '3xtf32/b'),
     'Intel ESIMD DPAS, prepared': (lambda: _case('local_flux.py'), 'pvc',
                                    'esimd', {'tensor_cores': True,
-                                             'lanes_per_mult': 16},
+                                             'lanes_per_mult': 16,
+                                             'enable_move_loads': False},
                                    '3xtf32/b'),
 }
 

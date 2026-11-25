@@ -2983,6 +2983,19 @@ class MultilinearInstruction(ComputeInstruction):
             parts = 1
         if slot_major is not None and not self._slot_major_fits(a_obj):
             return
+        # A copy the file defines laid out as a 2D surface, where the target
+        # reads one so (`MatrixPaths.surface_order`): its table is aligned
+        # for a surface's base, which a buffer the caller passes is not known
+        # to be, and it is one buffer, where a merged run's members are read
+        # through a table of them.  With the halves the order came with only:
+        # a tile's rows are its two parts.
+        surface = None
+        lay = getattr(module, 'surface_order', None)
+        if (copied and not variant and lay is not None
+                and parts == getattr(order, 'parts', None)):
+            surfaced = lay(order, self._context)
+            if surfaced is not None:
+                order, surface = surfaced, surfaced.surface
         for member in members:
             if (member.addressing is not Addressing.NONE
                     or not member.is_dense()
@@ -3016,6 +3029,8 @@ class MultilinearInstruction(ComputeInstruction):
             target.storage_planar = True
             if slot_major is not None:
                 target.slot_major = slot_major
+            if surface is not None:
+                target.storage_surface = surface
             if parts is not None and parts != 1:
                 target.storage_parts = parts
 
@@ -3564,6 +3579,37 @@ class MultilinearInstruction(ComputeInstruction):
                 return res
 
 
+            def A_block2d(writer, row, rows, shift=None):
+                """Rows `row` to `row + rows` of `A` laid out as a 2D surface
+                (`Tensor.storage_surface`): one 2D block read of the
+                sub-group, lane `l` column `l` of them, the rows in order
+                (`block_reads.load_block2d`).  `shift` is a row count added
+                at run time, as `A_slot` takes one.
+
+                The surface is the copy's table, whole: only a copy the file
+                defines is laid out so (`_offer_order`), its table aligned to
+                `Generator.COPY_ALIGN` and starting at the stored order's
+                first slot, where `A_slot` counts from too.  So its base is
+                the binding, its width the surface's columns, its rows every
+                slot it stores."""
+                from tensorforge.backend.pir.block_reads import load_block2d
+                from tensorforge.generators.generator import Generator
+                sym = self._ops[0].symbol
+                if sym.stype is not SymbolType.Global:
+                    raise InternalError(
+                        f'{a_obj.alias}: a 2D surface read where it is not '
+                        f'in global memory ({sym.stype})')
+                columns, _ = a_obj.storage_surface
+                width = columns * sym.get_fptype().size()
+                height = int(a_obj.storage_volume()) // columns
+                if shift is not None:
+                    row = writer.op('add', INDEX, shift, row, hint='slot')
+                return load_block2d(writer, sym, 0, row, rows=rows,
+                                    cols=columns, width=width, height=height,
+                                    pitch=width, align=Generator.COPY_ALIGN,
+                                    hint='blk')
+
+
             def B_direct(kblock, nblock):
                 """Whether `B_frag` can address every fragment of this shape.
 
@@ -3773,7 +3819,13 @@ class MultilinearInstruction(ComputeInstruction):
                         # would make every read four steps wide over a
                         # buffer that has no such run.
                         and getattr(a_obj, 'packing', None) is None
+                        # Nor a surface, whose parts are planar a group at
+                        # a time: read a block of rows (`A_block2d`).
+                        and getattr(a_obj, 'storage_surface', None) is None
                         else None),
+                A_block2d=(A_block2d if a_obj is not None
+                           and getattr(a_obj, 'storage_surface', None)
+                           is not None else None),
                 A_zero=A_zero if width == 1 else None,
                 B_shard=B_shard if b_shared and width == 1 else None,
                 lead_slots=M, lead_elements=Mx, n=N, k=K, kx=kx,

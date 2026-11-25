@@ -155,6 +155,11 @@ def test_dpas_is_not_offered_for_a_packed_operand():
 
 def _ctx(backend='esimd', **options):
     from tensorforge.common.context import Context, Options
+    if backend == 'esimd' and options.get('tensor_cores'):
+        # DPAS under the explicit vector is taken only with the transfers
+        # in place (`intel.moves_refused`); the tests of the path ask for
+        # that, and `test_dpas_waits_for_the_moves_to_be_off` for the rest.
+        options.setdefault('enable_move_loads', False)
     return Context(arch='pvc', backend=backend, fp_type=Datatype.F32,
                    options=Options(**options))
 
@@ -196,6 +201,64 @@ def test_spmd_never_takes_dpas():
     lowering)."""
     ctx = _ctx('oneapi', tensor_cores=True)
     assert Strategy.MATRIX not in intel.strategies(_dense(False), ctx)
+
+
+def _plain_ctx(backend, **options):
+    """A context as asked, without `_ctx`'s moves off."""
+    from tensorforge.common.context import Context, Options
+    return Context(arch='pvc', backend=backend, fp_type=Datatype.F32,
+                   options=Options(**options))
+
+
+def test_dpas_waits_for_the_moves_to_be_off():
+    """Under the explicit vector DPAS is not taken while the transfers are
+    moved ahead (`intel.moves_refused`), which is the default there: with
+    them, SeisSol's order-6 volume came out wrong on the CPU emulator
+    (tfemu) -- nine of its 576 outputs, the ninth quantity's rows 10 to 15,
+    up to 18 % off -- and right without.  The SPMD lowering's DPAS
+    (`sycl_dpas`) is another path and not asked."""
+    moved = _plain_ctx('esimd', tensor_cores=True)
+    assert moved.get_user_options().enable_move_loads
+    assert intel.moves_refused(moved)
+    assert Strategy.MATRIX not in intel.strategies(_dense(), moved)
+    assert Strategy.BROADCAST in intel.strategies(_dense(), moved)
+    assert not intel.moves_refused(
+        _plain_ctx('esimd', tensor_cores=True, enable_move_loads=False))
+    assert not intel.moves_refused(_plain_ctx('oneapi', sycl_dpas=True))
+    assert not intel.moves_refused(None)
+
+
+def test_the_volume_takes_no_dpas_with_the_moves():
+    """The kernel the emulator found wrong, SeisSol's elastic volume at
+    order 6 in single precision at sixteen lanes: no DPAS with the moves
+    on, DPAS with them off -- and nothing stored as TF32 halves for a path
+    that is not taken (`prepared_order` asks the same question)."""
+    import contextlib
+    import io
+    import sys
+    from pathlib import Path
+    bench = Path(__file__).resolve().parent.parent / 'tools' / 'bench'
+    if not (bench / 'data' / 'elastic-6-s-s1.json').exists():
+        pytest.skip('no capture elastic-6-s-s1')
+    if str(bench) not in sys.path:
+        sys.path.insert(0, str(bench))
+    from suite import from_dump
+    from tensorforge.generators.generator import Generator
+    w = {x.name: x for x in from_dump(bench / 'data' /
+                                      'elastic-6-s-s1.json')}['gpu_volume']
+
+    def kernel(**options):
+        gen = Generator(w.descrs(), _plain_ctx('esimd', tensor_cores=True,
+                                               lanes_per_mult=16, **options),
+                        attrs=w.attrs)
+        with contextlib.redirect_stdout(io.StringIO()):
+            gen.generate()
+        return gen.get_kernel()
+
+    moved = kernel()
+    assert 'intel_xmx::dpas<' not in moved
+    assert 'castTF32' not in moved
+    assert 'intel_xmx::dpas<' in kernel(enable_move_loads=False)
 
 
 def _kernel(case, backend, **options):

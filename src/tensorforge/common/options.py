@@ -1472,6 +1472,21 @@ declare('sycl_dpas_fence',
             'off, which `sycl_dpas=auto` under `autotune=lanes` answers per '
             'kernel.')
 
+declare('sycl_dpas_block2d',
+        default=False,
+        env='TF_SYCL_DPAS_BLOCK2D',
+        parse=parse_bool,
+        doc='Under `sycl_dpas`, lay each operator copy the file defines '
+            '(`mma_operator_copies`) out as a 2D surface sixteen floats '
+            'wide, a tile\'s two TF32 halves sixteen rows of it, and read a '
+            'tile with one 2D block message of the sub-group '
+            '(`tensorforge::subGroupBlock2d`, '
+            '`cl_intel_subgroup_2d_block_io`) where it is two vector reads '
+            'a work-item: one kilobyte a message, as the hand-written PVC '
+            'volume reads its operator (hvp).  Only a copy the file defines, '
+            'whose table is aligned to 256 bytes: an operator the caller '
+            'prepares keeps the tiles.  Off by default, unmeasured.')
+
 declare('lead_split',
         rule=lambda target: (2 if (target.hw.vendor == 'intel'
                                    and target.backend == 'oneapi'
@@ -2150,10 +2165,40 @@ declare('one_round_grid',
             'occupancy (`Target.bounds_grid`; SYCL does so already).  `auto`: '
             'where the kernel takes the multi-element layout\'s slot form '
             '(`element_group.slot_one_round`), and not where a resident grid '
-            'is asked for.  Asked for, not together with `resident_grid`; '
+            'or a grid by the Xe-cores (`sycl_core_threads`) is asked for.  '
+            'Asked for, not together with `resident_grid`; '
             'never for a cooperative launch, whose grid has to be resident.  '
             'The slot form\'s volume at o4 in F32 on GH200 (Vista 1161114): '
             '1.14 ns an element under the occupancy grid, 1.09 in one round.')
+
+declare('sycl_core_threads',
+        default=0,
+        env='TF_SYCL_CORE_THREADS',
+        parse=parse_int,
+        doc='Size the grid-stride traversal\'s grid for this many hardware '
+            'threads an Xe-core, under DPC++ on Intel (`oneapi`, `esimd`), so '
+            'that a work-group loops over its share of the batch: the '
+            'Xe-cores -- `max_compute_units` over the vector engines one '
+            'holds (`gpu_eu_count_per_subslice`, 8 on the Max 1550) -- times '
+            'this, over the hardware threads a work-group holds: its '
+            'sub-groups under SPMD, its work-items under the explicit vector '
+            '(`tensorforge::coreGrid`, `base.h`).  0, the default, leaves the '
+            'grid as it was (`resident_grid`, `one_round_grid`, '
+            '`Target.bounds_grid`: under SYCL one round, the device\'s full '
+            'occupancy).  Not together with `resident_grid` or '
+            '`one_round_grid` asked for, whose `auto` yields to it, and not '
+            'for a cooperative launch.  The '
+            'hand-written PVC volume (hvp, SNG2 C2c / C2d, Max 1550, one '
+            'stack) ran SeisSol\'s order-6 volume in single precision at 4.54 '
+            'ns an element with 16 threads an Xe-core at 128 registers, 4.77 '
+            'with 32 and 8.19 with 64, the full occupancy; order 8 at 15.9 '
+            'with 32 at 256.  A traversal whose items come in dependent blocks '
+            'needs the rows a part strides by coprime to the block '
+            '(`coreGrid`): hvp\'s blocks of nine items, eight elements and '
+            'their ninth quantity, put every ninth-quantity tile on a third '
+            'of the threads at 24 and 48 an Xe-core and ran 1.9x slower; no '
+            'traversal here has such blocks yet, and the rule leaves the grid '
+            'as it is for a block of one.')
 
 declare('programmatic_launch',
         default=False,
@@ -2704,8 +2749,12 @@ declare('tensor_cores',
             'Intel\'s DPAS (`primitives.intel`).  The SPMD lowering\'s DPAS '
             'has an option of its own (`sycl_dpas`), as AMD\'s stacked scheme '
             'has (`amd_matrix_k4`), and AMD\'s lane-batched MFMA none: it is '
-            'taken wherever a tile fits.  None takes each path\'s '
-            '`ENABLED`, the deployment switch, off for both; an option so '
+            'taken wherever a tile fits.  Under the explicit vector DPAS is '
+            'not taken while `enable_move_loads` is on, its default there '
+            '(`intel.moves_refused`): with the moves, SeisSol\'s order-6 '
+            'volume came out wrong on the CPU emulator.  None takes each '
+            'path\'s `ENABLED`, the deployment switch, off for both; an '
+            'option so '
             'that one build can ask for the path and the next one not, as a '
             'search over configurations has to -- flipping the module '
             'constant changes it for every build in the process.')
@@ -3238,6 +3287,47 @@ declare('mma_min_depth',
             'with them on DMMA (GH200) -- the nest spilled 2.8 kB, the matrix '
             'path 0.4 kB -- while the volume in either precision was 15 to 17 % '
             'slower with them on the matrix path.')
+
+declare('row_packing',
+        default='auto',
+        env='TF_ROW_PACKING',
+        parse=parse_str,
+        doc='What a matrix product does with the rows an element brings that '
+            'do not fill the instruction\'s tile: SeisSol\'s nine quantities '
+            'on DPAS\'s eight rows or a per-element `mma.sync`\'s eight '
+            'columns (`compute.rowpack`).  `fma`: the remainder on the vector '
+            'units\' FMAs, over the operator values the tiles hold; `gather`: '
+            'the remainders of several elements stacked into whole tiles '
+            '(`row_packing_elements`, `row_packing_exchange`); `dense`: '
+            'several elements\' rows on whole tiles; `pad`: a tile of its own, '
+            'mostly zero; `transposed`: the elements on the instruction\'s '
+            'wide side.  `auto`, the default: each target\'s own rule, which '
+            'is what it did before this option -- the SPMD lowering\'s DPAS '
+            '`fma` for up to two columns and `pad` above, the explicit '
+            'vector\'s DPAS `pad`.  A packing the target does not lower '
+            '(`MatrixPaths.row_caps`) stops generation and says which it '
+            'has; today `fma` and `pad` under `sycl_dpas`, `pad` under the '
+            'explicit vector, and on other targets only `auto`.')
+
+declare('row_packing_elements',
+        default=0,
+        env='TF_ROW_PACKING_ELEMENTS',
+        parse=parse_int,
+        doc='Elements whose rows share tiles under `row_packing` `gather` or '
+            '`dense`; 0, the default, the packing\'s own: for `gather` the '
+            'tile height over its greatest common divisor with the remainder, '
+            'eight elements\' ninth rows on DPAS (`rowpack.gather_elements`).')
+
+declare('row_packing_exchange',
+        default='auto',
+        env='TF_ROW_PACKING_EXCHANGE',
+        parse=parse_str,
+        doc='How `row_packing` `gather` brings the elements\' remainders '
+            'together: `shared`, through the block\'s shared memory among the '
+            'multiplications of the elements a block holds; `item`, a work '
+            'item of its own right after them, which needs the items in that '
+            'order and a thread count coprime to the block (`coreGrid`); '
+            '`auto`, the first the target has (`MatrixPaths.row_caps`).')
 
 declare('matrix_columns',
         default=0,

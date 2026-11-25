@@ -223,6 +223,17 @@ class MatmulOperands:
     #: that was applied to avoid computing it.
     A_slot: Optional[Callable] = None
 
+    #: ``A_block2d(writer, row, rows, shift=None) -> value``, or ``None``
+    #: where `A` is not stored as a 2D surface (`Tensor.storage_surface`):
+    #: rows `row` to `row + rows` of it, `shift` more at run time, one 2D
+    #: block read of the sub-group, which hands lane `l` column `l` of them,
+    #: the rows in order (`block_reads.load_block2d`).
+    #:
+    #: In place of `A_slot`, not beside it: a surface has its parts planar a
+    #: group of slots at a time, so a slot is no address there, and the rows
+    #: a block reads are all a reader names.
+    A_block2d: Optional[Callable] = None
+
     #: ``B_frag(writer, j, k, kblock, nblock) -> value``: the `B` fragment
     #: whose base is `(k, j)` and whose lane distribution is `kblock` columns
     #: of the contraction by `nblock` of the output.

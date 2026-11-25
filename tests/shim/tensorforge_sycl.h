@@ -318,11 +318,17 @@ subGroupBlock2d(const sycl::sub_group &, const T *, int, int, int, int, int) {
 // `tensorforge_device/sycl_spmd.h`: DPAS from the SPMD lowering
 // (`Options.sycl_dpas`).  The signatures, which is what parsing can check:
 // the A fragment four floats a work-item, B and the accumulator eight, the
-// sub-group the instruction runs over.  The vectors are OpenCL's under clang
+// sub-group the instruction runs over, and a tile of an operator surface
+// sixteen (`dpasBlock2d`).  The vectors are OpenCL's under clang
 // and `sycl::vec` elsewhere, as here.  The arithmetic is the header's, and
 // `tests/test_sycl_dpas.py` models it.
 typedef sycl::vec<float, 4> NativeFloat4;
 typedef sycl::vec<float, 8> NativeFloat8;
+typedef sycl::vec<float, 16> NativeFloat16;
+inline NativeFloat16 dpasBlock2d(const sycl::sub_group &, const float *, int,
+                                 int, int, int, int) {
+  return {};
+}
 inline float roundTF32(float x) { return x; }
 inline NativeFloat8 dpasTF32(const sycl::sub_group &, NativeFloat4,
                              NativeFloat8, NativeFloat8 acc) {

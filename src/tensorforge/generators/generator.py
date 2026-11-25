@@ -135,8 +135,8 @@ def _explicit_simd_lowering(context) -> bool:
 #: one list share its tensors, so a build taken over states them again
 #: (`Generator._restore_storage`).
 _STORAGE_FIELDS = ('storage_parts', 'storage_planar', 'storage_order',
-                   'simt_interleave', 'slot_major', 'packing',
-                   'packing_table', 'packing_table_param')
+                   'simt_interleave', 'slot_major', 'storage_surface',
+                   'packing', 'packing_table', 'packing_table_param')
 
 
 def _store_as(stored: Dict[int, tuple]) -> None:
@@ -1189,6 +1189,9 @@ class Generator:
 
   def generate(self):
     self._check_addressing()
+    # `row_packing` where no matrix module could take it (`rowpack.check`).
+    from tensorforge.backend.instructions.compute import rowpack
+    rowpack.check(self._context)
     tuned = self._autotune()
     if tuned is not None:
       # built, by the configuration the tuner picked
@@ -2193,19 +2196,56 @@ class Generator:
       raise GenerationError(
           f'one_round_grid sizes the grid to the batch and resident_grid='
           f'{options.resident_grid} to the device; ask for one of them')
-    return not (cooperative or options.resident_grid > 0
+    core = self._core_threads(cooperative)
+    return not (cooperative or options.resident_grid > 0 or core > 0
                 or (self._context.target.bounds_grid()
                     and not self._grid_one_round()))
 
   def _grid_one_round(self) -> bool:
     """Whether the grid is asked to cover the batch in one round
     (`one_round_grid`): as asked, and under `auto` where the kernel takes
-    the slot form (`element_group.slot_one_round`)."""
-    asked = self._context.get_user_options().one_round_grid
+    the slot form (`element_group.slot_one_round`) and the Xe-cores do not
+    size the grid (`sycl_core_threads`)."""
+    options = self._context.get_user_options()
+    asked = options.one_round_grid
     if asked == 'auto':
+      # Not where the grid is sized by the Xe-cores (`sycl_core_threads`),
+      # whose work-groups loop over their share of the batch.
+      if int(options.sycl_core_threads) > 0:
+        return False
       return element_group.slot_one_round(self._element_group,
                                           self._context)
     return bool(asked)
+
+  def _core_threads(self, cooperative: bool) -> int:
+    """`Options.sycl_core_threads`, the hardware threads an Xe-core the
+    grid is sized for, or 0 -- refused where it cannot be: with another
+    sizing asked for, for a grid that has to be resident, or anywhere but
+    DPC++ on Intel."""
+    options = self._context.get_user_options()
+    core = int(options.sycl_core_threads)
+    if core == 0:
+      return 0
+    target = self._context.target
+    if core < 0:
+      raise GenerationError(f'sycl_core_threads={core}: a count of '
+                            f'threads, or 0 for the default grid')
+    # Asked for, not `auto`: that one yields to the Xe-cores' grid
+    # (`_grid_one_round`).
+    if options.one_round_grid is True or options.resident_grid > 0:
+      raise GenerationError(
+          f'sycl_core_threads={core} sizes the grid by the Xe-cores, '
+          f'one_round_grid and resident_grid size it otherwise; ask for one')
+    if (target.backend not in ('oneapi', 'esimd')
+        or str(getattr(target.hw, 'vendor', '')).lower() != 'intel'):
+      raise GenerationError(
+          f'sycl_core_threads sizes a DPC++ grid on Intel (oneapi, esimd), '
+          f'not {target.backend} on {target.hw.vendor}')
+    if cooperative:
+      raise GenerationError(
+          f'sycl_core_threads={core}: a grid barrier needs the grid '
+          f'resident at once, which a count of threads does not promise')
+    return core
 
   def _batch_parts(self, index: int, loop) -> int:
     """How many contiguous parts section `index`'s traversal cuts the batch
@@ -3880,10 +3920,24 @@ class Generator:
         # A cooperative launch is bounded either way.
         resident = self._context.get_user_options().resident_grid
         bounded = not self._one_round(coop)
-        if bounded:
+        core = self._core_threads(coop)
+        if core > 0:
+          # Sized by the Xe-cores (`Options.sycl_core_threads`): a hardware
+          # thread is a sub-group under SPMD and a work-item under the
+          # explicit vector.  The batch's parts as the option asks; no
+          # traversal's items come in dependent blocks yet (`coreGrid`).
+          items = block_x * block_y * block_z
+          sub = lexic.sub_group_size(self._num_threads)
+          per_group = max(1, items // sub) if sub else items
+          parts = max(1, int(self._context.get_user_options().batch_parts))
+          writer(lexic.core_launch_size(core, per_group, mults_per_block,
+                                        parts=parts, block=1))
+        elif bounded:
           writer(f'{lexic.get_launch_size(kernel_name, "block", shmemsize, resident=coop)}')
         if coop:
           num_blocks = 'gridsize'
+        elif core > 0:
+          num_blocks = f'std::min(gridsize, {stacks})'
         elif resident > 0:
           held = (f'std::max<std::size_t>(1, static_cast<std::size_t>('
                   f'{float(resident)!r} * gridsize))')

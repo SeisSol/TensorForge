@@ -42,11 +42,15 @@ The batch-constant operator is the instruction's B, a tile of sixteen rows
 by eight steps, and it is stored that way on the host: tile by tile, each
 lane's eight steps adjacent, as its two TF32 halves (`fragment_order`).  A
 lane then reads a part of a tile as one 32-byte vector, and nothing is split
-in the kernel.  The halves are what the three products of the TF32 split
-multiply -- `hi*hi + hi*lo + lo*hi`, `lo*lo` below F32's rounding -- and the
-upper one has to be *rounded* (`tensorforge::roundTF32`): DPAS truncates its
-inputs, so an operand handed in as it is loses up to a TF32 ulp.  Measured,
-the three products come to 1.2e-6 normwise, 1.6 times the FMA path's.
+in the kernel.  Or, for a copy the file defines (`Options.sycl_dpas_block2d`,
+`surface_order`), as a 2D surface sixteen floats wide, a tile sixteen of its
+rows -- its upper halves, then its lower -- which one 2D block message of the
+sub-group reads, a kilobyte (`tensorforge::dpasBlock2d`).  The halves are
+what the three products of the TF32 split multiply -- `hi*hi + hi*lo +
+lo*hi`, `lo*lo` below F32's rounding -- and the upper one has to be *rounded*
+(`tensorforge::roundTF32`): DPAS truncates its inputs, so an operand handed
+in as it is loses up to a TF32 ulp.  Measured, the three products come to
+1.2e-6 normwise, 1.6 times the FMA path's.
 
 The fragments are held in OpenCL's own vectors, which is how the lexic spells
 a vector of four or eight floats where the path is on
@@ -55,7 +59,8 @@ class over an array, which the front end takes apart into scalars, and IGC
 then puts eight of them back into one block of registers for every
 instruction: at 256 registers the order-6 SeisSol kernels spilled 750 to
 5 531 references that way where they hold none, but the volume 631, in
-native vectors (IGC 2.41.5).
+native vectors (IGC 2.41.5).  So is a 2D block of a tile's sixteen rows
+(`tensorforge::NativeFloat16`, `SyclLexic.sub_group_block2d`).
 
 Columns past the last whole eight -- SeisSol's ninth -- stay on FMAs over the
 operator values the tiles hold anyway (`TAIL_MAX`): an instruction of one
@@ -82,7 +87,7 @@ from tensorforge.backend.pir import engines, terms
 from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType
 from tensorforge.common.basic_types import Datatype
 from tensorforge.common.exceptions import GenerationError, InternalError
-from .. import split
+from .. import rowpack, split
 from ..bitlayout import Bit, BitLayout, Place, packed
 from ..strategy import Strategy, whole
 
@@ -376,6 +381,68 @@ class SplitTiles(tuple):
 
 
 # --------------------------------------------------------------------------- #
+# The operator as a 2D surface (`Options.sycl_dpas_block2d`)
+# --------------------------------------------------------------------------- #
+
+def surface_cells():
+    """`b_fragment_bits` inverted, element outermost: `[(step, lane)]` per
+    slot of a tile part on the 2D surface (`surface_order`) -- row `e` the
+    lanes' element `e`, lane `l` in column `l` -- so that a 2D block of the
+    tile's rows hands each work-item its share as the instruction's B takes
+    it: a column of the block, its elements in order.  `tile_cells`
+    transposed."""
+    cells = tile_cells()
+    return [cells[lane * DEPTH + element] for element in range(DEPTH)
+            for lane in range(SUB_GROUP)]
+
+
+class SurfaceTiles(SplitTiles):
+    """A tile order laid out as a 2D surface (`surface_order`): `surface`
+    is `(columns, group)` for `Tensor.storage_surface` -- `SUB_GROUP`
+    columns, the parts planar a tile at a time, so that tile `t`'s halves
+    are the surface's rows `SPLIT_TERMS DEPTH t ..`, its upper one first."""
+
+    def __new__(cls, order, parts=2, surface=(SUB_GROUP, TILE)):
+        self = super().__new__(cls, order, parts)
+        self.surface = tuple(int(x) for x in surface)
+        return self
+
+
+def block2d(ctx) -> bool:
+    """`Options.sycl_dpas_block2d` where the path is taken (`usable`)."""
+    return (ctx is not None
+            and bool(ctx.get_user_options().sycl_dpas_block2d)
+            and usable(ctx))
+
+
+def surface_order(order, ctx):
+    """`order`'s tiles (`prepared_order`) laid out as a 2D surface for one
+    2D block read a tile (`Options.sycl_dpas_block2d`,
+    `MatrixPaths.surface_order`), or `None` where they stay as they are.
+
+    The surface is `SUB_GROUP` floats wide -- 64 bytes, the narrowest a 2D
+    block reads (`block_reads.SURFACE_MIN_WIDTH`) -- and a tile is sixteen
+    of its rows, one kilobyte: the upper halves of its eight steps, a row a
+    step and a column a lane (`surface_cells`), then the lower ones.  So
+    every slot keeps its cell, a tile its place, and only the slots within a
+    tile and the parts move (`Tensor.storage_surface`).  Asked of an
+    operator copy the file defines alone (`multilinear._offer_order`): its
+    table is aligned to 256 bytes (`Generator.COPY_ALIGN`), and a 2D
+    block's surface has to start on a cache line, which an operator the
+    caller passes is not known to."""
+    if not block2d(ctx) or not isinstance(order, SplitTiles):
+        return None
+    if order.parts != SPLIT_TERMS or len(order) % TILE:
+        return None
+    where = {cell: n for n, cell in enumerate(tile_cells())}
+    moved = [where[cell] for cell in surface_cells()]
+    out = []
+    for base in range(0, len(order), TILE):
+        out.extend(order[base + n] for n in moved)
+    return SurfaceTiles(out, parts=SPLIT_TERMS, surface=(SUB_GROUP, TILE))
+
+
+# --------------------------------------------------------------------------- #
 # Whether the path is taken
 # --------------------------------------------------------------------------- #
 
@@ -474,6 +541,24 @@ def plan(strategy, shape, n, ctx):
     return whole(strategy, n)
 
 
+def row_caps(columns: int) -> rowpack.RowCaps:
+    """What this path does with a product's columns past its last whole
+    tile of `COLUMNS` (`MatrixPaths.row_caps`, `Options.row_packing`):
+    carries them on FMAs over the operator values its tiles hold
+    (`_Product._carried`), or pads them into a tile of their own.  By
+    itself it carries up to `TAIL_MAX` and pads more; a product of no
+    more than one tile has nothing to carry."""
+    ntail = columns % COLUMNS
+    if columns <= COLUMNS:
+        return rowpack.RowCaps(COLUMNS, frozenset({rowpack.Packing.PAD}),
+                               rowpack.Packing.PAD)
+    auto = (rowpack.Packing.FMA if 0 < ntail <= TAIL_MAX
+            else rowpack.Packing.PAD)
+    return rowpack.RowCaps(
+        COLUMNS, frozenset({rowpack.Packing.FMA, rowpack.Packing.PAD}),
+        auto)
+
+
 def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                    threads=SUB_GROUP, corner=(0, 0), rows=None, head=0):
     """The operator's tiles (`fragment_order`), split into its TF32 halves
@@ -539,7 +624,8 @@ def _servable(ops) -> bool:
             and ops.accumulator == Datatype.F32
             and ops.a == Datatype.F32 and ops.b == Datatype.F32
             and ops.a_parts in (1, SPLIT_TERMS)
-            and (ops.a_parts == 1 or ops.A_slot is not None))
+            and (ops.a_parts == 1 or ops.A_slot is not None
+                 or ops.A_block2d is not None))
 
 
 def _matmul(writer, ops, ctx) -> bool:
@@ -587,7 +673,12 @@ class _Product:
         if self.exchange is None:
             raise _Declined()
         ntail = self.N % COLUMNS
-        tailed = 0 < ntail <= TAIL_MAX and self.N > COLUMNS
+        # The columns past the last whole tile: carried on FMAs or padded
+        # into a tile of their own, as `row_packing` asks (`row_caps`; by
+        # itself up to `TAIL_MAX` carried).
+        packed = rowpack.plan_rows(self.N, row_caps(self.N), ctx)
+        tailed = (packed.packing is rowpack.Packing.FMA and ntail > 0
+                  and self.N > COLUMNS)
         self.dense = self.N - ntail if tailed else self.N
         self.tail = list(range(self.dense, self.N)) if tailed else []
         self.tiles = list(range(0, self.dense, COLUMNS))
@@ -768,14 +859,39 @@ class _Product:
         parts)`: `parts(k)` is step `k`'s value for the carried columns, the
         parts it is stored in, `None` where it is a zero.
 
-        Read as the order stored it where there is one (`A_slot`): a vector
-        of eight a lane and part.  Otherwise by coordinate, a step at a time,
-        and split here.  The parts are taken out of the vectors where they
+        Read as the order stored it where there is one: one 2D block of the
+        tile's sixteen rows where it is a surface (`A_block2d`,
+        `surface_order`), a vector of eight a lane and part where it is the
+        tiles (`A_slot`).  Otherwise by coordinate, a step at a time, and
+        split here.  The parts are taken out of the vectors where they
         are multiplied, not here: a value of the IR is a register to the
         pressure count, and one taken out at the read keeps the tile live in
         the count up to its last use, wherever that is."""
         w = self.writer
         ops = self.ops
+        if ops.A_block2d is not None:
+            # The tile's rows of the surface (`surface_order`), one 2D block
+            # read of the sub-group: work-item `l` gets column `l`, the upper
+            # halves of its eight steps and then the lower.  At a row the
+            # anchor moves (`_anchor`): a read at a constant row is the same
+            # message in every trip of the batch loop, and IGC builds the
+            # messages' payloads ahead of it and holds them through it.
+            # SeisSol's volume without and with the anchor (IGC 2.42.6, 256
+            # registers, spilled bytes): order 6 256 / 0, order 8 17 728 /
+            # 7 616 -- the tiles' two vector reads 0 and 8 256.
+            rows = SPLIT_TERMS * DEPTH
+            got = ops.A_block2d(
+                w, rows * (tile_slot(s, c, self.nchunks) // TILE), rows,
+                shift=self._anchor())
+            if got is None or got is False:
+                raise _Declined()
+            hi = w.slice_(got, 0, self.v8, layout=got.layout, hint='dbh')
+            lo = w.slice_(got, DEPTH, self.v8, layout=got.layout,
+                          hint='dbl')
+            element = {k: e for e, (k, _) in enumerate(tile_cells()[:DEPTH])}
+            return hi, lo, (lambda k: (
+                w.extract(hi, element[k], self.fp, hint='dt'),
+                w.extract(lo, element[k], self.fp, hint='dt')))
         if ops.A_slot is not None:
             got = ops.A_slot(w, tile_slot(s, c, self.nchunks),
                              parts=self.parts, width=DEPTH,

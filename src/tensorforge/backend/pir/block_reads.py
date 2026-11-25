@@ -39,9 +39,12 @@ and extent (`surface`), and `transpose` / `vnni`.  It is one LSC 2D block
 message, which hands every lane of a sub-group of 16 one column of the
 block, or one row where it transposes; `load_block2d` builds one.  Nothing
 here produces one: it pays on a layout that puts sixteen equally strided
-elements on the lanes, and TensorForge lays out none -- `stacking` keeps the
-lanes on a matrix's rows, stacks at most two elements on its last axis, and
-reaches each through a pointer of its own.
+elements on the lanes, and TensorForge lays out one alone -- the operator
+copies the SPMD lowering's DPAS reads a tile at a time where asked
+(`Options.sycl_dpas_block2d`, `MatmulOperands.A_block2d`), whose reads the
+matrix path builds.  `stacking` keeps the lanes on a matrix's rows, stacks
+at most two elements on its last axis, and reaches each through a pointer
+of its own.
 """
 
 from __future__ import annotations
@@ -936,7 +939,9 @@ def load_block2d(builder, base: Any, x: Any, y: Any, *, rows: int,
     operand that reaches its elements through a table, of pointers or of
     indices, has no pitch to give (`block2d_refusal`).  Refused where
     `block2d_refusal` says why, with that answer.  Built behind the passes,
-    as the windows and runs are: none of them reads a block's arguments.
+    as the windows and runs are, or in the body by the DPAS path's reads of
+    an operator surface (`MatmulOperands.A_block2d`), a buffer nothing in the
+    body writes.
     """
     if isinstance(base, Value) and isinstance(base.type, BufferType):
         elem, space = base.type.elem, base.type.space
