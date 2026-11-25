@@ -2523,6 +2523,16 @@ class _Fold:
                                 f'into the folded star\'s blocks of K')
         _, self.columns, _ = _tcgen05_columns(section, step)
         self.slot_columns = 2 * STAR_ROWS * count
+        if named:
+            # Between roles, each slot one band's (`_fold_bands`): a slot's
+            # rounds filled by one band in turn.  Rounds of one slot from
+            # bands in turn let a band ask for the slot's next round while
+            # the slot is two phases short of it -- the round the band
+            # filled last and the next band's not read yet -- and a wait on
+            # the phase's parity cannot tell the two apart: the band would
+            # write A the products have not read.
+            bands = _fold_bands(trip)
+            self.slots = bands * (self.slots // bands)
         self.areas = _fold_ring(trip, step, self.slots, named)
 
     def rows(self, trip, M):
@@ -2617,6 +2627,16 @@ class _Fold:
         if ring is not None and release:
             ring.release(trip, j, base, issue)
         return start
+
+
+def _fold_bands(trip) -> int:
+    """The bands of four warps the folded star step's A is computed in
+    (`_Fold.rows`): the high-order tile's own (`TileRows.bands`), or the
+    element warps' whole fours."""
+    tile = getattr(trip.section, 'tile', None)
+    if tile is not None:
+        return tile.bands
+    return max(1, trip.group.elements // 4)
 
 
 def _fold_ring(trip, step, slots, named):

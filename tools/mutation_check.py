@@ -6998,6 +6998,17 @@ GROUPS = {
          sub(ORACLE, '                if not _same(self.mem.peek(base, slot), value):\n',
              '                if not _same(self.mem.read(base, slot), value):\n', 1)),
     ]),
+    'foldslots': ('tests/test_three_roles.py -n 6', [
+        ("the bands' slots of A in turn between roles",
+         sub(ME_SECTION, "        if named:\n            # Between roles, each slot one band's (`_fold_bands`): a slot's\n",
+             "        if False:\n            # Between roles, each slot one band's (`_fold_bands`): a slot's\n", 1)),
+        ("a slot of A more than the bands own alike",
+         sub(ME_SECTION, '            self.slots = bands * (self.slots // bands)\n',
+             '            self.slots = bands * (self.slots // bands) + 1\n', 1)),
+        ("the bands counted in eights of the element warps",
+         sub(ME_SECTION, '    return max(1, trip.group.elements // 4)\n',
+             '    return max(1, trip.group.elements // 8)\n', 1)),
+    ]),
 }
 
 
