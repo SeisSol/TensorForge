@@ -120,15 +120,96 @@ def test_one_consumer_warpgroup_where_the_options_say_so():
 
 
 @pytest.mark.parametrize('order', [4, 6, 8])
-def test_on_tcgen05_the_three_roles_at_fourteen_elements(order):
-    """sm_100a: the three roles, fourteen elements on 126 of tensor
-    memory's 128 lanes, whatever the table's group or `matrix_roles`."""
+def test_on_tcgen05_the_tile_s_own_layout_at_fourteen_elements(order):
+    """sm_100a: fourteen elements on 126 of tensor memory's 128 lanes, the
+    tile's own layout -- three star bands, the epilogue warpgroup and the
+    input, operator and mma warps, 19, no warp an element's -- D in two
+    slots of tensor memory, the inputs through a ring, whatever the table's
+    group or `matrix_roles`."""
     group = _group(order, 'sm_100a')
     section = group.section
-    assert section.tile == eg.TileRows('tcgen05', 9, 14, 1, groups='loop')
-    assert section.roles == 'three' and not eg.rowless(section)
-    assert group.elements == 14 and group.rows == 14
-    assert group.warps == 14 + eg.OPERATOR_WARPS + eg.MMA_WARPS
+    assert section.tile == eg.TileRows('tcgen05', 9, 14, 1, groups='loop',
+                                       bands=3, dslots=2)
+    assert not section.roles and eg.rowless(section) and section.ring >= 1
+    assert group.elements == 14 and group.rows == 0
+    assert group.warps == 4 * 3 + 4 + 3 == eg.tile_warps(section.tile)
+
+
+def test_d_s_slots_where_tensor_memory_holds_them():
+    """D in two slots where they fit beside A's ring of four slots in the
+    plan's budget of tensor memory (`TMEM_BUDGET`, one number): o8 (N 128)
+    448 of 512; o10 (224) and o12 (368) one."""
+    assert eg.TMEM_BUDGET == 512
+    assert [eg.tile_dslots(n, 3) for n in (32, 64, 128, 224, 368)] == [
+        2, 2, 2, 1, 1]
+    assert eg.tile_dslots(224, 3, budget=1024) == 2
+    from tensorforge.backend.instructions.compute import multi_element as mm
+    section = _group(8, 'sm_100a').section
+    (step,) = [s for s in section.steps if s.lowering == 'tcgen05']
+    columns, at, _ = mm._tcgen05_columns(section, step)
+    assert (columns, at) == (2 * 128 + 4 * 48, (256, 272, 288))
+    assert mm.tmem_columns(section) == 512
+    # Each slot of D a pair of mbarriers in shared memory.
+    single = dataclasses.replace(section, tile=dataclasses.replace(
+        section.tile, dslots=1))
+    assert eg.shared_bytes(section, 14) - eg.shared_bytes(single, 14) == 16
+
+
+def test_a_trip_s_d_is_its_slot_s():
+    """o8 on tcgen05: a trip's D in the slot D's ring gives it, its first
+    column the slot times N -- the mma warp's acquire of that slot, the
+    products' columns and the epilogue's loads all from it -- so that a
+    trip's epilogue reads the slot the next trip's products leave alone
+    (which the oracle, running the roles in turn, cannot see)."""
+    src = _kernel(8, 'sm_100a').get_kernel()
+    (base, slot), = re.findall(r'int32_t (v\d+_db) = (v\d+_rs) \* 128;',
+                               src)
+    assert re.search(rf'mbarrierWait\(&td_ring\[2 \+ \({slot}\)\]', src)
+    assert re.search(rf'tcgen05CommitOn\(&td_ring\[{slot}\]', src)
+    uses = [line for line in src.splitlines()
+            if re.search(rf'\b{base}\b', line)
+            and not line.strip().startswith(f'int32_t {base} =')]
+    # The products' first column of D, and the epilogue's loads.
+    assert any('tmemWarpAddress' not in line for line in uses), uses
+    assert any('tmemWarpAddress' in line for line in uses), uses
+
+
+@pytest.mark.parametrize('output', ['red', 'bulk', 'box'])
+def test_the_epilogue_s_order_in_the_kernel(output):
+    """tcgen05's epilogue in the order the oracle, running the roles in
+    turn, cannot check: D's slot given back behind every load of it; with
+    bulk reductions the box's stores fenced for the async proxy, the role
+    met, then the reductions; and the role met again behind the waits for
+    their reads, before the next trip writes the box."""
+    lines = _kernel(6, 'sm_100a', matrix_output=output).get_kernel(
+        ).splitlines()
+
+    def at(text):
+        return [k for k, line in enumerate(lines) if text in line]
+    (give,) = at('mbarrierArrive(&td_ring[2 + ')
+    assert at('tcgen05.ld.sync') and max(at('tcgen05.ld.sync')) < give
+    if output == 'red':
+        return
+    (reduce,) = at('tensorforge::bulkReduceAdd(')
+    stores = [k for k in at('_dbox[') if '] = ' in lines[k]]
+    fences = [k for k in at('fenceProxyAsync') if max(stores) < k < reduce]
+    assert fences
+    assert any(fences[0] < k < reduce for k in at('barrier.sync'))
+    (wait,) = at('bulkWaitRead')
+    assert any(wait < k <= wait + 2 for k in at('barrier.sync'))
+
+
+def test_two_bands_over_o6_s_blocks_on_the_oracle():
+    """Two star bands over o6's five blocks of K, two trips: each band its
+    blocks two apart, the second band's three past the first's -- where
+    o4's two blocks would take one each whatever the bands' stride."""
+    gen, _ = _on_the_oracle('sm_100a', 6, 17, matrix_bands=2)
+    assert gen.built._element_group.section.tile.bands == 2
+
+
+def test_two_bands_are_fewer_warps():
+    group = _group(8, 'sm_100a', matrix_bands=2)
+    assert group.section.tile.bands == 2 and group.warps == 15
 
 
 def test_the_option_off_is_the_kernel_without_it():
@@ -162,7 +243,8 @@ def test_the_kernel_says_what_the_tile_took():
     src = _kernel(8, 'sm_100a').get_kernel()
     (note, _) = [line.strip() for line in src.splitlines()
                  if line.strip().startswith('// tile:')]
-    assert 'in the three roles' in note
+    assert 'warps 0 to 11 its star bands' in note
+    assert '(2 slots of D)' in note and 'warp 18 issues' in note
 
 
 # -- the kernel ------------------------------------------------------------------ #
@@ -217,14 +299,51 @@ def test_the_rings_hand_over_between_the_roles():
                                                              'tile1')
 
 
-def test_the_roles_verify():
+@pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
+def test_the_roles_verify(arch):
     """Through every pass: no act of a ring out of its roles, no role's
     barrier out of its role, the chain of the split whole."""
     found = []
-    for body in _bodies():
+    for body in tro._bodies(order=6, arch=arch, matrix_tile='high'):
         found += [d for d in verify(body, strict=False)
                   if "slot's" in d or 'role' in d or 'chain' in d]
     assert not found, found[:3]
+
+
+def test_tcgen05_s_rings_hand_over_between_its_roles():
+    """tcgen05's layout: the input warp fills the inputs' ring and the star
+    bands drain it; the operator warp fills B's and the mma warp's products
+    commit its slots back; the bands fill A's ring in tensor memory, the
+    products give its slots back; the mma warp's products commit D's slot
+    full and the epilogue gives it back."""
+    uses = tro._uses(tro._bodies(order=6, arch='sm_100a', matrix_tile='high'))
+    expect = {'me_ring': ('input', ('star',)),
+              'bk_ring': ('operator', ('mma',)),
+              'ta_ring': ('star', ('mma',)),
+              'td_ring': ('mma', ('epilogue',))}
+    for name, (producer, consumers) in expect.items():
+        # The rings by their names, the step's number left out (`bk3`).
+        (use,) = [u for n, u in uses.items() if re.sub(r'\d+', '', n) == name]
+        assert (use.spec.producer, use.spec.consumers) == (producer,
+                                                           consumers), name
+    (d,) = [u for n, u in uses.items() if n.startswith('td')]
+    assert d.roles('publish') == ('mma',)
+    assert d.roles('take') == d.roles('release') == ('epilogue',)
+    assert d.roles('acquire') == ('mma',)
+    assert d.spec.slots == 2
+
+
+def test_tcgen05_s_kernel_text():
+    """o8: the five roles by the warp, D's ring of two slots -- full the
+    products' commit, empty the epilogue's four warps -- the products'
+    commit onto its full side, the inputs' ring drained by the bands' twelve
+    warps."""
+    src = _kernel(8, 'sm_100a').get_kernel()
+    assert re.search(r'bool v\d+_star = threadIdx\.y < 12;', src)
+    assert re.search(r'mbarrierInit\(&td\w*\[\d+ \+ r\], 4\)', src)
+    assert re.search(r'mbarrierInit\(&td\w*\[r\], 1\)', src)
+    assert re.search(r'tcgen05CommitOn\(&td\w*\[v\w+\], ', src)
+    assert re.search(r'mbarrierInit\(&me_ring\[\d+ \+ r\], 12\)', src)
 
 
 # -- the oracle ------------------------------------------------------------------ #
@@ -575,6 +694,62 @@ def test_the_kernel_walks_the_blocks_in_one_loop():
         assert [int(x) for x in found.split(',')] == numbers
 
 
+@pytest.mark.parametrize('output', ['bulk', 'box'])
+def test_tcgen05_s_epilogue_by_bulk_reductions(output):
+    """`matrix_output` asked on tcgen05: the tile's epilogue stages D in
+    shared memory and adds it by bulk reductions -- a column, or an
+    element's box, a reduction -- no reduction a cell; the box counted in
+    the plan's shared memory, at o8 beside one slot of the inputs' ring
+    where two do not fit.  wgmma's tile keeps a reduction a cell, and says
+    so."""
+    group = _group(8, 'sm_100a', matrix_output=output)
+    (step,) = [s for s in group.section.steps if s.lowering == 'tcgen05']
+    assert step.output == output and group.section.ring == 1
+    section = group.section
+    plain = dataclasses.replace(section, steps=tuple(
+        dataclasses.replace(s, output='') for s in section.steps))
+    box = eg.output_volume(section, 14)
+    _, _, stride = eg.output_geometry(section, step)
+    assert box == 14 * 9 * stride > 0
+    assert eg.shared_bytes(section, 14) == eg.shared_bytes(plain, 14) + 4 * box
+    gen = _kernel(6, 'sm_100a', matrix_output=output)
+    src = gen.get_kernel()
+    assert src.count('tensorforge::bulkReduceAdd') == 1
+    assert 'atomicAdd' not in src
+    what = 'a column' if output == 'bulk' else 'an element'
+    assert f'a bulk reduction {what}' in ''.join(
+        l for l in src.splitlines() if l.strip().startswith('// tile:'))
+    wgmma = _group(8, 'sm_90a', matrix_output=output)
+    assert not any(s.output for s in wgmma.section.steps)
+    notes = eg.output_notes(wgmma.section, me._context(
+        'sm_90a', 's', multi_element='force',
+        **{**HIGH, 'matrix_output': output}))
+    assert any('the high-order tile on wgmma adds D a cell at a time' in n
+               for n in notes)
+
+
+@pytest.mark.parametrize('output', ['bulk', 'box'])
+def test_tcgen05_s_bulk_epilogue_on_the_oracle(output):
+    """Three trips with D added by bulk reductions: the box written again
+    in each trip behind the reductions' reads of the last, the masked
+    elements of the last trip added nowhere -- against NumPy, without a
+    race, and bit for bit what a reduction a cell gives."""
+    _, red = _on_the_oracle('sm_100a', 4, 31)
+    _, bulk = _on_the_oracle('sm_100a', 4, 31, matrix_output=output)
+    assert (bulk == red).all()
+
+
+@pytest.mark.parametrize('options', [{}, {'matrix_groups': 'unrolled'},
+                                     {'matrix_bands': 2}])
+def test_three_trips_of_tcgen05_s_layout_on_the_oracle(options):
+    """Thirty-one elements, three trips: D's slots in turn, the first
+    taken again in the third trip behind the epilogue's release of it, the
+    inputs' ring of two slots likewise -- which the oracle's ring order
+    checks -- with the group loop, the blocks written out and two bands."""
+    gen, _ = _on_the_oracle('sm_100a', 4, 31, **options)
+    assert gen.built._element_group.section.tile.dslots == 2
+
+
 def test_two_trips_of_kept_spans_on_tcgen05_on_the_oracle():
     """o6 on tcgen05, seventeen elements: two trips, the second's D written
     fresh over the first's in tensor memory -- which, unlike wgmma's
@@ -619,6 +794,44 @@ def test_kept_and_dense_spans_compute_alike_on_the_oracle(arch, order,
     assert (kept == dense).all()
 
 
+# -- A's slots, each band's own ------------------------------------------------- #
+
+def _a_slots(src):
+    """The slots of a kernel's ring of A in tensor memory: its mbarriers set
+    up, a full side of a band's 128 threads each."""
+    (count,) = re.findall(r'for \(int r = 0; r < (\d+); \+\+r\) \{\s*'
+                          r'tensorforge::mbarrierInit\(&ta\d+_ring\[r\], 128\)',
+                          src)
+    return int(count)
+
+
+@pytest.mark.parametrize('bands,slots', [(3, 3), (2, 4), (1, 4), (4, 4)])
+def test_the_star_bands_own_their_slots_of_a(bands, slots):
+    """tcgen05's tile at o8: A's ring in tensor memory as many slots as its
+    bands own alike -- three of the four at three bands -- so that block
+    `j`'s slot `j % slots` is band `j % bands`'s and every round of a slot
+    one band's.  Without it a band asks for a slot's round two phases
+    ahead of the slot's empty side, which a wait on the parity passes: the
+    hardware race of GB200's J2 (three bands, the default, wrong and hung
+    where two bands were right)."""
+    src = _kernel(8, 'sm_100a', matrix_bands=bands).get_kernel()
+    assert _a_slots(src) == slots
+
+
+@pytest.mark.parametrize('blocks', [5, 11])
+def test_the_ring_model_sees_the_tile_s_race(blocks):
+    """The protocol model of A's ring (`ring_model`), each warp its own
+    agent under seeded random schedules, the bands never meeting -- the
+    tile's star bands run a trip ahead of each other on two input slots:
+    three bands on four slots hand the products another block's A, on
+    three slots never; nor two bands on four.  At o6's five blocks and
+    o8's eleven."""
+    import ring_model
+    assert ring_model.violations(3, 4, blocks, sync='none') > 0
+    assert ring_model.violations(3, 3, blocks, sync='none') == 0
+    assert ring_model.violations(2, 4, blocks, sync='none') == 0
+
+
 # -- the build and the hardware ------------------------------------------------- #
 
 def _ptxas(arch, tmp_path, order=8, **options):
@@ -653,6 +866,8 @@ def _ptxas(arch, tmp_path, order=8, **options):
     ('sm_90a', 'HGMMA', 2 * 6 * 9, {}),
     ('sm_90a', 'HGMMA', 2 * 99, {'matrix_groups': 'unrolled'}),
     ('sm_100a', 'UTCHMMA', 9, {}),
+    ('sm_100a', 'UTCHMMA', 9, {'matrix_bands': 2}),
+    ('sm_100a', 'UTCHMMA', 9, {'matrix_output': 'bulk'}),
     ('sm_100a', 'UTCHMMA', 99, {'matrix_groups': 'unrolled'})])
 def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     """o8 built: every product an instruction of the engine's, as many as
@@ -664,6 +879,10 @@ def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     the group loop's dispatch on a width ptxas cannot tell is the warp's
     alike) in its report."""
     sass, report = _ptxas(arch, tmp_path, **options)
+    if options.get('matrix_output') == 'bulk':
+        # D by one bulk reduction a thread, no reduction a cell.
+        assert len(re.findall(r'\bUBLKRED\b', sass)) == 1
+        assert not re.search(r'\bREDG\b', sass)
     if engine == 'HGMMA':
         assert len(re.findall(r'\bHGMMA\.64x\d+x8\b', sass)) == products
     else:
@@ -672,8 +891,17 @@ def test_the_build_reads_back(arch, engine, products, options, tmp_path):
         assert code not in report, report[-2000:]
 
 
+#: The tile's variants on the GPU: as the options leave it, its blocks
+#: written out, and tcgen05's own levers -- two star bands, D added by bulk
+#: reductions a column and an element's box.
+GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
+                'b2': {'matrix_bands': 2}, 'bulk': {'matrix_output': 'bulk'},
+                'box': {'matrix_output': 'box'}}
+
+
+@pytest.mark.parametrize('variant', sorted(GPU_VARIANTS))
 @pytest.mark.parametrize('order', [6, 8])
-def test_the_tile_computes_on_the_gpu(order, target, cache_root,
+def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
                                       tensorforge_include):
     """On a GH200 (wgmma) or GB200 (tcgen05): the volume in the high-order
     tile against NumPy over a batch ending in a partial group, several
@@ -681,19 +909,69 @@ def test_the_tile_computes_on_the_gpu(order, target, cache_root,
     (`test_multi_element._described`)."""
     if target.backend != 'cuda' or target.arch not in ('sm_90', 'sm_100'):
         pytest.skip('no GPU with wgmma or tcgen05')
+    if target.arch == 'sm_90' and variant in ('b2', 'bulk', 'box'):
+        pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands and '
+                    'adds D a cell at a time')
     from harness.runner import run_case
+    options = {**HIGH, **GPU_VARIANTS[variant]}
     special = dataclasses.replace(target, arch=target.arch + 'a')
     tma._nvcc_builds(special.arch)
     group = eg.plan(me._descrs('volume', order, 's'), me._context(
-        special.arch, 's', multi_element='force', **HIGH))
+        special.arch, 's', multi_element='force', **options))
     assert group is not None and group.section.tile is not None
     case = types.SimpleNamespace(
-        NAME=f'hiorder_tile_volume_o{order}s', DTYPE=Datatype.F32,
-        BATCH=4099, TOL=me._normwise(),
-        OPTIONS={'multi_element': 'force', **HIGH},
+        NAME=f'hiorder_tile_volume_o{order}s' + (f'_{variant}' if variant
+                                                  else ''),
+        DTYPE=Datatype.F32, BATCH=4099, TOL=me._normwise(),
+        OPTIONS={'multi_element': 'force', **options},
         INPUT_TRANSFORM=me._described(me._descrs('volume', order, 's')),
         descr_list=lambda: me._descrs('volume', order, 's'),
         reference=me._reference(me._descrs('volume', order, 's')))
     result = run_case(case, special, cache_root, tensorforge_include)
     assert result.passed, (result.max_abs_err, result.max_rel_err,
                            result.detail)
+
+
+@pytest.mark.parametrize('variant', ['', 'unrolled', 'bulk', 'box'])
+@pytest.mark.parametrize('order', [6, 8])
+def test_many_trips_of_the_tile_on_the_gpu(order, variant, target, cache_root,
+                                           tensorforge_include):
+    """On a GB200, where J2 found three bands on two input slots wrong and
+    hung (A's ring's slots in turn among the bands): the tile over 65537
+    elements on a twentieth of the grid the device holds -- some 650 trips a
+    block (`Options.resident_grid`) -- three bands, bit for bit what two
+    bands give over the same elements (the same products in the same
+    order), each output form against its own."""
+    if target.backend != 'cuda' or target.arch != 'sm_100':
+        pytest.skip('no GPU with tcgen05')
+    import numpy as np
+    from harness import driver_emit
+    from harness.runner import execute
+    special = dataclasses.replace(target, arch='sm_100a')
+    tma._nvcc_builds(special.arch)
+    options = {**HIGH, **GPU_VARIANTS[variant]}
+    builds = [me._generate(me._descrs('volume', order, 's'), me._context(
+        special.arch, 's', multi_element='force', **options, matrix_bands=b,
+        resident_grid=0.05)) for b in (3, 2)]
+    tiles = [gen.built._element_group.section.tile for gen in builds]
+    assert [t.bands for t in tiles] == [3, 2]
+    batch = 65537
+    rng = np.random.default_rng(19)
+    inputs = {}
+    for op in driver_emit.collect_operands(builds[0]):
+        if op.is_scalar or not op.is_source:
+            continue
+        key = op.alias or op.kernel_name
+        if op.values is not None:
+            inputs[key] = np.asarray(op.values, dtype=np.float32).reshape(
+                op.shape, order='F')[None]
+            continue
+        rows = 1 if op.addressing == 'none' else batch
+        inputs[key] = rng.standard_normal((rows, *op.shape)).astype(
+            np.float32)
+    got, want = (execute(gen, special, cache_root, tensorforge_include,
+                         batch, inputs, runtime_timeout=300.0)
+                 for gen in builds)
+    assert set(got) == set(want)
+    for name in want:
+        assert np.array_equal(got[name], want[name]), name

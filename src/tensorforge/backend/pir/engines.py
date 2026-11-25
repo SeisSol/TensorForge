@@ -3884,9 +3884,10 @@ def _check_commit_group(s: Stmt) -> List[str]:
                     f'set up, not {obj!r}']
         if obj.slots:
             # Onto a ring's slot: the slot, then the thread that issued.
-            if s.attr('side') != 'empty':
+            if s.attr('side') not in ('empty', 'full'):
                 return [f'{s.op}: {engine} commits onto the empty side of a '
-                        f'ring\'s slot, which its producer waits on, not '
+                        f'ring\'s slot, which its producer waits on, or its '
+                        f'full side, which its consumers do, not '
                         f'{s.attr("side")!r}']
             if len(s.args) != 2 or not isinstance(s.args[1], Value):
                 return [f'{s.op}: {engine} commits onto a ring\'s slot what '
@@ -4212,7 +4213,8 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
            lower={'cuda': _lower_tmem_dealloc, '': _lower_tmem_dealloc,
                   '*': _no_tmem},
            arrival=Uniformity.BLOCK, check=_check_tmem),
-    OpSpec(Op.TMEM_LD, operands=(Slot('column', _INT),),
+    OpSpec(Op.TMEM_LD, operands=(Slot('column', _INT),
+                                 Slot('runtime_column', (bool,), False)),
            results=('values',), effect=Effect.READ, movable=False,
            completes=Completion.SYNC, retires=None, settles=False,
            units=1, pipe='other',
@@ -4865,15 +4867,17 @@ def wait_counter(counter: str, count: int, tokens: Sequence[Value] = (),
 
 def commit_group(engine: str, obj: Optional[Value] = None,
                  issue: Optional[Value] = None,
-                 slot: Optional[Any] = None) -> Stmt:
+                 slot: Optional[Any] = None, side: str = 'empty') -> Stmt:
     """Close what `engine` issued since its last commit into one group
     (`COMMIT_ENGINES`): `wgmma.commit_group`; tcgen05's onto the mbarrier
     `obj` (`IRBuilder.bulk_channel`), what the thread `issue` picks issued
-    -- or, `slot` given, onto the empty side of that slot of the ring `obj`
+    -- or, `slot` given, onto a side of that slot of the ring `obj`
     (`mbarrier_ring`), which the products arrive at once complete: the
-    consumer's release of the slot, for its producer to fill again.
-    Pinned and asynchronous; the object named in `object`, as a bulk copy
-    names it."""
+    empty side, the consumer's release of the slot, for its producer to
+    fill again; or the full side, the producer's publish of what the
+    products write into the slot, for its consumers to take (tensor
+    memory's D, `multi_element`'s high-order tile).  Pinned and
+    asynchronous; the object named in `object`, as a bulk copy names it."""
     if engine not in COMMIT_ENGINES:
         raise IRError(f'{engine!r} commits no groups; '
                       f'{", ".join(sorted(COMMIT_ENGINES))} do')
@@ -4886,7 +4890,10 @@ def commit_group(engine: str, obj: Optional[Value] = None,
         attrs += (('object', obj),)
         args = (issue,)
         if slot is not None:
-            attrs += (('side', 'empty'), ('scope', _ring_scope(obj)))
+            if side not in ('empty', 'full'):
+                raise IRError(f'a commit onto the {side!r} side of a ring\'s '
+                              f'slot; its sides are empty and full')
+            attrs += (('side', side), ('scope', _ring_scope(obj)))
             args = (slot, issue)
     elif obj is not None or issue is not None or slot is not None:
         raise IRError(f'{engine} commits onto its counter')
@@ -4914,9 +4921,14 @@ def tmem_dealloc(tmem: Value) -> Stmt:
                  accesses=(Access(Effect.WRITE, MemSpace.TMEM, tmem),))
 
 
-def tmem_ld(tmem: Value, column: int, targets: Sequence[Value]) -> Stmt:
+def tmem_ld(tmem: Value, column: Any, targets: Sequence[Value]) -> Stmt:
     """A warp's load of `len(targets)` columns of its quarter of `tmem`'s
-    lanes, from `column` on, into `targets`."""
+    lanes, from `column` on, into `targets`: a number, or a value -- the
+    operand behind the buffer, `column` 0 and `runtime_column` set."""
+    if isinstance(column, Value):
+        return _stmt(Op.TMEM_LD, (('column', 0), ('runtime_column', True)),
+                     args=(tmem, column), target=tuple(targets),
+                     accesses=(Access(Effect.READ, MemSpace.TMEM, tmem),))
     return _stmt(Op.TMEM_LD, (('column', int(column)),), args=(tmem,),
                  target=tuple(targets),
                  accesses=(Access(Effect.READ, MemSpace.TMEM, tmem),))

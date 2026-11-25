@@ -329,6 +329,14 @@ def parse_matrix_tile(text: str) -> str:
   return value
 
 
+def parse_matrix_bands(text: str) -> int:
+  """1 to 4 (`Options.matrix_bands`)."""
+  value = int(str(text).strip())
+  if not 1 <= value <= 4:
+    raise ValueError(f'matrix_bands is 1 to 4, not {value}')
+  return value
+
+
 #: What `Options.matrix_groups` takes.
 MATRIX_GROUPS = ('loop', 'unrolled')
 
@@ -2992,6 +3000,17 @@ declare('matrix_spans',
             'the block\'s first product whole, so that D starts fresh; '
             '`dense`, every product\'s whole width, as the tilings before '
             'the tile.')
+
+declare('matrix_bands',
+        default=3,
+        env='TF_MATRIX_BANDS',
+        parse=parse_matrix_bands,
+        doc='The star role\'s bands of the high-order tile on tcgen05 '
+            '(`matrix_tile` `high`, `element_group.TileRows.bands`): four '
+            'warps a band, each band covering tensor memory\'s 128 lanes and '
+            'taking the blocks of A in turn.  3, the default, the fourteen '
+            'element warps\' twelve that mixed; fewer bands are fewer warps '
+            'of more registers each.  1 to 4; a search parameter.')
 
 declare('matrix_groups',
         default='loop',

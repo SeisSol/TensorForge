@@ -6936,9 +6936,9 @@ GROUPS = {
         ("D's columns read back in the ascending order on wgmma",
          sub(ME_SECTION, "                   n - 8 * (i // 4 + 1) + i % 2, hint='n')\n",
              "                   8 * (i // 4) + i % 2, hint='n')\n", 1)),
-        ("a span's products into D's first columns on tcgen05",
-         sub(ME_SECTION, '                              + STAR_ROWS * ia + kt, d_column=piece.lo,\n',
-             '                              + STAR_ROWS * ia + kt, d_column=0,\n', 1)),
+        ("a span's products into D's slot's first columns on tcgen05",
+         sub(ME_SECTION, "                                  'add', INDEX, d_base, piece.lo, hint='dc'),\n",
+             "                                  'add', INDEX, d_base, 0, hint='dc'),\n", 1)),
         ("a span multiplied at the step's N on tcgen05",
          sub(ME_SECTION, '                    b.tcgen05(n if piece.width == piece.stage.width\n'
                          '                              and not piece.lo else piece.width, tmem,\n',
@@ -7046,6 +7046,103 @@ GROUPS = {
         ("the groups' option defaulting to written out",
          sub(OPTIONS, "declare('matrix_groups',\n        default='loop',\n",
              "declare('matrix_groups',\n        default='unrolled',\n", 1)),
+    ]),
+    # --- the high-order tile, H3c: tcgen05's own layout, D in two slots (tensorforge-hotile)
+    'hioverlap': ('tests/test_hiorder_tile.py -n 6', [
+        ("every trip's D in the first slot",
+         sub(ME_SECTION, "        dbase = b.op('mul', INDEX, dslot, n, hint='db')\n",
+             "        dbase = b.op('mul', INDEX, dslot, 0, hint='db')\n", 1)),
+        ("the mma warp not waiting for D's slot back",
+         sub(ME_SECTION, '                b.ring_acquire(dring, dslot, dparity)\n', '', 1)),
+        ("the epilogue reading D ahead of its products",
+         sub(ME_SECTION, '            b.ring_take(dring, dslot, dparity)\n', '', 1)),
+        ("the products committed onto D's empty side",
+         sub(ME_SECTION, "            b.commit_group('tcgen05', object=dring, issue=lane0, slot=dslot,\n"
+                         "                           side='full')\n",
+             "            b.commit_group('tcgen05', object=dring, issue=lane0, slot=dslot,\n"
+             "                           side='empty')\n", 1)),
+        ("the epilogue reading the first slot of D",
+         sub(ME_SECTION, '            _tcgen05_role_epilogue(trip, step, M, base=dbase)\n',
+             '            _tcgen05_role_epilogue(trip, step, M, base=None)\n', 1)),
+        ("A's ring behind one slot of D",
+         sub(ME_SECTION, '        if section.tile is not None:\n            n *= section.tile.dslots\n', '', 1)),
+        ("D's slots one where two fit",
+         sub(ME_GROUP, '    return 2 if 2 * tile_n + ring <= budget else 1\n', '    return 1\n', 1)),
+        ("the budget of tensor memory past a block's",
+         sub(ME_GROUP, 'TMEM_BUDGET = 512\n', 'TMEM_BUDGET = 1024\n', 1)),
+        ("the bands the options ask for not the tile's",
+         sub(ME_GROUP, "        bands = int(getattr(context.get_user_options(), 'matrix_bands',\n"
+                       "                            TILE_BANDS))\n",
+             '        bands = TILE_BANDS\n', 1)),
+        ("the star bands from the element count",
+         sub(ME_SECTION, '            # The high-order tile\'s star bands (`TileRows.bands`).\n'
+                         '            bands = trip.section.tile.bands\n',
+             '            # The high-order tile\'s star bands (`TileRows.bands`).\n'
+             '            bands = bands\n', 1)),
+        ("the inputs' ring filled by wgmma's producer role",
+         sub(ME_SECTION, "        producer = 'input' if section.tile.engine == 'tcgen05' else 'producer'\n",
+             "        producer = 'producer'\n", 1)),
+        ("a commit onto a ring's full side taken for a release",
+         sub(Path('src/tensorforge/backend/pir/rings.py'),
+             "            return 'publish', 'full'\n",
+             "            return 'release', 'empty'\n", 1)),
+        # the epilogue by bulk reductions
+        ("the tile's bulk epilogue asked and a reduction a cell taken",
+         sub(ME_GROUP, "    output = ('red' if tile is None or tile.engine != 'tcgen05'\n"
+                       "              else output_asked(context))\n",
+             "    output = 'red'\n", 1)),
+        ("a row of D staged one column of the box past its own",
+         sub(ME_SECTION, "    at = b.op('mul', INDEX, row, stride, hint='d')\n    staged = {}\n",
+             "    at = b.op('mul', INDEX, row + 1, stride, hint='d')\n    staged = {}\n", 1)),
+        ("D's slot given back ahead of its last loads",
+         subs(ME_SECTION,
+              ("        column = b.op('add', INDEX, base, c0, hint='dc')\n",
+               "        if not c0:\n            release()\n"
+               "        column = b.op('add', INDEX, base, c0, hint='dc')\n"),
+              ('        if c0 >= end:\n            # The row of D in registers: the slot back to the mma warp.\n'
+               '            release()\n', ''))),
+        ("the box's stores not fenced for the async proxy",
+         sub(ME_SECTION, "    b.fence(FenceKind.PROXY)\n    b.barrier(Participants.ROLE)\n"
+                         "    element = b.op('div', INDEX, row, width, hint='e')\n",
+             "    b.barrier(Participants.ROLE)\n"
+             "    element = b.op('div', INDEX, row, width, hint='e')\n", 1)),
+        ("a masked element's columns added too",
+         sub(ME_SECTION, "    issue = b.op('and', BOOL, live, held, hint='issue')\n",
+             '    issue = live\n', 1)),
+        ("an element's box added by each of its columns' threads",
+         sub(ME_SECTION, "        issue = b.op('and', BOOL, issue, b.op('eq', BOOL, quantity, 0,\n",
+             "        issue = b.op('or', BOOL, issue, b.op('eq', BOOL, quantity, 0,\n", 1)),
+        ("the tile's reductions not waited for",
+         sub(ME_SECTION, "    # The reductions' reads of the box done, in the thread that issued them.\n"
+                         "    b.wait(token)\n",
+             '', 1)),
+        ("a thread's lane of tensor memory its warp's, not its quarter's",
+         sub(ME_SECTION, "    quarter = b.op('rem', INDEX, b.thread_id('y'), 4, hint='q')\n",
+             "    quarter = b.op('rem', INDEX, b.thread_id('y'), 8, hint='q')\n", 1)),
+        ("the box written again ahead of the reductions' reads",
+         sub(ME_SECTION, "    # The box's next writes, the next trip's, behind every reduction's reads\n"
+                         "    # of it: an element's box is read by one thread and written by all of\n"
+                         "    # its columns'.\n    b.barrier(Participants.ROLE)\n",
+             '', 1)),
+        ("a load of tensor memory at a value column at its first",
+         sub(ENGINES, "        return _stmt(Op.TMEM_LD, (('column', 0), ('runtime_column', True)),\n"
+                      "                     args=(tmem, column), target=tuple(targets),\n",
+             "        return _stmt(Op.TMEM_LD, (('column', 0),),\n"
+             "                     args=(tmem,), target=tuple(targets),\n", 1)),
+    ]),
+    'foldslots': ('tests/test_three_roles.py tests/test_hiorder_tile.py -n 6', [
+        ("the bands' slots of A in turn between roles",
+         sub(ME_SECTION, "        if named:\n            # Between roles, each slot one band's (`_fold_bands`): a slot's\n",
+             "        if False:\n            # Between roles, each slot one band's (`_fold_bands`): a slot's\n", 1)),
+        ("a slot of A more than the bands own alike",
+         sub(ME_SECTION, '            self.slots = bands * (self.slots // bands)\n',
+             '            self.slots = bands * (self.slots // bands) + 1\n', 1)),
+        ("the bands counted in eights of the element warps",
+         sub(ME_SECTION, '    return max(1, trip.group.elements // 4)\n',
+             '    return max(1, trip.group.elements // 8)\n', 1)),
+        ("the tile's bands not the owners of A's slots",
+         sub(ME_SECTION, '    if tile is not None:\n        return tile.bands\n',
+             '    if tile is not None:\n        return 1\n', 1)),
     ]),
 }
 

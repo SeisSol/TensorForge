@@ -1194,11 +1194,12 @@ class IRBuilder:
         """Free the columns of `tmem` (`engines.tmem_dealloc`)."""
         return self.emit(engines.tmem_dealloc(tmem))
 
-    def tmem_ld(self, tmem: Value, column: int, count: int,
+    def tmem_ld(self, tmem: Value, column: Operand, count: int,
                 hint: str = 'tm') -> List[Value]:
         """A warp's load of `count` columns of its quarter of `tmem`'s
-        lanes from `column` on (`engines.tmem_ld`): each thread its lane's,
-        values of its own."""
+        lanes from `column` on (`engines.tmem_ld`) -- a number, or a value
+        the address takes in its register: each thread its lane's, values
+        of its own."""
         targets = [self.value(ScalarType(Datatype.F32), hint=hint,
                               uniform=Uniformity.LANE) for _ in range(count)]
         self.emit(engines.tmem_ld(tmem, column, targets))
@@ -1279,18 +1280,22 @@ class IRBuilder:
 
     def commit_group(self, engine: str, object: Optional[Value] = None,
                      issue: Optional[Value] = None,
-                     slot: Optional[Operand] = None) -> Stmt:
+                     slot: Optional[Operand] = None,
+                     side: str = 'empty') -> Stmt:
         """Close what `engine` issued since its last commit into one group
         (`engines.commit_group`): onto the mbarrier `object` for tcgen05,
-        what the thread `issue` picks issued -- or onto the empty side of
-        the slot `slot` of the ring `object` (`mbarrier_ring`), whose
-        producer waits there for the products to have read the slot."""
+        what the thread `issue` picks issued -- or onto a side of the slot
+        `slot` of the ring `object` (`mbarrier_ring`): the empty side,
+        whose producer waits there for the products to have read the slot,
+        or the full side, whose consumers wait there for what the products
+        wrote into it."""
         if slot is not None:
             if not isinstance(object, Ring):
                 raise IRError(f'a commit onto slot {slot!r} of {object!r}, '
                               f'which is no ring')
             object = object.object
-        return self.emit(engines.commit_group(engine, object, issue, slot))
+        return self.emit(engines.commit_group(engine, object, issue, slot,
+                                              side))
 
     def matrix_wait(self, engine: str, count: int = 0,
                     registers: Sequence[Value] = (),
