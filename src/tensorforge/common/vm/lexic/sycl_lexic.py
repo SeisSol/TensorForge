@@ -61,8 +61,9 @@ class SyclLexic(Lexic):
     #: the context sets.
     self.block_runs = False
     #: Whether a body reads 2D blocks under SPMD (`tensorforge::
-    #: subGroupBlock2d`, `pir.block_reads.load_block2d`): set by what builds
-    #: them, which nothing does yet.
+    #: subGroupBlock2d`, `pir.block_reads.load_block2d`): the context sets it
+    #: where the DPAS path reads its operator copies so
+    #: (`Options.sycl_dpas_block2d`).
     self.block2d = False
     #: Whether a kernel may call DPAS from the SPMD lowering
     #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
@@ -568,6 +569,14 @@ class SyclLexic(Lexic):
                         height, pitch, x, y):
     if self._explicit_simd or self._sub_groups is None:
       return None
+    if (self.dpas and elem == 'float' and (rows, cols) == (16, 16)
+        and not transpose):
+      # A DPAS tile of an operator surface (`Options.sycl_dpas_block2d`),
+      # in OpenCL's own vector, as the path holds its fragments
+      # (`tensorforge::dpasBlock2d`).
+      return ('tensorforge::NativeFloat16',
+              f'tensorforge::dpasBlock2d(item.get_sub_group(), {base}, '
+              f'{width}, {height}, {pitch}, {x}, {y})')
     count = cols if transpose else rows
     kind = elem if count == 1 else f'sycl::vec<{elem}, {count}>'
     flag = 'true' if transpose else 'false'

@@ -8,8 +8,10 @@ column of the block, or its row where the read transposes.
 The statement is a `load` with `engine='block'` as a window or a run is, told
 apart by its pitch.  Under the explicit vector it is one `load_2d`
 (`tensorforge::blockLoad2d`); under SPMD the sub-group's 2D block read
-(`tensorforge::subGroupBlock2d`).  Nothing produces one yet: the limits are
-pinned here, each with its own answer, and the device code is checked by the
+(`tensorforge::subGroupBlock2d`).  The SPMD DPAS path reads its operator
+copies' tiles so where asked (`Options.sycl_dpas_block2d`,
+`test_sycl_dpas_block2d`); nothing else produces one.  The limits are pinned
+here, each with its own answer, and the device code is checked by the
 on-slice harness of the item, compiled for PVC and run under the CPU
 stand-in.
 """

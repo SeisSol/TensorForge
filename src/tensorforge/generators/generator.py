@@ -135,8 +135,8 @@ def _explicit_simd_lowering(context) -> bool:
 #: one list share its tensors, so a build taken over states them again
 #: (`Generator._restore_storage`).
 _STORAGE_FIELDS = ('storage_parts', 'storage_planar', 'storage_order',
-                   'simt_interleave', 'slot_major', 'packing',
-                   'packing_table', 'packing_table_param')
+                   'simt_interleave', 'slot_major', 'storage_surface',
+                   'packing', 'packing_table', 'packing_table_param')
 
 
 def _store_as(stored: Dict[int, tuple]) -> None:

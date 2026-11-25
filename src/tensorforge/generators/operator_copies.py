@@ -45,8 +45,8 @@ from tensorforge.common.basic_types import Addressing, Residence
 #: (`generator._STORAGE_FIELDS`).
 _UNSTORED = {'storage_order': None, 'packing': None, 'storage_parts': 1,
              'storage_planar': False, 'simt_interleave': None,
-             'slot_major': None, 'packing_table': None,
-             'packing_table_param': True}
+             'slot_major': None, 'storage_surface': None,
+             'packing_table': None, 'packing_table_param': True}
 
 
 def _views(descr):

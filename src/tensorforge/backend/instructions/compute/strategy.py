@@ -217,7 +217,11 @@ class MatrixPaths(Protocol):
     per-element `mma.sync` in `nvidia.matmul` (`TAIL_MAX`, `TAIL_MODES`),
     the multi-element tiles in `element_group.fill` (dense), AMD's stacked
     tiles in `amd.stacked.stacked_plan` (a DPP span, or `padded`), its
-    lane-batched MFMA in `amd.tiling.boundary`.
+    lane-batched MFMA in `amd.tiling.boundary`.  And `surface_order(order,
+    ctx)`: an operator copy's order (`prepared_order`) laid out as a 2D
+    surface the matrix path reads by block messages, or None
+    (`Tensor.storage_surface`, `MatmulOperands.A_block2d`); Intel's SPMD
+    lowering answers (`Options.sycl_dpas_block2d`).
     """
 
     #: The order the target takes the legal arrangements in.  Preference

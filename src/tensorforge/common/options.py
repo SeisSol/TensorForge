@@ -1408,6 +1408,21 @@ declare('sycl_dpas_fence',
             'off, which `sycl_dpas=auto` under `autotune=lanes` answers per '
             'kernel.')
 
+declare('sycl_dpas_block2d',
+        default=False,
+        env='TF_SYCL_DPAS_BLOCK2D',
+        parse=parse_bool,
+        doc='Under `sycl_dpas`, lay each operator copy the file defines '
+            '(`mma_operator_copies`) out as a 2D surface sixteen floats '
+            'wide, a tile\'s two TF32 halves sixteen rows of it, and read a '
+            'tile with one 2D block message of the sub-group '
+            '(`tensorforge::subGroupBlock2d`, '
+            '`cl_intel_subgroup_2d_block_io`) where it is two vector reads '
+            'a work-item: one kilobyte a message, as the hand-written PVC '
+            'volume reads its operator (hvp).  Only a copy the file defines, '
+            'whose table is aligned to 256 bytes: an operator the caller '
+            'prepares keeps the tiles.  Off by default, unmeasured.')
+
 declare('lead_split',
         rule=lambda target: (2 if (target.hw.vendor == 'intel'
                                    and target.backend == 'oneapi'

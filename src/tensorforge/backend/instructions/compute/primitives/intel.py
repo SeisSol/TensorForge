@@ -815,6 +815,16 @@ def prepared_order(shape, dtype, ctx, columns=0, lead=0, depth=0,
                           parts=TF32_SPLIT_TERMS if dpas else 1)
 
 
+def surface_order(order, ctx):
+    """An operator copy's tiles as a 2D surface (`MatrixPaths.surface_order`):
+    the SPMD lowering's DPAS reads one so where asked
+    (`intel_spmd.surface_order`, `Options.sycl_dpas_block2d`); the explicit
+    vector reads none."""
+    if ctx is None or _simd_mode(ctx):
+        return None
+    return intel_spmd.surface_order(order, ctx)
+
+
 def widths(threads, accumulator, ctx):
     """None offered (`MatrixPaths.widths`): `Options.matrix_columns` is read
     by CDNA's lane-batched tiles alone, and the atom here is the count's
