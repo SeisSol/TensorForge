@@ -92,6 +92,10 @@ def act_of(s: Stmt) -> Optional[Tuple[str, Optional[str]]]:
     if s.op == Op.ARRIVE:
         return ('release' if side == 'empty' else 'publish'), side
     if s.op == Op.COMMIT_GROUP:
+        if side == 'full':
+            # The products' arrival once complete onto the slot's full
+            # side: the producer's publish of what they wrote.
+            return 'publish', 'full'
         return 'release', 'empty'
     if s.op == Op.COPY_ASYNC:
         return 'copy', 'full'

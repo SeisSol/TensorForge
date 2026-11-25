@@ -964,12 +964,15 @@ def test_the_loop_takes_the_group_or_says_why():
         loop(group_size=1)
 
 
-@pytest.mark.parametrize('value', ['off', 'auto'])
-def test_force_takes_the_layout_where_off_and_auto_do_not(value):
-    """`off` never, and `auto` not on CUDA, where nothing has measured it
-    to pay yet (`AUTO_LANES`)."""
-    assert eg.plan(_volume(), _context(multi_element=value)) is None
-    assert eg.plan(_volume(), _context(multi_element='force')) is not None
+def test_force_takes_the_layout_where_off_does_not():
+    """`off` never, `force` the fill rule's group -- the warp form on CUDA
+    unless another is asked for.  (`auto` takes the slot form there where
+    it measured to pay: test_slot_mapping.)"""
+    assert eg.plan(_volume(), _context(multi_element='off')) is None
+    group = eg.plan(_volume(), _context(multi_element='force'))
+    assert group is not None and group.lanes is None
+    auto = eg.plan(_volume(), _context(multi_element='auto'))
+    assert auto is not None and auto.lanes.mapping is not None
 
 
 def test_the_option_is_off_by_default():
@@ -1404,11 +1407,11 @@ def test_auto_takes_no_f64_section_yet(order):
 
 
 @pytest.mark.parametrize('backend,arch', [
-    ('cuda', 'sm_90'), ('cuda', 'sm_120'), ('hip', 'gfx942'),
-    ('hip', 'gfx1150'), ('esimd', 'pvc')])
-def test_auto_takes_nothing_but_intel_under_spmd(backend, arch):
-    """Not on CUDA or HIP, which nothing has measured yet, and not under
-    the explicit vector, which the layout is not written for (`TARGETS`)."""
+    ('hip', 'gfx942'), ('hip', 'gfx1150'), ('esimd', 'pvc')])
+def test_auto_takes_nothing_but_intel_under_spmd_and_nvidia(backend, arch):
+    """Not on HIP, which nothing has measured yet, and not under the
+    explicit vector, which the layout is not written for (`TARGETS`).  On
+    CUDA the slot form (`AUTO_SLOTS`, test_slot_mapping)."""
     context = _context(arch, 's', backend=backend, **AUTO)
     assert eg.plan(_volume(4, 's'), context) is None
     if backend != 'esimd':

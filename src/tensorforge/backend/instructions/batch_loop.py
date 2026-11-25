@@ -103,7 +103,8 @@ class BatchLoop(AbstractInstruction):
                  count_index: Optional[int] = None,
                  trip: Trip = Trip.ELEMENT,
                  producer_rows: int = 0,
-                 lane_map: Optional[Tuple[int, int]] = None):
+                 lane_map: Optional[Tuple[int, int]] = None,
+                 element_rows: Optional[int] = None):
         super().__init__(context)
         self._section_index = section_index
         #: Whose element count and flags this loop runs over: its own
@@ -171,6 +172,12 @@ class BatchLoop(AbstractInstruction):
         #: trips without an element of their own, so the group starts at the
         #: block's first row and the block is the group's elements and them.
         self._producer_rows = int(producer_rows)
+        #: The block's rows that are an element's own: the group's, a row an
+        #: element, unless the group's layout says otherwise -- none in the
+        #: high-order tile's on wgmma (`element_group.rowless`), whose rows
+        #: all take the group's trips as a producer's do.
+        self._element_rows = (self._group_size if element_rows is None
+                              else int(element_rows))
         #: Where the group on the lanes takes several lanes an element
         #: (`Trip.LANE_GROUP`, the slot form's `element_group.SlotMapping`):
         #: `(elements, lanes)` -- each warp its own `elements`, on `lanes`
@@ -215,6 +222,17 @@ class BatchLoop(AbstractInstruction):
         self._region.append(instr)
 
     def set_mults_per_block(self, mults: int) -> None:
+        if (self._trip is Trip.ELEMENT_GROUP
+                and self._element_rows != self._group_size):
+            # Rows none of which is an element's (`element_rows`): the
+            # block is its producer rows alone.
+            if mults != self._element_rows + self._producer_rows:
+                raise InternalError(
+                    f'an element group of {self._group_size} on '
+                    f'{self._element_rows} rows and {self._producer_rows} '
+                    f'producer rows in a block of {mults} multiplications')
+            self._mults_per_block = int(mults)
+            return
         if (self._trip is Trip.ELEMENT_GROUP
                 and mults != self._group_size + self._producer_rows):
             raise InternalError(
@@ -361,7 +379,7 @@ class BatchLoop(AbstractInstruction):
         """
         if self._mults_per_block == 1 or self._trip is Trip.LANE_GROUP or (
                 self._grouped() and self._mults_per_block
-                == self._group_size + self._producer_rows):
+                == self._element_rows + self._producer_rows):
             # A producer's rows take the group's trips (`producer_rows`).
             return Uniformity.BLOCK
         if self._grouped():

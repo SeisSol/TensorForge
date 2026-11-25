@@ -1731,6 +1731,9 @@ class Generator:
                                else Trip.ELEMENT_GROUP),
                          producer_rows=(0 if self._element_group is None
                                         else self._element_group.producers),
+                         element_rows=(None if self._element_group is None
+                                       or self._element_group.lanes
+                                       else self._element_group.rows),
                          lane_map=self._lane_map())
 
         self._section.stream = (list(self._section.global_ir) + [loop]
@@ -2188,14 +2191,24 @@ class Generator:
     (`resident_grid`) and no section waits on the whole grid, which has to
     be resident."""
     options = self._context.get_user_options()
-    if options.one_round_grid and options.resident_grid > 0:
+    if options.one_round_grid is True and options.resident_grid > 0:
       raise GenerationError(
           f'one_round_grid sizes the grid to the batch and resident_grid='
           f'{options.resident_grid} to the device; ask for one of them')
     core = self._core_threads(cooperative)
     return not (cooperative or options.resident_grid > 0 or core > 0
                 or (self._context.target.bounds_grid()
-                    and not options.one_round_grid))
+                    and not self._grid_one_round()))
+
+  def _grid_one_round(self) -> bool:
+    """Whether the grid is asked to cover the batch in one round
+    (`one_round_grid`): as asked, and under `auto` where the kernel takes
+    the slot form (`element_group.slot_one_round`)."""
+    asked = self._context.get_user_options().one_round_grid
+    if asked == 'auto':
+      return element_group.slot_one_round(self._element_group,
+                                          self._context)
+    return bool(asked)
 
   def _core_threads(self, cooperative: bool) -> int:
     """`Options.sycl_core_threads`, the hardware threads an Xe-core the
@@ -3602,7 +3615,8 @@ class Generator:
         # A grid asked to cover the batch (`one_round_grid`) holds a block
         # an element group, the loop's one trip each.
         persistent=bool(self._persistent_threading) and not (
-            self._context.get_user_options().one_round_grid
+            self._grid_one_round()
+            and self._context.get_user_options().resident_grid <= 0
             and not any(s.barrier for s in sections)),
         sections=sections)
 
@@ -4600,6 +4614,7 @@ class Generator:
     # symbols are the ones its operations name.
     flat = [op for descr in descr_list for op in descr.operations()]
     section, why = element_group.classify(flat)
+    classified = section
     if section is not None:
       planned = self._element_group.section
       # The engine the plan's tiling is on: mma_sync's where the fill rule
@@ -4616,6 +4631,10 @@ class Generator:
           halves=element_group.halves(planned),
           prepared=element_group.prepared(planned), star=planned.star,
           output=element_group.output_of(planned), roles=planned.roles)
+      if planned.tile is not None:
+        # The high-order tile's own lowering (`element_group.tile_plan`).
+        section = element_group.tile_lowered(classified, self._context,
+                                             planned.tile, planned.ring)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')
@@ -5296,6 +5315,9 @@ class Generator:
       for note in element_group.roles_notes(self._element_group,
                                             self._context):
         writer(f'// roles: {note}')
+      for note in element_group.tile_notes(self._element_group,
+                                           self._context):
+        writer(f'// tile: {note}')
     groups = self._launch_groups()
     if len(groups) > 1:
       writer(f'// launches: {len(groups)}, cut at the grid barriers, one after '

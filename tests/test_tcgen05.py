@@ -492,6 +492,49 @@ def test_the_text_of_a_product_from_tensor_memory_with_a_value_enable():
         ': "memory"\n);')
 
 
+def test_a_product_whose_n_and_columns_are_values():
+    """N, D's column and A's as values (the high-order tile's group loop,
+    `multi_element._tcgen05_groups`): the instruction descriptor and both
+    addresses in registers -- N >> 3 put from bit 17 into the rest of the
+    descriptor -- the statement's shape the widest of the widths it names;
+    a value of N that names none, or one no N of tcgen05's, refused.  And a
+    store to tensor memory at a column that is a value."""
+    from tensorforge.backend.pir.core import ScalarType
+    ctx = _ctx()
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem', context=ctx)
+    sb = b.alloc(Datatype.F32, (256 * 8,), MemSpace.SHARED, hint='sb',
+                 extern='sb')
+    tmem = b.tmem_alloc(512)
+    issue = b.op('eq', BOOL, b.thread_id('x'), 0, hint='issue')
+    n = b.op('add', INDEX, b.thread_id('y'), 16, hint='n')
+    lo = b.op('mul', INDEX, b.thread_id('y'), 16, hint='lo')
+    at = b.op('add', INDEX, b.thread_id('y'), 256, hint='at')
+    bd = b.matrix_desc(sb, 0, desc=PLAIN, hint='bd')
+    s = b.tcgen05(n, tmem, bd, tmem, issue=issue, a_column=at, d_column=lo,
+                  widths=(48, 16))
+    assert s.attr('shape') == (128, 48, 8) and s.attr('widths') == (16, 48)
+    text = engines.lower(s, ctx.target, name=str).lines[1]
+    assert f'"r"({tmem} + static_cast<uint32_t>({lo}))' in text
+    assert f'"r"({tmem} + static_cast<uint32_t>({at}))' in text
+    assert (f'"r"(0x08000910u | ((static_cast<uint32_t>({n}) >> 3) << 17))'
+            in text)
+    assert engines.tcgen05_idesc((128, 48, 8)) == 0x08000910 | (6 << 17)
+    with pytest.raises(IRError, match='names the widths'):
+        b.tcgen05(n, tmem, bd, tmem, issue=issue, a_column=at)
+    with pytest.raises(IRError, match='each of 16, 32, ..., 256'):
+        # The widest a width tcgen05 has, the statement's shape too: the
+        # check of the widths alone refuses the other.
+        b.tcgen05(n, tmem, bd, tmem, issue=issue, a_column=at,
+                  widths=(24, 48))
+    st = b.tmem_st(tmem, at, [b.const(0.0, ScalarType(Datatype.F32))] * 8)
+    assert not engines.verify_engine(st)
+    lines = engines.lower(st, ctx.target, name=str).lines
+    assert lines[1].endswith(
+        f': "r"(tensorforge::tmemWarpAddress({tmem}, '
+        f'static_cast<uint32_t>({at}))), ' + ', '.join(
+            f'"f"({v})' for v in st.args[2:]) + '\n: "memory"\n);')
+
+
 def test_the_tensor_memory_ops_and_fences():
     body = _tcgen05_body(CASES['ts16'])[1]
     target = _ctx().target

@@ -1115,11 +1115,12 @@ class IRBuilder:
             raise IRError(why)
         return s
 
-    def tcgen05(self, n: int, a: Operand, b: Operand, d: Value, *,
+    def tcgen05(self, n: Operand, a: Operand, b: Operand, d: Value, *,
                 issue: Value, enable_input_d: Operand = 1,
-                a_column: int = 0, d_column: int = 0,
+                a_column: Operand = 0, d_column: Operand = 0,
                 term: Optional[Tuple[int, int]] = None,
-                plan: Optional['TermPlan'] = None) -> Stmt:
+                plan: Optional['TermPlan'] = None,
+                widths: Sequence[int] = ()) -> Stmt:
         """One `tcgen05.mma` of m128nNk8, TF32 into FP32
         (`engines.tcgen05_refusal`): D the columns `d_column` on of the
         tensor memory buffer `d`; `a` a descriptor of tcgen05's format
@@ -1128,18 +1129,41 @@ class IRBuilder:
         which commits it too (`commit_group`); `enable_input_d` 0 writes D
         = A * B, 1 adds to D.  Complete once the mbarrier it is committed to
         has moved on (`matrix_wait`).  `term` and `plan` as `matrix_mac`
-        takes them."""
+        takes them.
+
+        N and the columns may be values: the instruction takes its
+        descriptor and both addresses in registers.  A value of N is one of
+        `widths`, the statement's shape the widest of them; a value of a
+        column the operand it is, the columns it reaches the oracle's to
+        check where the product runs (`engines.tcgen05_refusal`)."""
         tmem_a = isinstance(a, Value) and isinstance(a.type, BufferType) \
             and a.type.space == MemSpace.TMEM
         sources = (engines.Source.TMEM if tmem_a else engines.Source.SHARED,
                    engines.Source.SHARED, engines.Source.TMEM)
-        extra = ((('a_column', int(a_column)),) if tmem_a else ()) + (
-            ('d_column', int(d_column)),)
+        scalars = [('enable_input_d', enable_input_d), ('issue', issue)]
+        widest = n
+        if isinstance(n, Value):
+            if not widths:
+                raise IRError('a tcgen05.mma whose N is a value names the '
+                              'widths it takes')
+            widest = max(int(w) for w in widths)
+            scalars.append(('n', n))
+        extra = ()
+        if tmem_a:
+            if isinstance(a_column, Value):
+                scalars.append(('a_column', a_column))
+                a_column = 0
+            extra += (('a_column', int(a_column)),)
+        if isinstance(d_column, Value):
+            scalars.append(('d_column', d_column))
+            d_column = 0
+        extra += (('d_column', int(d_column)),)
+        if isinstance(n, Value):
+            extra += (('widths', tuple(sorted({int(w) for w in widths}))),)
         s = self.matrix_mac(
-            'tcgen05', (128, int(n), 8),
+            'tcgen05', (128, int(widest), 8),
             (Datatype.TF32, Datatype.TF32, Datatype.F32, Datatype.F32),
-            (a,), (b,), (d,), sources=sources,
-            scalars=(('enable_input_d', enable_input_d), ('issue', issue)),
+            (a,), (b,), (d,), sources=sources, scalars=tuple(scalars),
             extra=extra, term=term, plan=plan)
         why = engines.tcgen05_refusal(s)
         if why is not None:
@@ -1157,7 +1181,18 @@ class IRBuilder:
         names none.  The block's first warp writes it and every thread reads
         it, so it is the block's one: where the block holds several
         multiplications, each with its own window of their arena, `arena`
-        is the block's."""
+        is the block's.
+
+        Where the context names a target, no more columns than a block of
+        it allocates (`Target.tmem_columns`); without one, the powers of
+        two up to 512 `engines.tmem_alloc` holds every body to."""
+        target = getattr(self.context, 'target', None)
+        reach = getattr(target, 'tmem_columns', None)
+        reach = reach() if callable(reach) else None
+        if reach is not None and columns > reach:
+            raise IRError(f'{columns} columns of tensor memory on '
+                          f'{target.hw.model}, whose blocks allocate at most '
+                          f'{reach} (`Target.tmem_columns`)')
         slot = self.alloc(Datatype.I32, (1,), MemSpace.SHARED,
                           hint=f'{hint}Slot', arena=arena)
         tmem = self.value(BufferType(Datatype.F32,
@@ -1170,20 +1205,22 @@ class IRBuilder:
         """Free the columns of `tmem` (`engines.tmem_dealloc`)."""
         return self.emit(engines.tmem_dealloc(tmem))
 
-    def tmem_ld(self, tmem: Value, column: int, count: int,
+    def tmem_ld(self, tmem: Value, column: Operand, count: int,
                 hint: str = 'tm') -> List[Value]:
         """A warp's load of `count` columns of its quarter of `tmem`'s
-        lanes from `column` on (`engines.tmem_ld`): each thread its lane's,
-        values of its own."""
+        lanes from `column` on (`engines.tmem_ld`) -- a number, or a value
+        the address takes in its register: each thread its lane's, values
+        of its own."""
         targets = [self.value(ScalarType(Datatype.F32), hint=hint,
                               uniform=Uniformity.LANE) for _ in range(count)]
         self.emit(engines.tmem_ld(tmem, column, targets))
         return targets
 
-    def tmem_st(self, tmem: Value, column: int,
+    def tmem_st(self, tmem: Value, column: Operand,
                 values: Sequence[Operand]) -> Stmt:
         """A warp's store of `values` to its quarter of `tmem`'s lanes, one
-        column each from `column` on (`engines.tmem_st`)."""
+        column each from `column` on (`engines.tmem_st`): a number, or a
+        value the address takes in its register."""
         return self.emit(engines.tmem_st(tmem, column, values))
 
     def _matrix_rows(self, base: Any, index: Operand,
@@ -1254,18 +1291,22 @@ class IRBuilder:
 
     def commit_group(self, engine: str, object: Optional[Value] = None,
                      issue: Optional[Value] = None,
-                     slot: Optional[Operand] = None) -> Stmt:
+                     slot: Optional[Operand] = None,
+                     side: str = 'empty') -> Stmt:
         """Close what `engine` issued since its last commit into one group
         (`engines.commit_group`): onto the mbarrier `object` for tcgen05,
-        what the thread `issue` picks issued -- or onto the empty side of
-        the slot `slot` of the ring `object` (`mbarrier_ring`), whose
-        producer waits there for the products to have read the slot."""
+        what the thread `issue` picks issued -- or onto a side of the slot
+        `slot` of the ring `object` (`mbarrier_ring`): the empty side,
+        whose producer waits there for the products to have read the slot,
+        or the full side, whose consumers wait there for what the products
+        wrote into it."""
         if slot is not None:
             if not isinstance(object, Ring):
                 raise IRError(f'a commit onto slot {slot!r} of {object!r}, '
                               f'which is no ring')
             object = object.object
-        return self.emit(engines.commit_group(engine, object, issue, slot))
+        return self.emit(engines.commit_group(engine, object, issue, slot,
+                                              side))
 
     def matrix_wait(self, engine: str, count: int = 0,
                     registers: Sequence[Value] = (),

@@ -190,11 +190,11 @@ def parse_multi_element_fma(text: str) -> str:
 
 
 #: What `Options.slot_output_read` takes.
-SLOT_OUTPUT_READ = ('ahead', 'masked')
+SLOT_OUTPUT_READ = ('auto', 'ahead', 'masked')
 
 
 def parse_slot_output_read(text: str) -> str:
-  """`ahead` or `masked` (`Options.slot_output_read`)."""
+  """`auto`, `ahead` or `masked` (`Options.slot_output_read`)."""
   value = str(text).strip().lower()
   if value not in SLOT_OUTPUT_READ:
     raise ValueError(f'expected one of {SLOT_OUTPUT_READ}, got {text!r}')
@@ -314,6 +314,58 @@ def parse_matrix_roles(text: str) -> str:
   value = str(text).strip().lower()
   if value not in MATRIX_ROLES:
     raise ValueError(f'expected one of {MATRIX_ROLES}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_tile` takes.
+MATRIX_TILE = ('off', 'high')
+
+
+def parse_matrix_tile(text: str) -> str:
+  """`off` or `high` (`Options.matrix_tile`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_TILE:
+    raise ValueError(f'expected one of {MATRIX_TILE}, got {text!r}')
+  return value
+
+
+def parse_matrix_bands(text: str) -> int:
+  """1 to 4 (`Options.matrix_bands`)."""
+  value = int(str(text).strip())
+  if not 1 <= value <= 4:
+    raise ValueError(f'matrix_bands is 1 to 4, not {value}')
+  return value
+
+
+#: What `Options.matrix_groups` takes.
+MATRIX_GROUPS = ('loop', 'unrolled')
+
+
+def parse_matrix_groups(text: str) -> str:
+  """`loop` or `unrolled` (`Options.matrix_groups`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_GROUPS:
+    raise ValueError(f'expected one of {MATRIX_GROUPS}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_spans` takes.
+MATRIX_SPANS = ('kept', 'dense')
+
+
+def parse_matrix_spans(text: str) -> str:
+  """`kept` or `dense` (`Options.matrix_spans`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_SPANS:
+    raise ValueError(f'expected one of {MATRIX_SPANS}, got {text!r}')
+  return value
+
+
+def parse_matrix_consumers(text: str) -> int:
+  """1 to 4 (`Options.matrix_consumers`)."""
+  value = int(str(text).strip())
+  if not 1 <= value <= 4:
+    raise ValueError(f'matrix_consumers is 1 to 4, not {value}')
   return value
 
 
@@ -2092,17 +2144,19 @@ declare('resident_grid',
             'whether looping costs anything at all.')
 
 declare('one_round_grid',
-        default=False,
-        parse=parse_bool,
+        default='auto',
+        parse=parse_bool_or_auto,
         env='TF_ONE_ROUND_GRID',
         doc='Size the grid-stride traversal\'s grid to cover the batch in '
             'one round -- a block for each group of elements a block takes, '
             'each running its loop once -- where the target would size it by '
-            'occupancy (`Target.bounds_grid`; SYCL does so already).  Not '
-            'together with `resident_grid`, and not for a cooperative launch, '
-            'whose grid has to be resident.  The slot form\'s volume at o4 in '
-            'F32 on GH200 (Vista 1161114): 1.14 ns an element under the '
-            'occupancy grid, 1.09 in one round.')
+            'occupancy (`Target.bounds_grid`; SYCL does so already).  `auto`: '
+            'where the kernel takes the multi-element layout\'s slot form '
+            '(`element_group.slot_one_round`), and not where a resident grid '
+            'is asked for.  Asked for, not together with `resident_grid`; '
+            'never for a cooperative launch, whose grid has to be resident.  '
+            'The slot form\'s volume at o4 in F32 on GH200 (Vista 1161114): '
+            '1.14 ns an element under the occupancy grid, 1.09 in one round.')
 
 declare('sycl_core_threads',
         default=0,
@@ -2735,7 +2789,7 @@ declare('multi_element_fma',
             'form, and `warp` declines it.')
 
 declare('slot_output_read',
-        default='ahead',
+        default='auto',
         env='TF_SLOT_OUTPUT_READ',
         parse=parse_slot_output_read,
         doc='Where the slot form (`multi_element_fma` `slots`) reads the '
@@ -2746,8 +2800,10 @@ declare('slot_output_read',
             'the read ptxas split around the stores\' branch where it was '
             'neither ahead nor masked: the volume at o4 in F32 on GH200 then '
             'ran at 3.40 ns an element, ahead at 1.14 and masked at 1.13 '
-            '(Vista 1161114).  A chained section\'s phase whose scaled copies '
-            'read the column as written reads ahead.')
+            '(Vista 1161114).  `auto`: by what the tiles held across the walk '
+            'cost the section (`element_group.slot_read`).  A chained '
+            'section\'s phase whose scaled copies read the column as written '
+            'reads ahead.')
 
 declare('element_producer',
         default=False,
@@ -2964,6 +3020,74 @@ declare('matrix_roles',
             'tcgen05 (sm_100a); elsewhere the plan says why not, and the '
             'kernel\'s comment (`element_group.roles_refusal`, '
             '`roles_notes`).  A demonstrator of the roles, not measured yet.')
+
+declare('matrix_tile',
+        default='off',
+        env='TF_MATRIX_TILE',
+        parse=parse_matrix_tile,
+        doc='The high-order tile of the multi-element layout\'s asynchronous '
+            'tiling (`element_group.TileRows`, `tile_refusal`).  `off`, the '
+            'default: the tilings as before.  `high`: the section\'s one '
+            'asynchronous step with its star step folded in and B streamed '
+            'prepared (`matrix_star` `engine`, `matrix_ring` `prepared`, '
+            'which it implies for that step), the group\'s rows dense on the '
+            'engine\'s rows -- on wgmma (sm_90a) a tile of whole elements a '
+            'consumer warpgroup, `matrix_consumers` of them sharing the '
+            'operator ring, and producer warps staging the inputs and '
+            'filling the ring; on tcgen05 (sm_100a) the three roles '
+            '(`matrix_roles` `three`) at as many elements as tensor memory\'s '
+            'lanes hold.  Where the section cannot take it, the plan says '
+            'why, and the kernel\'s comment (`element_group.tile_notes`).  '
+            'Not measured yet.')
+
+declare('matrix_spans',
+        default='kept',
+        env='TF_MATRIX_SPANS',
+        parse=parse_matrix_spans,
+        doc='What of B the high-order tile streams and multiplies a block of '
+            'K (`matrix_tile` `high`, `element_group.tile_chunks`): `kept`, '
+            'the default, each product\'s kept span -- its tiles of N from '
+            'its first nonzero one to its last, in the engine\'s granules -- '
+            'the block\'s first product whole, so that D starts fresh; '
+            '`dense`, every product\'s whole width, as the tilings before '
+            'the tile.')
+
+declare('matrix_bands',
+        default=3,
+        env='TF_MATRIX_BANDS',
+        parse=parse_matrix_bands,
+        doc='The star role\'s bands of the high-order tile on tcgen05 '
+            '(`matrix_tile` `high`, `element_group.TileRows.bands`): four '
+            'warps a band, each band covering tensor memory\'s 128 lanes and '
+            'taking the blocks of A in turn.  3, the default, the fourteen '
+            'element warps\' twelve that mixed; fewer bands are fewer warps '
+            'of more registers each.  1 to 4; a search parameter.')
+
+declare('matrix_groups',
+        default='loop',
+        env='TF_MATRIX_GROUPS',
+        parse=parse_matrix_groups,
+        doc='How the high-order tile walks its groups -- its blocks of K, a '
+            'chunk of B each (`matrix_tile` `high`, `multi_element.'
+            '_wgmma_groups`): `loop`, the default, one loop over them, its '
+            'body written once -- a block\'s A, its chunk, one fence and one '
+            'dispatch on the block\'s width to the products at that '
+            'immediate N, read off a table of the generated file -- so that '
+            'the code does not grow with the groups (the hand-written '
+            'kernels\' group engine); `unrolled`, each group written out, as '
+            'before.  On wgmma; tcgen05\'s groups stay written out until its '
+            'issuing thread takes the widths at run time.')
+
+declare('matrix_consumers',
+        default=2,
+        env='TF_MATRIX_CONSUMERS',
+        parse=parse_matrix_consumers,
+        doc='The consumer warpgroups of the high-order tile on wgmma '
+            '(`matrix_tile` `high`), each its own tile of 64 rows of whole '
+            'elements, the group their elements: 2, the default, as the '
+            'hand-written kernels run them (one warpgroup alone reached 70 '
+            'to 90 % of the TF32 rate on a GH200); 1 to 4.  The fill rule '
+            'takes fewer where the group does not fit.')
 
 declare('matrix_ring_rows',
         default=16,
