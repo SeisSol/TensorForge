@@ -329,6 +329,17 @@ def parse_matrix_tile(text: str) -> str:
   return value
 
 
+def parse_matrix_passes(text: str) -> int:
+  """0 (`auto`) or 1 to 8 (`Options.matrix_passes`)."""
+  value = str(text).strip().lower()
+  if value == 'auto':
+    return 0
+  count = int(value)
+  if not 0 <= count <= 8:
+    raise ValueError(f'matrix_passes is auto or 1 to 8, not {count}')
+  return count
+
+
 #: What `Options.tile_schedule` takes.
 TILE_SCHEDULES = ('static', 'clc', 'auto')
 
@@ -3012,6 +3023,20 @@ declare('matrix_spans',
             'the block\'s first product whole, so that D starts fresh; '
             '`dense`, every product\'s whole width, as the tilings before '
             'the tile.')
+
+declare('matrix_passes',
+        default=0,
+        env='TF_MATRIX_PASSES',
+        parse=parse_matrix_passes,
+        doc='The high-order tile\'s passes over N on wgmma (`matrix_tile` '
+            '`high`, `element_group.TileRows.passes`): D a pass\'s rows of N '
+            'at a time in the accumulators, every block of K\'s A computed '
+            'again a pass and its products of the pass\'s rows -- the order '
+            'D outer, where D whole does not fit the registers.  `auto`, the '
+            'default: the fewest whose D a consumer thread holds in '
+            '`TILE_ACCUMULATORS` registers (o12: two); 1 to 8 forced, for '
+            'tests and sweeps.  tcgen05 keeps D whole in tensor memory, its '
+            'products cut at an instruction\'s 256 columns.')
 
 declare('tile_schedule',
         default='static',

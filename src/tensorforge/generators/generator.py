@@ -4597,7 +4597,8 @@ class Generator:
       if planned.tile is not None:
         # The high-order tile's own lowering (`element_group.tile_plan`).
         section = element_group.tile_lowered(classified, self._context,
-                                             planned.tile, planned.ring)
+                                             planned.tile, planned.ring,
+                                             planned.ring_slots)
     if section is None or section.shape() != self._element_group.section.shape():
       raise InternalError(f'a section of a multi-element kernel is not the '
                           f'one its plan was made for: {why or "another"}')

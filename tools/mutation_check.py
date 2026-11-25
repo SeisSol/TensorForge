@@ -6851,8 +6851,8 @@ GROUPS = {
          sub(ME_SECTION, "    m = _index(b, 'add', r, tile.used * t, 'm')\n",
              "    m = _index(b, 'add', r, tile.m * t, 'm')\n", 1)),
         ("a tile's rows of D from the instruction's 64, not its elements'",
-         sub(ME_SECTION, "                  _index(b, 'add', local, tile.used * t, 'm'), M, hint='m')\n",
-             "                  _index(b, 'add', local, tile.m * t, 'm'), M, hint='m')\n", 1)),
+         sub(ME_SECTION, "                      _index(b, 'add', local, tile.used * t, 'm'), M,\n",
+             "                      _index(b, 'add', local, tile.m * t, 'm'), M,\n", 1)),
         ("the tile's rings counting a warpgroup's arrival, not a warp's",
          sub(ME_SECTION, '    return (WARPGROUP_WARPS * tiles,\n', '    return (tiles,\n', 1)),
         ("the inputs staged by the operator ring's warp",
@@ -6865,10 +6865,10 @@ GROUPS = {
          sub(ME_SECTION, '                _wgmma_tile(trip, step, t, areas[t], done)\n',
              '                _wgmma_tile(trip, step, t, areas[0], done)\n', 1)),
         ("the input slot given back behind the first block of A",
-         sub(ME_SECTION, '        if j + 1 == blocks:\n'
-                         "            # Every read of the trip's inputs is behind: the slot back.\n",
-             '        if j == 0:\n'
-             "            # Every read of the trip's inputs is behind: the slot back.\n", 1)),
+         sub(ME_SECTION, '            if last and j + 1 == end:\n'
+                         "                # Every read of the trip's inputs is behind: the slot back.\n",
+             '            if j == first:\n'
+             "                # Every read of the trip's inputs is behind: the slot back.\n", 1)),
         ("a tile's rows past its elements taken as theirs",
          sub(ME_GROUP, '        return self.per * self.width\n',
              '        return self.per * self.width + 1\n', 1)),
@@ -6898,12 +6898,13 @@ GROUPS = {
          sub(ME_GROUP, '            if not out and not pieces:\n                span = (0, stages[p].width)\n',
              '', 1)),
         ("every block's first piece whole",
-         sub(ME_GROUP, '            if not out and not pieces:\n', '            if not pieces:\n', 1)),
+         sub(ME_GROUP, '            if not out and not pieces:\n                span = (0, stages[p].width)\n',
+             '            if not pieces:\n                span = (0, stages[p].width)\n', 1)),
         ("the spans the options ask for not the tile's on wgmma",
          sub(ME_GROUP, "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                            spans_asked(context), groups_asked(context))\n",
+                       "                            spans_asked(context), groups_asked(context),\n",
              "            tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                            'dense', groups_asked(context))\n", 1)),
+                       "                            'dense', groups_asked(context),\n", 1)),
         ("the spans kept where known zeros are not skipped",
          sub(ME_GROUP, "    if not getattr(options, 'skip_known_zeros', True):\n        return 'dense'\n", '', 1)),
         ("an inactive group taken",
@@ -6934,8 +6935,8 @@ GROUPS = {
              '        if False:\n'
              '            # The span\'s tiles of N last first (`TileRows.descending`).\n', 1)),
         ("D's columns read back in the ascending order on wgmma",
-         sub(ME_SECTION, "                   n - 8 * (i // 4 + 1) + i % 2, hint='n')\n",
-             "                   8 * (i // 4) + i % 2, hint='n')\n", 1)),
+         sub(ME_SECTION, "                       phi - 8 * (i // 4 + 1) + i % 2, hint='n')\n",
+             "                       phi - (phi - plo) + 8 * (i // 4) + i % 2, hint='n')\n", 1)),
         ("a span's products into D's slot's first columns on tcgen05",
          sub(ME_SECTION, "                                  'add', INDEX, d_base, piece.lo, hint='dc'),\n",
              "                                  'add', INDEX, d_base, 0, hint='dc'),\n", 1)),
@@ -6953,8 +6954,8 @@ GROUPS = {
          sub(ME_SECTION, "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n",
              "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, 1, hint='gs'),\n", 1)),
         ("every block mixing the first rows of K",
-         sub(ME_SECTION, "                'mul', INDEX, j, STAR_ROWS, hint='k'), hint='k'), live)\n",
-             "                'mul', INDEX, j, 0, hint='k'), hint='k'), live)\n", 1)),
+         sub(ME_SECTION, "                'mul', INDEX, block, STAR_ROWS, hint='k'), hint='k'), live)\n",
+             "                'mul', INDEX, block, 0, hint='k'), hint='k'), live)\n", 1)),
         ("every block dispatched at the first block's width",
          sub(ME_SECTION, "            f'{table}[{{0}}]', j, type_=INDEX, pure=True, movable=True,\n",
              "            f'{table}[{{0}}]', 0, type_=INDEX, pure=True, movable=True,\n", 1)),
@@ -6987,12 +6988,8 @@ GROUPS = {
              '                        b.wgmma(width, [a[ia]], bs[ib], accs[:width // 2],\n'
              '                                scale_d=0, layouts=shapes, term=(ia, ib),\n', 1)),
         ("the group loop left to the compiler to unroll",
-         sub(ME_SECTION, "    with b.for_(0, len(chunks), unroll=1, hint='g') as loop:\n"
-                         "        j = loop.induction\n"
-                         "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n",
-             "    with b.for_(0, len(chunks), unroll=True, hint='g') as loop:\n"
-             "        j = loop.induction\n"
-             "        at = b.op('mul', INDEX, b.op('rem', INDEX, j, slots, hint='gs'),\n", 1)),
+         sub(ME_SECTION, "    with b.for_(first, first + taken, unroll=1, hint='g') as loop:\n",
+             "    with b.for_(first, first + taken, unroll=True, hint='g') as loop:\n", 1)),
         # tcgen05's group engine
         ("tcgen05's block products into D's first columns",
          sub(ME_SECTION, '                          d_column=lo, term=(ia, ib), plan=plan,\n',
@@ -7038,8 +7035,10 @@ GROUPS = {
          sub(BUILD, '            widest = max(int(w) for w in widths)\n',
              '            widest = min(int(w) for w in widths)\n', 1)),
         ("the groups the options ask for not the tile's on wgmma",
-         sub(ME_GROUP, '                            spans_asked(context), groups_asked(context))\n',
-             "                            spans_asked(context), 'unrolled')\n", 1)),
+         sub(ME_GROUP, '                            spans_asked(context), groups_asked(context),\n'
+                       '                            passes=passes)\n',
+             "                            spans_asked(context), 'unrolled',\n"
+             '                            passes=passes)\n', 1)),
         ("a block's products at their own spans in the loop",
          sub(ME_GROUP, "        if pieces and tile is not None and tile.groups == 'loop':\n",
              '        if False:\n', 1)),
@@ -7071,9 +7070,9 @@ GROUPS = {
         ("the budget of tensor memory past a block's",
          sub(ME_GROUP, 'TMEM_BUDGET = 512\n', 'TMEM_BUDGET = 1024\n', 1)),
         ("the bands the options ask for not the tile's",
-         sub(ME_GROUP, "        bands = int(getattr(context.get_user_options(), 'matrix_bands',\n"
-                       "                            TILE_BANDS))\n",
-             '        bands = TILE_BANDS\n', 1)),
+         sub(ME_GROUP, "        bands = min(int(getattr(context.get_user_options(), 'matrix_bands',\n"
+                       "                                TILE_BANDS)), aslots)\n",
+             '        bands = min(TILE_BANDS, aslots)\n', 1)),
         ("the star bands from the element count",
          sub(ME_SECTION, '            # The high-order tile\'s star bands (`TileRows.bands`).\n'
                          '            bands = trip.section.tile.bands\n',
@@ -7169,8 +7168,8 @@ GROUPS = {
                        "            or not context.target.launch_control():\n",
              "    if asked == 'static' or engine != 'tcgen05':\n", 1)),
         ("the schedule the options ask for not the tile's",
-         sub(ME_GROUP, "                        tile_schedule('tcgen05', context))\n",
-             "                        'static')\n", 1)),
+         sub(ME_GROUP, "                        tile_schedule('tcgen05', context),\n",
+             "                        'static',\n", 1)),
         ("the schedule's shared memory not counted",
          sub(ME_GROUP, '        operators += SCHEDULE_BYTES // size\n', '', 1)),
         ("a claim granted twice on the oracle",
@@ -7179,6 +7178,63 @@ GROUPS = {
         ("a cancelled block run on the oracle",
          sub(ORACLE, "            if cta in getattr(mem, 'tile_cancelled', ()):\n",
              '            if False:\n', 1)),
+    ]),
+    # --- the high-order tile, H4: orders 10 and 12 -- wgmma's passes over N, tcgen05's products cut at 256
+    # (tensorforge-hotile)
+    'hipasses': ('tests/test_hiorder_tile.py -n 6', [
+        ("every pass from the stage's first row",
+         sub(ME_GROUP, '    return tuple((min(width, units * p // passes * granule),\n',
+             '    return tuple((min(width, 0),\n', 1)),
+        ("a pass's pieces not cut to its rows",
+         sub(ME_GROUP, '            span = (max(span[0], plo), min(span[1], phi))\n',
+             '            span = span\n', 1)),
+        ("a pass's first piece not whole over the pass",
+         sub(ME_GROUP, '            if not out and not pieces:\n                span = (plo, phi)\n',
+             '            if False:\n                span = (plo, phi)\n', 1)),
+        ("a pass's spans on wgmma short of its last row",
+         sub(ME_GROUP, '            if tile.descending:\n                span = (span[0], phi)\n',
+             '            if tile.descending:\n                span = (span[0], span[1])\n', 1)),
+        ("one pass where D does not fit the registers",
+         sub(ME_GROUP, '    return max(-(-n // (2 * TILE_ACCUMULATORS)), -(-n // ASYNC_N))\n',
+             '    return 1\n', 1)),
+        ("the passes the options force ignored",
+         sub(ME_GROUP, '    if asked:\n        return asked\n', '', 1)),
+        ("wgmma's steps wider than an instruction refused",
+         sub(ME_GROUP, "        # Its passes over N (`tile_passes`).\n        return 'wgmma'\n",
+             "        # Its passes over N (`tile_passes`).\n        return None\n", 1)),
+        ("a pass's D not zeroed in the loop",
+         sub(ME_SECTION, '            for acc in accs:\n                b.assign(acc, b.const(0.0, fp))\n', '', 1)),
+        ("the input slot given back behind every pass",
+         sub(ME_SECTION, '                          done if last else None, accs,\n',
+             '                          done, accs,\n', 1)),
+        ("a pass's blocks read at the chunks' index",
+         sub(ME_SECTION, '    stride = blocks != list(range(len(chunks)))\n', '    stride = False\n', 1)),
+        ("a pass's releases counted from the trip's first chunk",
+         sub(ME_SECTION, "            with b.if_(b.op('ge', BOOL, j, first + hold - 1, hint='gr')):\n",
+             "            with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):\n", 1)),
+        ("a chunk's B at its block's first piece's offset",
+         sub(ME_SECTION, '                starts = [offsets[tuple(chunk[0])] for chunk in chunks]\n',
+             '                starts = starts\n', 1)),
+        ("a pass's D read past its rows",
+         sub(ME_SECTION, '        for i in range(_round_up(phi - plo, n_) // 2):\n',
+             '        for i in range(widest // 2):\n', 1)),
+        ("a pass's D read with its products in flight",
+         sub(ME_SECTION, '            # The pass\'s every product retired: its D whole.\n'
+                         '            flight = _wgmma_retire(b, flight, 0, accs)\n',
+             '            # The pass\'s every product retired: its D whole.\n'
+             '            flight = flight\n', 1)),
+        ("tcgen05's wide products uncut",
+         sub(ME_SECTION, '                if wide > TCGEN05_N_MAX:\n', '                if False:\n', 1)),
+        ("tcgen05's cut products at the piece's first columns",
+         sub(ME_SECTION, "                        cut = piece.descriptors(b, k0 + kt, 'tcgen05', c0)\n",
+             "                        cut = piece.descriptors(b, k0 + kt, 'tcgen05', 0)\n", 1)),
+        ("A's two slots where four do not fit beside D",
+         sub(ME_GROUP, "    for dslots, aslots in ((2, STAR_SLOTS['tcgen05']),\n"
+                       "                           (1, STAR_SLOTS['tcgen05']), (1, 2)):\n",
+             "    for dslots, aslots in ((2, STAR_SLOTS['tcgen05']),\n"
+             "                           (1, STAR_SLOTS['tcgen05'])):\n", 1)),
+        ("B's ring's slots the options' alone",
+         sub(ME_GROUP, '    return tuple(range(asked, 1, -1)) or (asked,)\n', '    return (asked,)\n', 1)),
     ]),
     'foldslots': ('tests/test_three_roles.py tests/test_hiorder_tile.py -n 6', [
         ("the bands' slots of A in turn between roles",
@@ -7190,9 +7246,12 @@ GROUPS = {
         ("the bands counted in eights of the element warps",
          sub(ME_SECTION, '    return max(1, trip.group.elements // 4)\n',
              '    return max(1, trip.group.elements // 8)\n', 1)),
-        ("the tile's bands not the owners of A's slots",
-         sub(ME_SECTION, '    if tile is not None:\n        return tile.bands\n',
-             '    if tile is not None:\n        return 1\n', 1)),
+        ("the tile's bands past A's slots",
+         sub(ME_GROUP, "                                TILE_BANDS)), aslots)\n",
+             "                                TILE_BANDS)), 4)\n", 1)),
+        ("the tile's slots of A past the bands' own",
+         sub(ME_GROUP, '                        bands * (aslots // bands)',
+             '                        aslots', 1)),
     ]),
 }
 
