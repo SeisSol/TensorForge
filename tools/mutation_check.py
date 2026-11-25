@@ -6276,7 +6276,9 @@ GROUPS = {
                          '    token = b.reduce_bulk(',
              '    token = b.reduce_bulk(', 1)),
         ("the staged columns an even number of sixteen bytes apart",
-         sub(ME_GROUP, '    if (stride // unit) % 2 == 0:\n        stride += unit\n', '', 1)),
+         sub(ME_GROUP, '    stride = _round(hi - lo, unit)\n    if (stride // unit) % 2 == 0:\n        stride += unit\n'
+                       '    return lo, hi, stride\n',
+             '    stride = _round(hi - lo, unit)\n    return lo, hi, stride\n', 1)),
         ("two steps' reductions into one output",
          sub(ME_GROUP, '    if writers > 1:\n', '    if writers > 2:\n', 1)),
         ('the bulk output where a step reads the output',
@@ -7346,6 +7348,45 @@ GROUPS = {
          sub(ME_GROUP, '                        bands * (aslots // bands)',
              '                        aslots', 1)),
     ]),
+    'hiout': ('tests/test_hiorder_tile.py -n 6', [
+        ("wgmma's staged rows at the step's first row of the output",
+         sub(ME_SECTION, '    shift = step.rows[0] - first - lo\n    count = _round_up(phi - plo, 8) // 2\n',
+             '    shift = 0\n    count = _round_up(phi - plo, 8) // 2\n', 1)),
+        ("wgmma's staged rows no cell of the pass is left as they were",
+         sub(ME_SECTION, '                if blanks:\n                    with b.if_(lead):\n',
+             '                if False:\n                    with b.if_(lead):\n', 1)),
+        ("wgmma's staged rows not fenced for the async proxy",
+         sub(ME_SECTION, "            b.fence(FenceKind.PROXY)\n            b.barrier(Participants.WAVE)\n"
+                         "            local = _index(b, 'add', b.op('add', INDEX, b.op(\n",
+             "            b.barrier(Participants.WAVE)\n"
+             "            local = _index(b, 'add', b.op('add', INDEX, b.op(\n", 1)),
+        ("a round's reductions not waited for on wgmma",
+         sub(ME_SECTION, "            # it; the warp's barrier hands them to its next round's stores.\n            b.wait(token)\n",
+             "            # it; the warp's barrier hands them to its next round's stores.\n", 1)),
+        # Not "the warpgroup not meeting behind wgmma's last round": without
+        # that barrier PIR's barrier pass places the warpgroup's own ahead of
+        # the next blocks' writes of A's slots -- an equivalent mutant.
+        ("a masked element's row added on wgmma",
+         sub(ME_SECTION, "                'and', BOOL, inside, held, hint='issue'), hint='issue')\n",
+             "                'and', BOOL, inside, inside, hint='issue'), hint='issue')\n", 1)),
+        ("every quad staging its rows in every round on wgmma",
+         sub(ME_SECTION, "            mine = b.op('and', BOOL, b.op('ge', BOOL, quad, g0, hint='qr'),\n",
+             "            mine = b.op('and', BOOL, b.op('ge', BOOL, quad, 0, hint='qr'),\n", 1)),
+        ("wgmma's staged rows an even number of sixteen bytes apart",
+         sub(ME_GROUP, '    stride = _round(max(hi - lo, unit), unit)\n    if (stride // unit) % 2 == 0:\n'
+                       '        stride += unit\n',
+             '    stride = _round(max(hi - lo, unit), unit)\n', 1)),
+        ("a pass's rows added at the output's first on wgmma",
+         sub(ME_SECTION, '                                  dst_index=(_address(b, tensor, first + lo,\n',
+             '                                  dst_index=(_address(b, tensor, first,\n', 1)),
+        ("wgmma's tile declining the bulk epilogue",
+         sub(ME_GROUP, "        return 'bulk' if output_asked(context) == 'bulk' else 'red'\n",
+             "        return 'red'\n", 1)),
+        ("wgmma's staged rows counted in shared memory",
+         sub(ME_GROUP, "        if section.tile is not None and section.tile.engine == 'wgmma':\n"
+                       "            # Staged in the warpgroups' slots of A (`wgmma_bulk_geometry`).\n"
+                       "            continue\n", '', 1)),
+    ]),
     # The high-order tile's defaults on tcgen05, as a GB200 measured them
     # (`Options.matrix_bands`, `Options.matrix_output` `auto`,
     # `element_group.tile_output`, `tile_plan`'s weighing of the bulk
@@ -7369,8 +7410,8 @@ GROUPS = {
          sub(ME_GROUP, "    asked = output_asked(context)\n    if asked != 'auto':\n        return asked\n",
              "    asked = output_asked(context)\n    if asked == 'red':\n        return asked\n", 1)),
         ("wgmma's tile given auto's bulk reductions",
-         sub(ME_GROUP, "    if engine != 'tcgen05':\n        return 'red'\n    asked = output_asked(context)\n",
-             "    asked = output_asked(context)\n", 1)),
+         sub(ME_GROUP, "        return 'bulk' if output_asked(context) == 'bulk' else 'red'\n",
+             "        return 'bulk' if output_asked(context) in ('bulk', 'auto') else 'red'\n", 1)),
         ("auto's bulk reductions kept where they take elements",
          sub(ME_GROUP, '        if red[0] is not None and (\n                chosen[0] is None or\n',
              '        if False and (\n                chosen[0] is None or\n', 1)),

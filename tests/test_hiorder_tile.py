@@ -841,7 +841,7 @@ def test_tcgen05_s_epilogue_by_bulk_reductions(output):
     element's box, a reduction -- no reduction a cell; the box counted in
     the plan's shared memory, at o8 beside two slots of the inputs' ring
     with I in chunks, one with I whole, where two do not fit.  wgmma's tile
-    keeps a reduction a cell, and says so."""
+    takes `bulk` a row of D a reduction, and declines the box, saying so."""
     whole = _group(8, 'sm_100a', matrix_output=output,
                    matrix_input_chunks='whole')
     assert whole.section.ring == 1
@@ -863,12 +863,16 @@ def test_tcgen05_s_epilogue_by_bulk_reductions(output):
     assert f'a bulk reduction {what}' in ''.join(
         l for l in src.splitlines() if l.strip().startswith('// tile:'))
     wgmma = _group(8, 'sm_90a', matrix_output=output)
+    if output == 'bulk':
+        # A row of D a reduction on wgmma (`multi_element._wgmma_bulk`).
+        assert any(s.output == 'bulk' for s in wgmma.section.steps)
+        return
     assert not any(s.output for s in wgmma.section.steps)
     notes = eg.output_notes(wgmma.section, me._context(
         'sm_90a', 's', multi_element='force',
         **{**HIGH, 'matrix_output': output}))
-    assert any('the high-order tile on wgmma adds D a cell at a time' in n
-               for n in notes)
+    assert any('the high-order tile on wgmma adds D a cell at a time, or a '
+               'row a reduction (`bulk`)' in n for n in notes)
 
 
 @pytest.mark.parametrize('output', ['bulk', 'box'])
@@ -1276,6 +1280,7 @@ def test_one_input_slot_through_the_passes_on_the_oracle(monkeypatch,
     assert (got == one).all()
 
 
+
 # -- I in chunks ------------------------------------------------------------------ #
 
 def test_the_input_chunks_option_parses():
@@ -1493,6 +1498,95 @@ def test_the_ring_model_sees_the_tile_s_race(blocks):
     assert ring_model.violations(2, 4, blocks, sync='none') == 0
 
 
+# -- the bulk epilogue on wgmma ------------------------------------------------------ #
+
+@pytest.mark.parametrize('order', [8, 12])
+def test_wgmma_s_bulk_epilogue_plan(order):
+    """`matrix_output` `bulk` on wgmma's tile: a row of D -- an element's
+    column of the output -- a bulk reduction, a pass's rows of it out to
+    sixteen bytes, staged in the warpgroup's slots of A, free behind the
+    pass's last wait: no shared memory past what `red` takes.  o8: rows 0
+    to 120, 124 floats apart (an odd number of sixteen bytes), eight rows a
+    warp a round; o12's two passes each its own rows."""
+    red = _group(order)
+    group = _group(order, matrix_output='bulk')
+    section = group.section
+    (step,) = [s for s in section.steps if s.lowering == 'wgmma']
+    assert step.output == 'bulk'
+    assert group.shared_bytes == red.shared_bytes
+    assert eg.output_volume(section, group.elements) == 0
+    geometry = [eg.wgmma_bulk_geometry(section, step, lo, hi)
+                for lo, hi in eg.tile_pass_bounds(section, step)]
+    assert geometry == ([(0, 120, 124, 8)] if order == 8 else
+                        [(0, 188, 188, 8), (184, 364, 180, 8)])
+
+
+def test_wgmma_s_bulk_epilogue_text():
+    """o8: a bulk reduction a round of a warp's rows -- two tiles, the
+    rows' two halves of eight, one round each -- no reduction a cell; each
+    round fenced for the async proxy behind the rows' stores, and the
+    warpgroup meeting behind the last before the next blocks of A."""
+    src = _kernel(8, matrix_output='bulk').get_kernel()
+    assert src.count('tensorforge::bulkReduceAdd') == 2 * 2
+    assert 'red.global.add.f32' not in src
+    lines = src.splitlines()
+
+    def at(text):
+        return [k for k, line in enumerate(lines) if text in line]
+    stores = [k for k in at('_astar') if '] = ' in lines[k]]
+    for reduce in at('tensorforge::bulkReduceAdd('):
+        # The round's stores, then the fence, then the reduction: the
+        # async proxy reads the slots only behind a fence of them.
+        store = max(k for k in stores if k < reduce)
+        fences = [k for k in at('fenceProxyAsync') if store < k < reduce]
+        assert fences, (store, reduce)
+    red = _kernel(8).get_kernel()
+    assert 'tensorforge::bulkReduceAdd' not in red
+    assert 'red.global.add.f32' in red
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+@pytest.mark.parametrize('count,passes', [(17, 1), (31, 1), (17, 3)])
+def test_wgmma_s_bulk_epilogue_on_the_oracle(groups, count, passes):
+    """D by bulk reductions a row on wgmma's tile against a reduction a cell
+    over o4's elements -- two and three trips, the last's elements past the
+    batch masked, and in three passes over N -- bit for bit, both against
+    NumPy, without a race: the slots of A staged and read again behind the
+    reductions' reads."""
+    options = dict(matrix_groups=groups)
+    if passes > 1:
+        options['matrix_passes'] = passes
+    _, red = _on_the_oracle('sm_90a', 4, count, **options)
+    gen, bulk = _on_the_oracle('sm_90a', 4, count, matrix_output='bulk',
+                               **options)
+    (step,) = [s for s in gen.built._element_group.section.steps
+               if s.lowering == 'wgmma']
+    assert step.output == 'bulk'
+    assert (bulk == red).all()
+
+
+@pytest.mark.parametrize('rows', [1, 2, 4])
+def test_wgmma_s_bulk_epilogue_in_rounds_on_the_oracle(monkeypatch, rows):
+    """A warp's rows of D staged `rows` at a time, as where A's slots hold
+    no more -- past the orders the volume reaches, so forced here
+    (`wgmma_bulk_geometry`): each round's quads alone staging, at their
+    place in the round, the slots handed on by the warp's barrier -- bit for
+    bit what a reduction a cell gives over two trips, against NumPy without
+    a race, a reduction a round of each half."""
+    geometry = eg.wgmma_bulk_geometry
+
+    def fewer(section, step, plo, phi):
+        lo, hi, stride, _ = geometry(section, step, plo, phi)
+        return lo, hi, stride, rows
+    _, red = _on_the_oracle('sm_90a', 4, 17, matrix_groups='loop')
+    monkeypatch.setattr(eg, 'wgmma_bulk_geometry', fewer)
+    gen, bulk = _on_the_oracle('sm_90a', 4, 17, matrix_output='bulk',
+                               matrix_groups='loop')
+    assert gen.get_kernel().count('tensorforge::bulkReduceAdd(') == (
+        2 * 2 * (8 // rows))
+    assert (bulk == red).all()
+
+
 # -- the build and the hardware ------------------------------------------------- #
 
 def _ptxas(arch, tmp_path, order=8, **options):
@@ -1542,6 +1636,8 @@ def _ptxas(arch, tmp_path, order=8, **options):
     ('sm_100a', 'UTCHMMA', 18, {'order': 12,
                                 'matrix_input_chunks': 'whole'}),
     ('sm_90a', 'HGMMA', 216, {'matrix_passes': 2, 'matrix_groups': 'loop'}),
+    ('sm_90a', 'HGMMA', 2 * 6 * 9, {'matrix_output': 'bulk',
+                                    'matrix_groups': 'loop'}),
     ('sm_100a', 'UTCHMMA', 99, {'matrix_groups': 'unrolled'})])
 def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     """o8 built: every product an instruction of the engine's, as many as
@@ -1552,13 +1648,17 @@ def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     use), C7511, C7514, C7517 or C7519 (for an arrive in a divergent path:
     the group loop's dispatch on a width ptxas cannot tell is the warp's
     alike) in its report.  tcgen05's o8 as the options leave it adds D by
-    one bulk reduction an element (`tile_output`), a column's where asked,
-    no reduction a cell."""
+    one bulk reduction an element (`tile_output`), a column's where asked;
+    wgmma's a round of a warp's rows a reduction where asked; no reduction
+    a cell."""
     sass, report = _ptxas(arch, tmp_path, **options)
     output = options.get('matrix_output', 'box' if arch == 'sm_100a'
                          and options.get('order', 8) == 8 else 'red')
     if output in ('bulk', 'box'):
-        assert len(re.findall(r'\bUBLKRED\b', sass)) == 1
+        # D by bulk reductions -- tcgen05's one a thread, wgmma's a round of
+        # a warp's rows -- no reduction a cell.
+        assert len(re.findall(r'\bUBLKRED\b', sass)) == (
+            1 if arch == 'sm_100a' else 2 * 2)
         assert not re.search(r'\bREDG\b', sass)
     if engine == 'HGMMA':
         assert len(re.findall(r'\bHGMMA\.64x\d+x8\b', sass)) == products
@@ -1591,9 +1691,9 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
     (`test_multi_element._described`)."""
     if target.backend != 'cuda' or target.arch not in ('sm_90', 'sm_100'):
         pytest.skip('no GPU with wgmma or tcgen05')
-    if target.arch == 'sm_90' and variant in ('b3', 'red', 'bulk', 'box'):
+    if target.arch == 'sm_90' and variant in ('b3', 'red', 'box'):
         pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands and '
-                    'adds D a cell at a time')
+                    'adds D a cell or a row a reduction')
     if order > 8 and variant not in ('', 'unrolled', 'loop', 'whole'):
         pytest.skip('o10 and o12: the tile as the options leave it, its '
                     'blocks written out and in one loop, and I whole')

@@ -2482,9 +2482,15 @@ def tile_refusal(section: GroupSection, context) -> Optional[str]:
     if not all(st.prepared and st.streamed for st in stages):
         return ('B does not stream prepared: '
                 + (step_refusal(step) or 'its stages are not split'))
-    if step.output and step.lowering == 'wgmma':
-        return ('D is added by bulk reductions; the tile on wgmma adds it a '
-                'cell at a time')
+    if step.output == 'box' and step.lowering == 'wgmma':
+        return ('D is added by bulk reductions of an element\'s box; the '
+                'tile on wgmma adds it a row a reduction (`bulk`)')
+    if step.output == 'bulk' and step.lowering == 'wgmma' \
+            and section.tile is not None:
+        for plo, phi in tile_pass_bounds(section, step):
+            if not wgmma_bulk_geometry(section, step, plo, phi)[3]:
+                return ('a warp\'s row of D past the warpgroup\'s slots of A, '
+                        'which stage it for the bulk reductions')
     width = step.cols[1] - step.cols[0]
     if step.lowering == 'wgmma' and width > 64:
         return f'an element\'s {width} rows are past a warpgroup\'s 64'
@@ -2506,9 +2512,10 @@ def tile_lowered(section: GroupSection, context, tile, ring: int = 0,
     `operator_slots` where given (`GroupSection.ring_slots`; the options'
     else): what the plan sized (`tile_plan`) and the generator lowers
     again."""
-    # tcgen05's epilogue adds D by bulk reductions where the tile's plan
-    # chose them (`tile_output`, `multi_element._tile_output`); wgmma's a
-    # cell at a time.
+    # The epilogue adds D by bulk reductions where the tile's plan chose
+    # them (`tile_output`): tcgen05's a column or an element's box
+    # (`multi_element._tile_output`), wgmma's a row of D
+    # (`multi_element._wgmma_bulk`).
     output = 'red' if tile is None else tile.output
     lowered = lower(section, context, split=True, streamed=True,
                     prepared=True, star='engine', output=output, tile=tile,
@@ -2565,7 +2572,9 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
                             spans_asked(context),
                             tile_groups('wgmma', context, tiles,
                                         step.rows[1] - step.rows[0]),
-                            passes=passes, chunk=chunk, cslots=cslots)
+                            passes=passes, chunk=chunk, cslots=cslots,
+                            output=tile_output('wgmma', step.rows[1]
+                                               - step.rows[0], context))
             for operators in operator_slots_tried(context):
                 for slots in PRODUCER_SLOTS + (1,):
                     lowered = tile_lowered(section, context, tile, slots,
@@ -2676,9 +2685,12 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
             f'{tile.used} of {tile.m} rows')
     if tile.engine == 'wgmma':
         c = WARPGROUP_WARPS * tile.tiles
+        added = ('D added a row a bulk reduction, staged in its slots of A'
+                 if output_of(group.section) == 'bulk' else
+                 'D added a cell at a time')
         return [f'the high-order tile: {rows}; warps 0 to {c - 1} its '
                 f'consumer warpgroups, each a tile -- A computed into its own '
-                f'slots, the products, D added a cell at a time -- sharing B\'s '
+                f'slots, the products, {added} -- sharing B\'s '
                 f'prepared ring; warp {c} stages the inputs into a ring of '
                 f'{group.section.ring} slot'
                 f'{"s" if group.section.ring > 1 else ""}'
@@ -3092,9 +3104,12 @@ def tile_output(engine: str, rows: int, context) -> str:
     (`TileRows.output`): as the options ask (`Options.matrix_output`), and
     for `auto` on tcgen05 by bulk reductions -- a column's (`bulk`) where
     an element's `rows` of D are fewer than `TILE_BOX_ROWS`, the element's
-    box's (`box`) from there on; wgmma's a cell at a time."""
+    box's (`box`) from there on; wgmma's a row of D a bulk reduction where
+    `bulk` is asked (`multi_element._wgmma_bulk`), a cell at a time else."""
     if engine != 'tcgen05':
-        return 'red'
+        # wgmma's a row of D a bulk reduction where asked, its box declined
+        # and `auto` a reduction a cell until a GH200 measures them.
+        return 'bulk' if output_asked(context) == 'bulk' else 'red'
     asked = output_asked(context)
     if asked != 'auto':
         return asked
@@ -3170,6 +3185,33 @@ def output_geometry(section: GroupSection, step: Step) -> Tuple[int, int, int]:
     return lo, hi, stride
 
 
+def wgmma_bulk_geometry(section: GroupSection, step: Step, plo: int,
+                        phi: int) -> Tuple[int, int, int, int]:
+    """`(lo, hi, stride, rows)` of a pass's D staged for the bulk
+    reductions of wgmma's high-order tile (`Step.output` `bulk`,
+    `compute.multi_element._wgmma_bulk`): the rows of the output's column a
+    reduction of a row of D adds, `lo` to `hi` in its storage (from the
+    bounding box's first row) -- the pass's rows `plo` to `phi` of the
+    step's stages that are the step's, out to sixteen bytes; the elements
+    between two staged rows, an odd number of sixteen bytes; and the rows of
+    D a warp stages a round, the most of eight, four, two and one whose four
+    warps' fit the warpgroup's slots of A (`STAR_SLOTS`), or 0."""
+    tensor = step.dest
+    unit = 16 // section.dtype.size()
+    ld = int(tensor.bbox.sizes()[0])
+    first = int(tensor.bbox.lower()[0])
+    height = step.rows[1] - step.rows[0]
+    lo = (step.rows[0] + plo - first) // unit * unit
+    hi = min(ld, _round(step.rows[0] + min(phi, height) - first, unit))
+    stride = _round(max(hi - lo, unit), unit)
+    if (stride // unit) % 2 == 0:
+        stride += unit
+    room = STAR_SLOTS['wgmma'] * 2 * len(step.products) * 64 * STAR_ROWS
+    rows = next((r for r in (8, 4, 2, 1)
+                 if WARPGROUP_WARPS * r * stride <= room), 0)
+    return lo, hi, stride, rows
+
+
 def output_volume(section: GroupSection, elements: int) -> int:
     """Elements of shared memory the steps' staged D takes for their bulk
     reductions in a group of `elements` (`Step.output`), past what tcgen05
@@ -3177,6 +3219,9 @@ def output_volume(section: GroupSection, elements: int) -> int:
     total = 0
     for step in section.steps:
         if not step.output:
+            continue
+        if section.tile is not None and section.tile.engine == 'wgmma':
+            # Staged in the warpgroups' slots of A (`wgmma_bulk_geometry`).
             continue
         _, _, stride = output_geometry(section, step)
         total += elements * (step.cols[1] - step.cols[0]) * stride
@@ -3227,7 +3272,9 @@ def output_notes(section: GroupSection, context) -> List[str]:
                        'other choices kept')
             if section.tile is not None:
                 why = (f'the high-order tile on {section.tile.engine} adds D '
-                       f'a cell at a time')
+                       f'a cell at a time' + (
+                           ', or a row a reduction (`bulk`)'
+                           if section.tile.engine == 'wgmma' else ''))
             notes.append(f'matrix_output={asked} declined for '
                          f'{step.dest.alias}: {why}; a reduction a cell')
             continue
@@ -3235,6 +3282,9 @@ def output_notes(section: GroupSection, context) -> List[str]:
         first = int(step.dest.bbox.lower()[0])
         what = ('a bulk reduction a column of the element' if step.output ==
                 'bulk' else 'one bulk reduction over the element\'s box')
+        if section.tile is not None and section.tile.engine == 'wgmma':
+            what = ('a bulk reduction a row of D -- a column of the element '
+                    '-- a pass at a time, staged in the slots of A')
         notes.append(f'{step.dest.alias} += D by {what}, rows {first + lo} '
                      f'to {first + hi}: the rows the products\' windows leave '
                      f'out there receive exactly +0.0 (a -0.0 becomes +0.0)')

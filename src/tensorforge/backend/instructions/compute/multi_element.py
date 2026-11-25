@@ -3330,6 +3330,10 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
         # + 2 t + i % 2`, B's tiles of N laid last first from the pass's
         # last row `phi` (`TileRows.descending`).  A row past the tile's
         # elements is past the group's to the writer.
+        if step.output == 'bulk':
+            # By bulk reductions, a row of D each, staged in A's slots.
+            _wgmma_bulk(trip, step, t, area, accs, w, plo, phi)
+            continue
         write = _d_writer(trip, step)
         quad = b.op('div', INDEX, lane, 4, hint='q')
         inquad = b.op('rem', INDEX, lane, 4, hint='q')
@@ -3344,6 +3348,100 @@ def _wgmma_tile(trip, step, t, area, done) -> None:
             col = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2, hint='n'),
                        phi - 8 * (i // 4 + 1) + i % 2, hint='n')
             write(dm, col, accs[i], ('w', pass_, rr), True)
+
+
+def _wgmma_bulk(trip, step, t, area, accs, w, plo, phi) -> None:
+    """Tile `t`'s D of a pass over N -- its rows `plo` to `phi` of the
+    step's stages -- added into the output by bulk reductions on wgmma
+    (`element_group.Step.output` `bulk`, `wgmma_bulk_geometry`): a reduction
+    a row of D, an element's column of the output, the pass's rows of it
+    and the rows around them out to sixteen bytes, which receive +0.0.
+
+    Staged in the warpgroup's slots of A (`area`), free behind the pass's
+    last wait: each warp its rows -- `16 w + g` and `16 w + g + 8`, the
+    quad `g` of lanes holding each -- in rounds of `rows` rows of a half: the
+    quad's four lanes store their cells of its row (D's register `i` the
+    step's row `phi - 8 (i / 4 + 1) + 2 l + i % 2`, the descending order),
+    the quad's first lane the rows no cell of the pass is; fenced for the
+    async proxy and the warp's barrier; the quad's first lane adds the row
+    through its element's pointer -- nothing for a row past the tile's
+    elements, nor for a masked element -- and waits for the reduction to
+    have read it, which the warp's barrier hands to the next round.  Behind
+    the last round the warpgroup meets: the next pass's or trip's blocks of
+    A write the slots again."""
+    from tensorforge.backend.pir.engines import FenceKind
+    from tensorforge.generators.element_group import wgmma_bulk_geometry
+    b, section, fp = trip.builder, trip.section, trip.fp
+    tile = section.tile
+    tensor = step.dest
+    lane = trip.lane
+    lo, hi, stride, rows = wgmma_bulk_geometry(section, step, plo, phi)
+    height = step.rows[1] - step.rows[0]
+    first = int(tensor.bbox.lower()[0])
+    width = step.cols[1] - step.cols[0]
+    # Where the step's row `n` stands in a staged row.
+    shift = step.rows[0] - first - lo
+    count = _round_up(phi - plo, 8) // 2
+    covered = {phi - 8 * (i // 4 + 1) + i % 2 + 2 * l + shift
+               for i in range(count) for l in range(4)
+               if phi - 8 * (i // 4 + 1) + i % 2 + 2 * l < height}
+    blanks = [r for r in range(hi - lo) if r not in covered]
+    zero = b.const(0.0, fp)
+    quad = b.op('div', INDEX, lane, 4, hint='q')
+    inquad = b.op('rem', INDEX, lane, 4, hint='q')
+    lead = b.op('eq', BOOL, inquad, 0, hint='ql')
+    for half in (0, 8):
+        for g0 in range(0, 8, rows):
+            mine = b.op('and', BOOL, b.op('ge', BOOL, quad, g0, hint='qr'),
+                        b.op('lt', BOOL, quad, g0 + rows, hint='qr'),
+                        hint='qr')
+            at = b.op('mul', INDEX, b.op('add', INDEX, b.op(
+                'mul', INDEX, w, rows, hint='qs'), b.op(
+                'sub', INDEX, quad, g0, hint='qs'), hint='qs'), stride,
+                hint='qs')
+            with b.if_(mine):
+                for i in range(count):
+                    if 8 * ((i % 4) // 2) != half:
+                        continue
+                    top = phi - 8 * (i // 4 + 1) + i % 2
+                    if top >= height:
+                        continue
+                    n = b.op('add', INDEX, b.op('mul', INDEX, inquad, 2,
+                                                hint='n'), top, hint='n')
+                    inside = (None if top + 6 < height else
+                              b.op('lt', BOOL, n, height, hint='in'))
+                    b.store(area, accs[i], b.op('add', INDEX, at, _index(
+                        b, 'add', n, shift, 'n'), hint='qa'),
+                            predicate=inside)
+                if blanks:
+                    with b.if_(lead):
+                        for r in blanks:
+                            b.store(area, zero, _index(b, 'add', at, r,
+                                                       'qa'))
+            b.fence(FenceKind.PROXY)
+            b.barrier(Participants.WAVE)
+            local = _index(b, 'add', b.op('add', INDEX, b.op(
+                'mul', INDEX, w, 16, hint='m'), quad, hint='m'), half, 'm')
+            inside = b.op('lt', BOOL, local, tile.used, hint='in')
+            m = b.op('select', INDEX, inside, _index(
+                b, 'add', local, tile.used * t, 'm'), 0, hint='m')
+            element = b.op('div', INDEX, m, width, hint='e')
+            quantity = _index(b, 'add', b.op('rem', INDEX, m, width,
+                                             hint='j'), step.cols[0], 'j')
+            pointer, held = trip.pointer(tensor, element)
+            issue = b.op('and', BOOL, b.op('and', BOOL, mine, lead,
+                                           hint='issue'), b.op(
+                'and', BOOL, inside, held, hint='issue'), hint='issue')
+            token = b.reduce_bulk(pointer, area, elems=hi - lo, issue=issue,
+                                  dst_index=(_address(b, tensor, first + lo,
+                                                      quantity),),
+                                  src_index=(at,))
+            # The reduction's reads of the row done, in the lane that issued
+            # it; the warp's barrier hands them to its next round's stores.
+            b.wait(token)
+            b.barrier(Participants.WAVE)
+    # Every warp's reductions read: the slots of A free for the next blocks.
+    b.barrier(Participants.ROLE)
 
 
 def _wgmma_groups(trip, step, ring, base, area, done, accs, rows,
