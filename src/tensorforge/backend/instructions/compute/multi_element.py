@@ -251,6 +251,43 @@ def _group_pointer(trip, context, tensor, element):
     return pointer, held
 
 
+def _input_issue(builder, section, first_warp):
+    """The lane that issues the tile's bulk copies of I where the options
+    ask for the elected one (`TileRows.inputs` `elect`): the lane
+    `elect.sync` picks in the producer's first warp -- every lane of the
+    warp here -- or None, each element's lane its own copies."""
+    tile = section.tile
+    if tile is None or tile.inputs != 'elect':
+        return None
+    picked = builder.rawexpr('tensorforge::electOne()', type_=BOOL,
+                             hint='ie', uniform=Uniformity.LANE,
+                             crosslane=True)
+    return builder.op('and', BOOL, first_warp, picked, hint='ie')
+
+
+def _input_issuers(builder, context, symbol, section, group, active_of,
+                   source, lane, per_element, mine, issue, elements):
+    """Who issues an input's bulk copies, and from where: `(pointer,
+    base, predicate)`, a lane an element under `mine` -- its own element's
+    pointer, its slot at `lane` elements -- or, `issue` the elected lane
+    (`_input_issue`), the group's `elements` by it, each element's pointer
+    loaded by each lane alike and its slot a number."""
+    from tensorforge.backend.pir.core import SIZE
+    if issue is None:
+        pointer = _element_pointer(builder, context, symbol, source,
+                                   section.dtype)
+        return [(pointer, builder.op('mul', INDEX, lane, per_element,
+                                     hint='b'), mine)]
+    out = []
+    for e in range(elements):
+        element = builder.op('add', SIZE, group, e, hint='e')
+        chosen = builder.op('select', SIZE, active_of(builder, element),
+                            element, group, hint='e')
+        out.append((_element_pointer(builder, context, symbol, chosen,
+                                     section.dtype), e * per_element, issue))
+    return out
+
+
 def _element_pointer(builder, context, symbol, element, dtype,
                      writes=False):
     """Element `element`'s pointer to the operand of `symbol`, as the batch
@@ -5988,10 +6025,12 @@ class MultiElementSection(AbstractInstruction):
             # whose B the second fills.
             arms = b.if_else(b.op('eq', BOOL, warp, first, hint='pin'), ())
             with arms.then():
+                ahead = self._reach_ahead(trip, bound, first)
                 self._produce(trip, ring, slot, parity, bound[GROUP_KEY],
                               bound[MASK_KEY], warp=first)
                 self._produce_chunks(trip, bound[GROUP_KEY], bound[MASK_KEY],
                                      first)
+                self._prefetch_ahead(trip, ahead)
             with arms.otherwise():
                 issue = b.op('and', BOOL, b.op('eq', BOOL, warp, first + 1,
                                                hint='pop'),
@@ -6140,10 +6179,12 @@ class MultiElementSection(AbstractInstruction):
             scheduled = bound.get(SCHEDULE_KEY)
             if scheduled is not None:
                 scheduled[0].claim(b, lane0)
+            ahead = self._reach_ahead(trip, bound, warps['input'])
             self._produce(trip, ring, slot, parity, bound[GROUP_KEY],
                           bound[MASK_KEY], warp=warps['input'])
             self._produce_chunks(trip, bound[GROUP_KEY], bound[MASK_KEY],
                                  warps['input'])
+            self._prefetch_ahead(trip, ahead)
             if scheduled is not None:
                 scheduled[0].publish(b, trips, scheduled[1], lane0)
         with roles.role('operator'):
@@ -6265,6 +6306,7 @@ class MultiElementSection(AbstractInstruction):
         # do nothing else.
         first_warp = b.op('eq', BOOL, b.thread_id('y'),
                           elements if warp is None else warp, hint='pw')
+        issue = _input_issue(b, section, first_warp)
         mine = b.op('and', BOOL, first_warp,
                     b.op('lt', BOOL, lane, elements, hint='mine'),
                     hint='mine')
@@ -6281,30 +6323,32 @@ class MultiElementSection(AbstractInstruction):
             if not bulk_input(buffer):
                 rest.append((buffer, symbol, window))
                 continue
-            pointer = _element_pointer(b, self._context, symbol, source,
-                                       section.dtype)
-            base = b.op('mul', INDEX, lane, buffer.per_element, hint='b')
             width = buffer.cols[1] - buffer.cols[0]
             rows = bulk_rows(buffer)
-            for c in range(width):
-                tokens.append(b.copy_bulk(
-                    window, pointer, barrier=RingSlot(ring, slot),
-                    dst_index=(_index(b, 'add', base, c * buffer.pitch,
-                                      'd'),),
-                    src_index=(_address(b, buffer.tensor, buffer.rows[0],
-                                        buffer.cols[0] + c),),
-                    elems=rows, predicate=mine))
+            for pointer, base, predicate in _input_issuers(
+                    b, self._context, symbol, section, group, active_of,
+                    source, lane, buffer.per_element, mine, issue,
+                    elements):
+                for c in range(width):
+                    tokens.append(b.copy_bulk(
+                        window, pointer, barrier=RingSlot(ring, slot),
+                        dst_index=(_index(b, 'add', base, c * buffer.pitch,
+                                          'd'),),
+                        src_index=(_address(b, buffer.tensor,
+                                            buffer.rows[0],
+                                            buffer.cols[0] + c),),
+                        elems=rows, predicate=predicate))
             nbytes += elements * width * rows * section.dtype.size()
         if rest:
             with b.if_(first_warp):
                 self._produce_copies(trip, rest, group, active_of)
         # The lanes' copies, each lane's waited for, ahead of the first
-        # lane's arrival, which hands them over with the bulk copies' bytes.
+        # lane's arrival, which hands them over with the bulk copies' bytes
+        # -- the elected lane's, where it issued them.
         b.barrier(Participants.WAVE)
-        b.ring_publish(ring, slot, b.op('and', BOOL, first_warp,
-                                        b.op('eq', BOOL, lane, 0),
-                                        hint='first'),
-                       tx=nbytes, tokens=tokens)
+        b.ring_publish(ring, slot, issue if issue is not None else b.op(
+            'and', BOOL, first_warp, b.op('eq', BOOL, lane, 0),
+            hint='first'), tx=nbytes, tokens=tokens)
 
     def _produce_chunks(self, trip, group, active_of, warp) -> None:
         """The trip's chunks of I (`_InputChunks`), by the producer's warp
@@ -6330,17 +6374,23 @@ class MultiElementSection(AbstractInstruction):
         (symbol,) = [sym for buf, sym in zip(section.inputs, self._inputs)
                      if buf.tensor is buffer.tensor]
         first_warp = b.op('eq', BOOL, b.thread_id('y'), warp, hint='pw')
+        issue = _input_issue(b, section, first_warp)
         mine = b.op('and', BOOL, first_warp,
                     b.op('lt', BOOL, lane, elements, hint='mine'),
                     hint='mine')
         element = b.op('add', SIZE, group, lane, hint='e')
         source = b.op('select', SIZE, active_of(b, element), element, group,
                       hint='e')
-        pointer = _element_pointer(b, self._context, symbol, source,
-                                   section.dtype)
-        base = b.op('mul', INDEX, lane, chunks.per_element, hint='b')
-        first = b.op('and', BOOL, first_warp, b.op('eq', BOOL, lane, 0),
-                     hint='first')
+        def issuers():
+            return _input_issuers(b, self._context, symbol, section, group,
+                                  active_of, source, lane,
+                                  chunks.per_element, mine, issue, elements)
+        # Each lane its own element's pointer, loaded once a trip; the
+        # elected lane every element's, loaded again each round -- held over
+        # the rounds' waits, the group's pointers spilled (576 B at o8).
+        once = issuers() if issue is None else None
+        first = issue if issue is not None else b.op(
+            'and', BOOL, first_warp, b.op('eq', BOOL, lane, 0), hint='first')
         cbase = chunks.base(trip)
         cuts = input_chunks(buffer, chunks.rows)
         for i, h in enumerate(chunks.order):
@@ -6349,17 +6399,77 @@ class MultiElementSection(AbstractInstruction):
             slot, parity, at = chunks.round(trip, i, cbase)
             b.ring_acquire(chunks.ring, slot, parity,
                            writes=[chunks.storage])
-            start = b.op('add', INDEX, at, base, hint='ib')
-            tokens = [b.copy_bulk(
-                chunks.storage, pointer, barrier=RingSlot(chunks.ring, slot),
-                dst_index=(_index(b, 'add', start, c * chunks.rows, 'd'),),
-                src_index=(_address(b, buffer.tensor, lo,
-                                    buffer.cols[0] + c),),
-                elems=rows, predicate=mine) for c in range(chunks.width)]
+            tokens = []
+            for pointer, base, predicate in (once if once is not None
+                                             else issuers()):
+                start = _index(b, 'add', at, base, 'ib')
+                tokens += [b.copy_bulk(
+                    chunks.storage, pointer,
+                    barrier=RingSlot(chunks.ring, slot),
+                    dst_index=(_index(b, 'add', start, c * chunks.rows,
+                                      'd'),),
+                    src_index=(_address(b, buffer.tensor, lo,
+                                        buffer.cols[0] + c),),
+                    elems=rows, predicate=predicate)
+                    for c in range(chunks.width)]
             b.barrier(Participants.WAVE)
             b.ring_publish(chunks.ring, slot, first,
                            tx=elements * chunks.width * rows
                            * section.dtype.size(), tokens=tokens)
+
+    def _reach_ahead(self, trip, bound, warp):
+        """Where the tile reaches for the next trip's I a trip ahead
+        (`TileRows.ahead` `l2`), at the trip's head: the next trip's
+        element pointers of I -- I's chunked buffer, or the inputs its bulk
+        copies take -- each element's lane its own in the producer's warp
+        `warp`, the next trip's group the loop's (`batch_loop.AHEAD_KEY`):
+        `(pointer, buffer, mine)` an input, for `_prefetch_ahead`; or
+        None."""
+        from tensorforge.backend.instructions.batch_loop import (AHEAD_KEY,
+                                                                 MASK_KEY)
+        from tensorforge.backend.pir.core import SIZE
+        from tensorforge.generators.element_group import bulk_input
+        section = self._group.section
+        tile = section.tile
+        if tile is None or tile.ahead != 'l2':
+            return None
+        b = trip.builder
+        group = bound[AHEAD_KEY](b)
+        if group is None:
+            return None
+        elements = self._group.elements
+        lane = trip.lane
+        chunked = trip.chunks.buffer if trip.chunks is not None else None
+        buffers = ([chunked] if chunked is not None else
+                   [buf for buf in section.inputs if bulk_input(buf)])
+        first_warp = b.op('eq', BOOL, b.thread_id('y'), warp, hint='pw')
+        mine = b.op('and', BOOL, first_warp,
+                    b.op('lt', BOOL, lane, elements, hint='mine'),
+                    hint='mine')
+        element = b.op('add', SIZE, group, lane, hint='en')
+        source = b.op('select', SIZE, bound[MASK_KEY](b, element), element,
+                      group, hint='en')
+        out = []
+        for buffer, symbol in zip(section.inputs, self._inputs):
+            if not any(buffer.tensor is buf.tensor for buf in buffers):
+                continue
+            out.append((_element_pointer(b, self._context, symbol, source,
+                                         section.dtype), buffer, mine))
+        return out
+
+    def _prefetch_ahead(self, trip, ahead) -> None:
+        """The next trip's I asked of L2 at the trip's end (`_reach_ahead`'s
+        pointers, loaded at its head): each element's lane its element's
+        columns, a hint a line of each."""
+        if not ahead:
+            return
+        b = trip.builder
+        line = max(1, 128 // self._group.section.dtype.size())
+        for pointer, buffer, mine in ahead:
+            for c in range(buffer.cols[0], buffer.cols[1]):
+                for r in range(buffer.rows[0], buffer.rows[1], line):
+                    b.prefetch(pointer, _address(b, buffer.tensor, r, c),
+                               level='l2', predicate=mine)
 
     def _produce_copies(self, trip, buffers, group, active_of) -> None:
         """The inputs no bulk copy takes, by the producer's first warp, each

@@ -2003,6 +2003,15 @@ class TileRows:
     #: by the trip as A's ring is, block `j` slot `j % slots` every trip, the
     #: group loop's body written out a slot of the rings' depth at a time.
     slots: str = 'round'
+    #: Which lane of the input warp (tcgen05) or the producer's first warp
+    #: (wgmma) issues the bulk copies of I (`Options.matrix_input_issue`,
+    #: `tile_input_issue`): each element's lane its own (`lane`), or the
+    #: lane `elect.sync` picks, every element's (`elect`).
+    inputs: str = 'lane'
+    #: Whether the input warp (tcgen05) or the producer (wgmma) asks L2 for
+    #: the next trip's I a trip ahead (`Options.matrix_input_ahead`,
+    #: `tile_input_ahead`): `off` or `l2`.
+    ahead: str = 'off'
     #: tcgen05's: A's ring and B's (`two`), or one ring for both, B's of
     #: A's slots, a wait and a commit a block (`one`; `Options.
     #: matrix_handoffs`, `tile_handoffs`).
@@ -2271,6 +2280,33 @@ def tile_slots(engine: str, context) -> str:
     the options ask on tcgen05, `round` on wgmma, whose passes walk B's
     chunks again."""
     return slots_asked(context) if engine == 'tcgen05' else 'round'
+
+
+def input_issue_asked(context) -> str:
+    """Which lane the options ask to issue the tile's bulk copies of I
+    (`Options.matrix_input_issue`): `lane` or `elect`."""
+    return getattr(context.get_user_options(), 'matrix_input_issue', 'lane')
+
+
+def tile_input_issue(engine: str, context) -> str:
+    """Which lane issues the tile's bulk copies of I on `engine`
+    (`TileRows.inputs`): as the options ask, on both engines -- tcgen05's
+    input warp and wgmma's producer copy I alike."""
+    return input_issue_asked(context)
+
+
+def input_ahead_asked(context) -> str:
+    """Whether the options ask the tile to reach for the next trip's I a
+    trip ahead (`Options.matrix_input_ahead`): `off` or `l2`."""
+    return getattr(context.get_user_options(), 'matrix_input_ahead', 'off')
+
+
+def tile_input_ahead(schedule: str, context) -> str:
+    """Whether the tile reaches for the next trip's I a trip ahead
+    (`TileRows.ahead`): as the options ask where the blocks stride over the
+    batch, `off` where they take their tiles by claims (`TileRows.schedule`)
+    -- the next tile a claim's answer, not a stride on."""
+    return input_ahead_asked(context) if schedule == 'static' else 'off'
 
 
 def handoffs_asked(context) -> str:
@@ -2693,14 +2729,45 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
                       f'memory\'s {TMEM_BUDGET}: the passes are not built')
     dslots, aslots = found
     output = tile_output('tcgen05', step.rows[1] - step.rows[0], context)
-    chosen = _tcgen05_tile_search(section, context, budget, width, per,
+    chosen = _tcgen05_tile_choice(section, context, budget, width, per,
                                   (dslots, aslots), (chunk, cslots), output)
+    last = input_chunks(star_operand(probe), chunk)[-1] if chunk else None
+    if (chunk and chunks_asked(context) == 0 and chosen[0] is not None
+            and last[1] - last[0] < STAR_ROWS):
+        # `auto` on tcgen05: I whole where its last chunk takes less than a
+        # block of K -- a round of the chunks' ring for less than a step of
+        # the engine's K, and the next trip's first chunk loading under that
+        # round alone: a GB200 measured I whole 29 % faster at o6 (35 rows,
+        # the last chunk's 3) and alike at o8 (its last 20; J4b), 6 % at
+        # o10 asked for a reduction a cell (its last 5; J3b) -- and where
+        # whole keeps the elements and the epilogue's form: not o10's box
+        # (whole leaving the staged D no room).
+        whole = _tcgen05_tile_choice(section, context, budget, width, per,
+                                     (dslots, aslots), (0, 0), output)
+        if (whole[0] is not None
+                and whole[0].elements >= chosen[0].elements
+                and whole[0].section.tile.output
+                == chosen[0].section.tile.output):
+            return whole
+    return chosen
+
+
+def _tcgen05_tile_choice(section: GroupSection, context, budget: int,
+                         width: int, per: int, slots: Tuple[int, int],
+                         chunks: Tuple[int, int], output: str) -> Tuple[
+        Optional['ElementGroup'], str]:
+    """`tile_plan`'s group on tcgen05 for I's `chunks`: the search's with
+    the epilogue's `output` -- or, `auto`'s bulk reductions keeping fewer
+    than `TILE_OUTPUT_KEEP` of the elements a reduction a cell takes (their
+    staged D takes shared memory), the reduction a cell's."""
+    chosen = _tcgen05_tile_search(section, context, budget, width, per,
+                                  slots, chunks, output)
     if output != 'red' and output_asked(context) == 'auto':
         # `auto`'s bulk reductions where they keep `TILE_OUTPUT_KEEP` of the
         # elements a reduction a cell takes: their staged D takes shared
         # memory.
         red = _tcgen05_tile_search(section, context, budget, width, per,
-                                   (dslots, aslots), (chunk, cslots), 'red')
+                                   slots, chunks, 'red')
         if red[0] is not None and (
                 chosen[0] is None or
                 chosen[0].elements < TILE_OUTPUT_KEEP * red[0].elements):
@@ -2734,7 +2801,9 @@ def _wgmma_tile_search(section: GroupSection, context, budget: int,
                         tables=tile_tables('wgmma', groups, context),
                         slots=tile_slots('wgmma', context),
                         handoffs=tile_handoffs('wgmma', context),
-                        wait=tile_wait('wgmma', context))
+                        wait=tile_wait('wgmma', context),
+                        inputs=tile_input_issue('wgmma', context),
+                        ahead=tile_input_ahead('static', context))
         for operators in operator_slots_tried(context):
             for slots in PRODUCER_SLOTS + (1,):
                 lowered = tile_lowered(section, context, tile, slots,
@@ -2782,7 +2851,10 @@ def _tcgen05_tile_search(section: GroupSection, context, budget: int,
                         tables=tile_tables('tcgen05', groups, context),
                         slots=('trip' if handoffs == 'one'
                                else tile_slots('tcgen05', context)),
-                        handoffs=handoffs, wait=tile_wait('tcgen05', context))
+                        handoffs=handoffs, wait=tile_wait('tcgen05', context),
+                        inputs=tile_input_issue('tcgen05', context),
+                        ahead=tile_input_ahead(
+                            tile_schedule('tcgen05', context), context))
         # One ring for A and B (`TileRows.handoffs` `one`): B's of A's
         # slots, a block's slot of each alike.
         for operators in ((owned,) if handoffs == 'one'
@@ -2839,10 +2911,12 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
                 f'prepared ring; warp {c} stages the inputs into a ring of '
                 f'{group.section.ring} slot'
                 f'{"s" if group.section.ring > 1 else ""}'
-                f'{_chunks_note(group.section)}, warp {c + 1} fills '
+                f'{_chunks_note(group.section)}{_inputs_note(tile)}, warp '
+                f'{c + 1} fills '
                 f'B\'s ring', _spans_note(group.section)] + \
             _schedule_notes(group.section, context) + \
-            _issue_notes(group.section, context)
+            _issue_notes(group.section, context) + \
+            _ahead_notes(group.section, context)
     b = WARPGROUP_WARPS * tile.bands
     return [f'the high-order tile: {rows}; warps 0 to {b - 1} its star '
             f'bands, A into tensor memory; warps {b} to {b + 3} the epilogue, '
@@ -2852,11 +2926,13 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
             f'warp {b + 4} stages the inputs into a ring of '
             f'{group.section.ring} slot'
             f'{"s" if group.section.ring > 1 else ""}'
-            f'{_chunks_note(group.section)}, warp {b + 5} fills '
+            f'{_chunks_note(group.section)}{_inputs_note(tile)}, warp '
+            f'{b + 5} fills '
             f'B\'s ring{_slots_note(tile)}, warp {b + 6} issues'
             f'{_issue_note(tile)}',
             _spans_note(group.section)] + \
-        _schedule_notes(group.section, context)
+        _schedule_notes(group.section, context) + \
+        _ahead_notes(group.section, context)
 
 
 def _depth_note(section: GroupSection) -> str:
@@ -2939,6 +3015,28 @@ def _chunks_note(section: GroupSection) -> str:
     return (f' -- {chunked.tensor.alias} in {count} chunk'
             f'{"s" if count > 1 else ""} of {tile.chunk} rows of K through a '
             f'ring of {tile.cslots}{again}')
+
+
+def _inputs_note(tile: TileRows) -> str:
+    """The kernel's word on which lane issues the bulk copies of I
+    (`TileRows.inputs`), where it is not each element's own, and on the
+    next trip's I asked of L2 a trip ahead (`TileRows.ahead`)."""
+    out = ''
+    if tile.inputs == 'elect':
+        out += ', every element\'s bulk copies by the lane elect.sync picks'
+    if tile.ahead == 'l2':
+        out += ', the next trip\'s I asked of L2 a trip ahead'
+    return out
+
+
+def _ahead_notes(section: GroupSection, context) -> List[str]:
+    """Why the tile declined to reach for the next trip's I a trip ahead
+    (`Options.matrix_input_ahead`): its tiles go by claims."""
+    asked = input_ahead_asked(context)
+    if asked == section.tile.ahead:
+        return []
+    return [f'matrix_input_ahead={asked} declined: the tiles go by claims, '
+            f'the next one no stride on']
 
 
 def _schedule_notes(section: GroupSection, context) -> List[str]:
@@ -5158,7 +5256,8 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'groups_asked', 'issue_asked', 'kept_span', 'spans_asked',
            'tile_chunks', 'tile_issue', 'tables_asked', 'tile_tables',
            'slots_asked', 'tile_slots', 'tile_depth', 'handoffs_asked',
-           'tile_handoffs', 'wait_asked', 'tile_wait',
+           'tile_handoffs', 'wait_asked', 'tile_wait', 'input_issue_asked',
+           'tile_input_issue', 'input_ahead_asked', 'tile_input_ahead',
            'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_TCGEN05', 'TMEM_BUDGET',
            'tile_dslots', 'tile_groups', 'tile_output', 'TILE_UNROLLED_ROWS',
            'TILE_OUTPUT_KEEP',

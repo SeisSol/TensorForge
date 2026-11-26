@@ -418,6 +418,30 @@ def parse_matrix_slots(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_input_issue` takes.
+MATRIX_INPUT_ISSUES = ('lane', 'elect')
+
+
+def parse_matrix_input_issue(text: str) -> str:
+  """`lane` or `elect` (`Options.matrix_input_issue`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_INPUT_ISSUES:
+    raise ValueError(f'expected one of {MATRIX_INPUT_ISSUES}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_input_ahead` takes.
+MATRIX_INPUT_AHEADS = ('off', 'l2')
+
+
+def parse_matrix_input_ahead(text: str) -> str:
+  """`off` or `l2` (`Options.matrix_input_ahead`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_INPUT_AHEADS:
+    raise ValueError(f'expected one of {MATRIX_INPUT_AHEADS}, got {text!r}')
+  return value
+
+
 #: What `Options.matrix_handoffs` takes.
 MATRIX_HANDOFFS = ('two', 'one')
 
@@ -3156,9 +3180,16 @@ declare('matrix_input_chunks',
             'step reads (`matrix_tile` `high`, `element_group.TileRows.'
             'chunk`).  `auto`, the default: on tcgen05 in chunks of '
             '`TILE_CHUNK` (32) rows of K where I has more, each chunk of every '
-            'element a slot of a ring of its own (`TILE_CHUNK_SLOTS`), '
-            'streamed in the order the blocks of K read them -- the input ring '
-            'a trip\'s star matrices alone; on wgmma I whole wherever the tile '
+            'element a slot of a ring of its own (`TILE_CHUNK_SLOTS`), streamed '
+            'in the order the blocks of K read them -- the input ring a trip\'s '
+            'star matrices alone -- but whole where the last chunk would take '
+            'less than a block of K and whole keeps the elements and the '
+            'epilogue\'s form of I in chunks: o6 (35 rows, the last chunk\'s '
+            '3), which a GB200 measured faster whole, 3.05 ns an element against '
+            '4.30, where o8 (its last 20) is alike, 6.60 against 6.52 (J4b, '
+            'Horizon 107380), and o10 asked for a reduction a cell (its last '
+            '5), 16.10 against 17.04 (J3b) -- not o10\'s box, whose I whole '
+            'leaves no room for the staged D; on wgmma I whole wherever the tile '
             'fits it, in chunks where it does not (`element_group.tile_plan`): '
             'a GH200 measured I whole faster at every order (Vista 1169572, ns '
             'an element: o6 4.91 against the chunks\' 6.23, o8 11.60 against '
@@ -3239,6 +3270,39 @@ declare('matrix_slots',
             '-- and the group loop\'s body written out once a slot of the '
             'rings\' depth, the slots numbers in it, the bodies past the last '
             'block guarded.  On wgmma declined.')
+
+declare('matrix_input_issue',
+        default='lane',
+        env='TF_MATRIX_INPUT_ISSUE',
+        parse=parse_matrix_input_issue,
+        doc='Which lane of the high-order tile\'s input warp issues the bulk '
+            'copies of I (`matrix_tile` `high`, `element_group.TileRows.'
+            'inputs`): `lane`, the default, each element\'s lane its own, '
+            'under its predicate -- the copy\'s addresses that lane\'s, which '
+            'UBLKCP takes from uniform registers, so that ptxas wraps every '
+            'copy in a loop over the lanes that might issue it (ELECT, '
+            'R2UR.BROADCAST, BRA.U.ANY: 378 copies a trip at o8 with I in '
+            'chunks, the input warp busy for nearly all of its samples and '
+            'the star bands waiting a third of theirs for I\'s chunks, J4a\'s '
+            'ncu); `elect`, the lane `elect.sync` picks, every element\'s '
+            'copies under its predicate, the elements\' pointers loaded by '
+            'each lane alike.  On both engines: wgmma\'s producer copies I '
+            'the same way.')
+
+declare('matrix_input_ahead',
+        default='off',
+        env='TF_MATRIX_INPUT_AHEAD',
+        parse=parse_matrix_input_ahead,
+        doc='Whether the high-order tile\'s input warp (tcgen05) or producer '
+            '(wgmma) reaches for the next trip\'s I a trip ahead (`matrix_tile` '
+            '`high`, `element_group.TileRows.ahead`): `off`, the default, each '
+            'trip\'s element pointers loaded and its I copied in that trip; '
+            '`l2`, besides, each element\'s lane loading the next trip\'s '
+            'element\'s pointer at the trip\'s head and asking L2 for its '
+            'columns of I at the trip\'s end (`prefetch.global.L2`), so that '
+            'the next trip\'s pointer loads and bulk copies find their lines '
+            'nearer.  Declined where the tiles go by claims (`tile_schedule`), '
+            'whose next tile no stride says.')
 
 declare('matrix_handoffs',
         default='two',
