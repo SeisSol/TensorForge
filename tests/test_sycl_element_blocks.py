@@ -322,6 +322,41 @@ def test_the_auto_rule_wants_dpas():
     assert eb.auto_refusal(ctx, _transfers(*LFA), {}) == 'not the DPAS path'
 
 
+#: localFluxAll's four writes of Q and the volume's three, in the shape the
+#: transfers above have.
+LFA4 = LFA + LFA
+VOLUME3 = VOLUME + ('l m0 0', 'l m4 0', 'l m2 1', 's m2 1')
+
+
+@pytest.mark.parametrize('transfers,block2d,why', [
+    (LFA4, True, 'glb_m2 written 4 times under sycl_dpas_block2d'),
+    (LFA4, 'auto', 'glb_m2 written 4 times under sycl_dpas_block2d'),
+    (LFA4, False, None), (VOLUME3, True, None),
+], ids=['lfa-block2d', 'lfa-block2d-auto', 'lfa-tiles', 'volume-block2d'])
+def test_the_auto_rule_under_the_operator_blocks(transfers, block2d, why):
+    """Rule 6: under the operators' 2D blocks no element operand written
+    more than three times -- localFluxAll's four lost with the blocks there
+    at every order pvcport J9 timed, the volume's three paid; `auto` block2d
+    counts as on.  Without them the four take the blocks as before."""
+    ctx = SimpleNamespace(get_user_options=lambda: SimpleNamespace(
+        sycl_dpas=True, sycl_dpas_block2d=block2d))
+    surfaces = {n: eb.Surface(4 * 56, 9, 56) for n in ('glb_m0', 'glb_m2')}
+    assert eb.auto_refusal(ctx, _transfers(*transfers), surfaces) == why
+
+
+@pytest.mark.parametrize('name,blocks', [
+    ('gpu_volume', True), ('gpu_localFluxAll', False),
+], ids=['volume-6', 'lfa-6'])
+def test_auto_under_the_operator_blocks(name, blocks):
+    """Under dpbt32 (`sycl_dpas_block2d`, 32 threads a core) at order 6:
+    the volume takes the blocks, the kernel `True` writes; localFluxAll, its
+    Q written four times, keeps the kernel the option off writes."""
+    base = dict(sycl_dpas=True, sycl_dpas_block2d=True, sycl_core_threads=32)
+    want = _once(name, 6, **base, **ON) if blocks else _once(name, 6, **base)
+    assert (_norm(_once(name, 6, sycl_element_blocks='auto', **base))
+            == _norm(want))
+
+
 @pytest.mark.parametrize('options', [
     dict(backend='esimd'), dict(backend='acpp'), dict(precision='d'),
 ], ids=['esimd', 'acpp', 'f64'])

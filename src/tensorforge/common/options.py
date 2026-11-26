@@ -1583,8 +1583,11 @@ declare('sycl_element_blocks',
             'at order 8), and only where the body writes an operand more than '
             'once (the volume\'s and localFluxAll\'s accumulations; the '
             'neighbor flux writes its Q once) -- a calibration on three '
-            'kernels: J7\'s step 2-9 % faster at orders 5 to 7.  Off by '
-            'default.')
+            'kernels: J7\'s step 2-9 % faster at orders 5 to 7.  Under '
+            '`sycl_dpas_block2d` not where the body writes an operand more '
+            'than three times: localFluxAll\'s four writes lost the blocks '
+            'under the operators\' 2D blocks at every order pvcport J9 '
+            'timed, the volume\'s three paid.  Off by default.')
 
 declare('sycl_element_streaming',
         default=False,

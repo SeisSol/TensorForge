@@ -4100,6 +4100,18 @@ GROUPS = {
          sub(BUILD, "        if materialize:\n            attrs += (('no_inline', True),)\n"
                     "        self._emit_op(Op.EXTRACT",
              '        self._emit_op(Op.EXTRACT', 1)),
+        ('the operators\' blocks rule dropped',
+         sub(EBLOCKS, '    if count > AUTO_BLOCK2D_WRITES:\n', '    if False:\n', 1)),
+        ('four writes taken under the operators\' blocks',
+         sub(EBLOCKS, 'AUTO_BLOCK2D_WRITES = 3\n', 'AUTO_BLOCK2D_WRITES = 4\n', 1)),
+        ('the volume\'s three refused under the operators\' blocks',
+         sub(EBLOCKS, 'AUTO_BLOCK2D_WRITES = 3\n', 'AUTO_BLOCK2D_WRITES = 2\n', 1)),
+        ('the operators\' blocks never asked',
+         sub(EBLOCKS, "  if getattr(context.get_user_options(), 'sycl_dpas_block2d', False):\n",
+             '  if False:\n', 1)),
+        ('auto block2d taken for tiles',
+         sub(EBLOCKS, "  if getattr(context.get_user_options(), 'sycl_dpas_block2d', False):\n",
+             "  if getattr(context.get_user_options(), 'sycl_dpas_block2d', False) is True:\n", 1)),
     ]),
 
     'block2d': ('tests/test_block2d.py', [

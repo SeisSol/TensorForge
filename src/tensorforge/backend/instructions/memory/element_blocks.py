@@ -87,11 +87,15 @@ def wanted(context) -> bool:
 #: builds them (`auto_refusal`, rule 4).
 AUTO_RAGGED_SLOTS = 6
 
+#: The times a body may write an element operand where `auto` builds the
+#: blocks under the operators' 2D blocks (`auto_refusal`, rule 6).
+AUTO_BLOCK2D_WRITES = 3
+
 
 def auto_refusal(context, transfers, surfaces) -> Optional[str]:
   """Why `sycl_element_blocks=auto` keeps a kernel's element blocks off, or
-  None where it builds them -- the rule pvcport J6b's and J7's timings
-  support (the Max 1550; SeisSol's elastic kernels at orders 5 to 8 on
+  None where it builds them -- the rule pvcport J6b's, J7's and J9's
+  timings support (the Max 1550; SeisSol's elastic kernels at orders 5 to 8 on
   NVIDIA's padding, SeisSol's own PVC layout and the layouts step-2 rule;
   the blocks under `sycl_dpas` against `sycl_dpas` alone, the batch as it
   is and every element 16 bytes off its alignment):
@@ -119,7 +123,18 @@ def auto_refusal(context, transfers, surfaces) -> Optional[str]:
      on SeisSol's PVC layout and the step-2 rule (x1.10-1.35 at orders 6 to
      8, its blocks' arm itself, for a reason J7 does not show) and gained at
      most 7 % on NVIDIA's padding, where a batch off its alignment cost 23 %
-     at order 8.
+     at order 8;
+  6. under the operators' 2D blocks (`Options.sycl_dpas_block2d`, on or
+     `auto`), no element operand written more than `AUTO_BLOCK2D_WRITES`
+     times: there localFluxAll's four writes lost with the blocks at every
+     order J9 timed -- block2d alone x1.03-1.14 at orders 5 and 7, with 32
+     threads x1.05-1.60 at order 5 and seven of nine layouts and orders 5
+     to 7 (J7 and J8 alike) -- where the volume's three paid (x0.43-0.94
+     with 32 threads, x0.48 and x0.83 alone).  Under 32 threads without
+     block2d the blocks paid for localFluxAll at order 5 (x0.71-0.76) and
+     lost at order 7 (x1.13-1.24): the order, not the base, and no rule
+     here.  `auto` block2d counts as on; J9 timed it on.  A calibration
+     like rule 5.
 
   `transfers` are the body's `(kind, name, first_row)` in order, for every
   operand of the element -- a load or a store of `name`, the operand row
@@ -152,6 +167,10 @@ def auto_refusal(context, transfers, surfaces) -> Optional[str]:
       return f'{name}: {slots} lane slots a column'
   if not any(count > 1 for count in writes.values()):
     return 'no element operand written more than once'
+  if getattr(context.get_user_options(), 'sycl_dpas_block2d', False):
+    name, count = min(writes.items(), key=lambda item: (-item[1], item[0]))
+    if count > AUTO_BLOCK2D_WRITES:
+      return f'{name} written {count} times under sycl_dpas_block2d'
   return None
 
 
@@ -332,7 +351,8 @@ def chunks(columns_lo: int, columns_hi: int):
   return out
 
 
-__all__ = ['AUTO_RAGGED_SLOTS', 'BASE_ALIGN', 'LANES', 'ROWS', 'Surface',
+__all__ = ['AUTO_BLOCK2D_WRITES', 'AUTO_RAGGED_SLOTS', 'BASE_ALIGN', 'LANES',
+           'ROWS', 'Surface',
            'active', 'asked', 'auto', 'auto_refusal', 'building',
            'chain_refusal', 'chunks',
            'needs_check', 'overlap_shift', 'slots_inside', 'surface',
