@@ -133,14 +133,16 @@ def test_on_tcgen05_the_tile_s_own_layout_at_fourteen_elements(order):
     (`tile_output`: a column's at o4 and o6, the element's box at o8), the
     inputs through a ring, whatever the table's group or `matrix_roles` --
     I in chunks of 32 rows of K at o8, whole at o4 (ten rows) and o6 (its
-    last chunk's 3, `tile_plan`)."""
+    last chunk's 3, `tile_plan`), its copies by the elected lane
+    (`tile_input_issue`)."""
     group = _group(order, 'sm_100a')
     section = group.section
     chunk = 32 if order > 6 else 0
     assert section.tile == eg.TileRows('tcgen05', 9, 14, 1, groups='loop',
                                        bands=2, dslots=2, aslots=4, chunk=chunk,
                                        cslots=2 if chunk else 0,
-                                       output='box' if order == 8 else 'bulk')
+                                       output='box' if order == 8 else 'bulk',
+                                       inputs='elect')
     assert not section.roles and eg.rowless(section) and section.ring >= 1
     assert group.elements == 14 and group.rows == 0
     assert group.warps == 4 * 2 + 4 + 3 == eg.tile_warps(section.tile)
@@ -1431,9 +1433,12 @@ def test_the_chunk_ring_s_text(arch, consumers):
     element, 16128 bytes announced, the last chunk's 20 rows 10080; the
     input ring no bulk copy, the star matrices its alone, and its slot
     given back before the first chunk is waited for -- the star numbers in
-    registers by then."""
+    registers by then.  Each element's lane's copies, asked for on tcgen05,
+    where `auto` takes the elected lane's (`test_the_input_issue_text`)."""
     src = _kernel(8, arch, **({'matrix_input_chunks': 32}
-                              if arch == 'sm_90a' else {})).get_kernel()
+                              if arch == 'sm_90a'
+                              else {'matrix_input_issue': 'lane'})
+                  ).get_kernel()
     assert 'mbarrierInit(&ik_ring[r], 1)' in src
     assert f'mbarrierInit(&ik_ring[2 + r], {consumers})' in src
     copies = re.findall(r'bulkCopyOn\(&ik_ring\[\w+\], [^,]+, [^,]+, '
@@ -1999,11 +2004,13 @@ def test_the_elect_issue_text(groups):
     kernel's one elect -- and the trip in one branch on it: D's slot, every
     block's waits, products and commits, B's releases and D's commit, each
     under that lane's predicate; the comment says so.  As the options leave
-    it, no elect."""
-    assert 'electOne' not in _kernel(8, 'sm_100a',
-                                     matrix_groups=groups).get_kernel()
-    src = _kernel(8, 'sm_100a', matrix_groups=groups,
-                  matrix_issue='elect').get_kernel()
+    it, no elect -- the input warp's copies each element's lane's, asked
+    for, where `auto` elects one of its lanes as well
+    (`tile_input_issue`)."""
+    assert 'electOne' not in _kernel(8, 'sm_100a', matrix_groups=groups,
+                                     matrix_input_issue='lane').get_kernel()
+    src = _kernel(8, 'sm_100a', matrix_groups=groups, matrix_issue='elect',
+                  matrix_input_issue='lane').get_kernel()
     assert src.count('tensorforge::electOne()') == 1
     head = re.search(r'bool (v\d+_elect) = tensorforge::electOne\(\);\s*'
                      r'if \(\1\) \{', src)
@@ -2121,10 +2128,10 @@ def test_the_input_issue_option_parses():
     from tensorforge.common.options import (parse_matrix_input_ahead,
                                             parse_matrix_input_issue,
                                             registry)
-    assert registry()['matrix_input_issue'].default == 'lane'
+    assert registry()['matrix_input_issue'].default == 'auto'
     assert registry()['matrix_input_ahead'].default == 'off'
-    assert [parse_matrix_input_issue(t) for t in ('lane', 'Elect')] == [
-        'lane', 'elect']
+    assert [parse_matrix_input_issue(t) for t in ('Auto', 'lane', 'Elect')] \
+        == ['auto', 'lane', 'elect']
     assert [parse_matrix_input_ahead(t) for t in ('off', 'L2')] == [
         'off', 'l2']
     for parse, text in ((parse_matrix_input_issue, 'warp'),
@@ -2136,9 +2143,15 @@ def test_the_input_issue_option_parses():
 @pytest.mark.parametrize('arch', ['sm_90a', 'sm_100a'])
 def test_the_input_issue_the_options_ask_for(arch):
     """`elect` on both engines' tiles -- tcgen05's input warp and wgmma's
-    producer copy I alike -- the comment saying so; `lane` as the options
-    leave it."""
-    assert _group(8, arch).section.tile.inputs == 'lane'
+    producer copy I alike -- the comment saying so; `lane` as asked; and
+    `auto`, as the options leave it, the elected lane on tcgen05, which a
+    GB200 measured faster at every order (J5), each element's lane on
+    wgmma, which no GH200 has measured -- at o6 and o8 alike."""
+    default = 'elect' if arch == 'sm_100a' else 'lane'
+    assert [_group(o, arch).section.tile.inputs for o in (6, 8)] == [
+        default, default]
+    assert _group(8, arch, matrix_input_issue='lane').section.tile.inputs \
+        == 'lane'
     group = _group(8, arch, matrix_input_issue='elect')
     assert group.section.tile.inputs == 'elect'
     notes = eg.tile_notes(group, me._context(
@@ -2158,7 +2171,8 @@ def test_the_input_issue_text(chunks):
     chunks' again each round: fourteen elements' nine columns a chunk,
     three chunks a trip, where each element's lane issues its own nine
     under its predicate; and the elected lane announces their bytes."""
-    lane = _kernel(8, 'sm_100a', matrix_input_chunks=chunks).get_kernel()
+    lane = _kernel(8, 'sm_100a', matrix_input_chunks=chunks,
+                   matrix_input_issue='lane').get_kernel()
     src = _kernel(8, 'sm_100a', matrix_input_chunks=chunks,
                   matrix_input_issue='elect').get_kernel()
     picks = re.findall(r'bool (v\d+_ie) = (v\d+_pw) && (v\d+_ie);', src)
@@ -2254,7 +2268,7 @@ def test_the_input_issue_on_the_oracle(arch, order, options):
     chunks and whole, the loop and written out, and with the next trip's I
     asked of L2 a trip ahead: against NumPy without a race, and bit for bit
     what each element's lane's copies give, none asked ahead."""
-    _, lane = _on_the_oracle(arch, order, 31, **{
+    _, lane = _on_the_oracle(arch, order, 31, matrix_input_issue='lane', **{
         k: v for k, v in options.items() if k != 'matrix_input_ahead'})
     gen, got = _on_the_oracle(arch, order, 31, matrix_input_issue='elect',
                               **options)
@@ -2405,7 +2419,8 @@ def test_the_input_issue_builds(chunks, tmp_path):
     (ELECT, R2UR.BROADCAST, BRA.U.ANY a copy); by the elected lane they are
     every element's written out -- fourteen elements' nine columns a round
     -- with none of that loop's ELECT or R2UR.BROADCAST, and no more than a
-    few bytes more spilled."""
+    few bytes more spilled; as the options leave it (`auto`), the elected
+    lane's."""
     def build(**more):
         sass, report = _ptxas('sm_100a', tmp_path, matrix_issue='elect',
                               tile_tables='constant',
@@ -2418,11 +2433,14 @@ def test_the_input_issue_builds(chunks, tmp_path):
         return (sum(bool(re.search(r'\bELECT\b', op)) for op in ops),
                 sum('R2UR.BROADCAST' in op for op in ops),
                 sum('UBLKCP' in op for op in ops), spill)
-    lane, elect = build(), build(matrix_input_issue='elect')
+    lane, elect = (build(matrix_input_issue='lane'),
+                   build(matrix_input_issue='elect'))
     rounds = 3 if chunks == 32 else 1
     assert elect[2] >= 14 * 9 * rounds > lane[2]
     assert elect[0] < lane[0] and elect[1] < lane[1]
     assert elect[3] <= lane[3] + 16
+    # `auto` on tcgen05: the elected lane's.
+    assert build() == elect
 
 
 #: The one ring's builds besides it (`test_one_ring_build`): the elected
@@ -2519,6 +2537,7 @@ GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                                       ('one-ec-s', {'matrix_wait': 'suspend'}),
                                       ('one-ec-t', {'matrix_wait': 'test'}))},
                 'ie': {'matrix_input_issue': 'elect'},
+                'il': {'matrix_input_issue': 'lane'},
                 'ie-whole': {'matrix_input_issue': 'elect',
                              'matrix_input_chunks': 'whole'},
                 'ahead': {'matrix_input_ahead': 'l2'},
@@ -2575,7 +2594,8 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
 @pytest.mark.parametrize('variant', ['', 'unrolled', 'red', 'bulk', 'box',
                                      'elect', 'constant', 'trip', 'trip-ec',
                                      'one', 'one-ec', 'one-ec-s', 'one-ec-t',
-                                     'ie', 'ie-whole', 'ahead', 'ie-ahead'])
+                                     'ie', 'ie-whole', 'ahead', 'ie-ahead',
+                                     'il'])
 @pytest.mark.parametrize('order', [6, 8])
 def test_many_trips_of_the_tile_on_the_gpu(order, variant, target, cache_root,
                                            tensorforge_include):

@@ -2284,15 +2284,21 @@ def tile_slots(engine: str, context) -> str:
 
 def input_issue_asked(context) -> str:
     """Which lane the options ask to issue the tile's bulk copies of I
-    (`Options.matrix_input_issue`): `lane` or `elect`."""
-    return getattr(context.get_user_options(), 'matrix_input_issue', 'lane')
+    (`Options.matrix_input_issue`): `auto`, `lane` or `elect`."""
+    return getattr(context.get_user_options(), 'matrix_input_issue', 'auto')
 
 
 def tile_input_issue(engine: str, context) -> str:
     """Which lane issues the tile's bulk copies of I on `engine`
     (`TileRows.inputs`): as the options ask, on both engines -- tcgen05's
-    input warp and wgmma's producer copy I alike."""
-    return input_issue_asked(context)
+    input warp and wgmma's producer copy I alike -- and for `auto` the
+    elected lane on tcgen05, which a GB200 measured faster at every order
+    (J5: o8 5.97 ns an element against each element's lane's 6.53), each
+    element's lane on wgmma, which no GH200 has measured."""
+    asked = input_issue_asked(context)
+    if asked == 'auto':
+        return 'elect' if engine == 'tcgen05' else 'lane'
+    return asked
 
 
 def input_ahead_asked(context) -> str:

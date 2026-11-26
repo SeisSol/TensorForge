@@ -7755,15 +7755,15 @@ GROUPS = {
         'test_the_input_ahead_text',
         'test_the_input_issue_on_the_oracle',
         )) + ' -n 6', [
-        ("the elected lane's copies by default",
-         sub(OPTIONS, "declare('matrix_input_issue',\n        default='lane',\n",
-             "declare('matrix_input_issue',\n        default='elect',\n", 1)),
+        ("each element's lane's copies by default",
+         sub(OPTIONS, "declare('matrix_input_issue',\n        default='auto',\n",
+             "declare('matrix_input_issue',\n        default='lane',\n", 1)),
         ("the input issue's parse taking any word",
          sub(OPTIONS, '  if value not in MATRIX_INPUT_ISSUES:\n',
              '  if False:\n', 1)),
         ("the elected lane's copies declined",
-         sub(ME_GROUP, '    return input_issue_asked(context)\n',
-             "    return 'lane'\n", 1)),
+         sub(ME_GROUP, "        return 'elect' if engine == 'tcgen05' else 'lane'\n    return asked\n",
+             "        return 'elect' if engine == 'tcgen05' else 'lane'\n    return 'lane'\n", 1)),
         ("wgmma's producer not taking the elected lane",
          sub(ME_GROUP, "                        inputs=tile_input_issue('wgmma', context),\n",
              "                        inputs='lane',\n", 1)),
@@ -7833,6 +7833,25 @@ GROUPS = {
         ("the elected lane's pointers held over the chunks' rounds",
          sub(ME_SECTION, '        once = issuers() if issue is None else None\n',
              '        once = issuers()\n', 1)),
+    ]),
+    # `auto`'s input issue (`element_group.tile_input_issue`, J5): the elected
+    # lane on tcgen05, each element's lane on wgmma.
+    'hiinputsauto': (' '.join(f'tests/test_hiorder_tile.py::{t}' for t in (
+        'test_the_input_issue_option_parses',
+        'test_the_input_issue_the_options_ask_for',
+        )) + ' -n 2', [
+        ("auto's copies each element's lane's on tcgen05",
+         sub(ME_GROUP, "        return 'elect' if engine == 'tcgen05' else 'lane'\n",
+             "        return 'lane'\n", 1)),
+        ("auto's copies the elected lane's on wgmma",
+         sub(ME_GROUP, "        return 'elect' if engine == 'tcgen05' else 'lane'\n",
+             "        return 'elect'\n", 1)),
+        ("auto passed on to the lowering as asked",
+         sub(ME_GROUP, "    if asked == 'auto':\n        return 'elect' if engine == 'tcgen05' else 'lane'\n",
+             "", 1)),
+        ("the options' issue unread",
+         sub(ME_GROUP, "    return getattr(context.get_user_options(), 'matrix_input_issue', 'auto')\n",
+             "    return 'auto'\n", 1)),
     ]),
     # tcgen05's `auto` taking I whole where its last chunk takes less than a
     # block of K and whole keeps the elements and the epilogue's form of I

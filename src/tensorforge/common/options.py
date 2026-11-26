@@ -419,11 +419,11 @@ def parse_matrix_slots(text: str) -> str:
 
 
 #: What `Options.matrix_input_issue` takes.
-MATRIX_INPUT_ISSUES = ('lane', 'elect')
+MATRIX_INPUT_ISSUES = ('auto', 'lane', 'elect')
 
 
 def parse_matrix_input_issue(text: str) -> str:
-  """`lane` or `elect` (`Options.matrix_input_issue`)."""
+  """`auto`, `lane` or `elect` (`Options.matrix_input_issue`)."""
   value = str(text).strip().lower()
   if value not in MATRIX_INPUT_ISSUES:
     raise ValueError(f'expected one of {MATRIX_INPUT_ISSUES}, got {text!r}')
@@ -3275,12 +3275,19 @@ declare('matrix_slots',
             'block guarded.  On wgmma declined.')
 
 declare('matrix_input_issue',
-        default='lane',
+        default='auto',
         env='TF_MATRIX_INPUT_ISSUE',
         parse=parse_matrix_input_issue,
         doc='Which lane of the high-order tile\'s input warp issues the bulk '
             'copies of I (`matrix_tile` `high`, `element_group.TileRows.'
-            'inputs`): `lane`, the default, each element\'s lane its own, '
+            'inputs`): `auto`, the default, the elected lane on tcgen05, which '
+            'a GB200 measured faster at every order (J5, Horizon 107520, ns an '
+            'element, I in chunks: o6 3.14 against each element\'s lane\'s '
+            '4.29, o8 5.97 against 6.53, o10 12.15 against 13.49, o12 32.62 '
+            'against 32.95; I whole at o6 2.37 against 3.05), each element\'s '
+            'lane on wgmma, which no GH200 has measured '
+            '(`element_group.tile_input_issue`); `lane`, each element\'s lane '
+            'its own, '
             'under its predicate -- the copy\'s addresses that lane\'s, which '
             'UBLKCP takes from uniform registers, so that ptxas wraps every '
             'copy in a loop over the lanes that might issue it (ELECT, '
