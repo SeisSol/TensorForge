@@ -440,6 +440,85 @@ def test_what_text_reads_escapes_and_what_it_writes_is_possible():
     assert not reach.certain
 
 
+def _versioned(t, guard=True):
+    """`if (blocks) {...} else {...}` as `BatchLoop._emit_versions` opens
+    it: the two arms of the element's check, which exclude each other."""
+    b = t.b
+    blocks = b.extern_value('blocks', BOOL, uniform=Uniformity.MULT,
+                            hint='blocks')
+    return b.if_else(blocks, [], attrs=(('guard', 'element_blocks'),)
+                     if guard else ())
+
+
+@pytest.mark.parametrize('guard', [True, False],
+                         ids=['element-blocks', 'any-other'])
+def test_the_arms_of_the_element_check_exclude_each_other(guard):
+    """A store in the block body is no store to a read of the fallback: the
+    read reads what was stored before the branch, for certain.  Under a
+    branch that says nothing of its arms the store stays one it may read."""
+    t = Body()
+    b = t.b
+    r = t.registers('r0')
+    b.store(r, 2.0, 0)
+    branch = _versioned(t, guard)
+    with branch.then():
+        b.store(r, 1.0, 0)
+        b.store(t.p, b.load(r, 0), t.lane)
+    with branch.otherwise():
+        b.store(t.p, b.load(r, 0), t.lane)
+    f = t.flow()
+    mine, other = _stmts(f, Op.LOAD, MemSpace.REGISTER)
+    (own,) = _reaches(f, mine)
+    assert own.certain and f.insts[own.writer].stmt.args[1] == 1.0
+    (reach,) = _reaches(f, other)
+    assert reach.certain is guard
+    first = _stmts(f, Op.STORE, MemSpace.REGISTER)[0]
+    assert f.insts[reach.writer].stmt is first
+
+
+def test_the_arms_exclude_each_other_one_run_at_a_time():
+    """The branch in a loop of two trips: the fallback's read on the second
+    trip may read what the block body stored on the first."""
+    t = Body()
+    b = t.b
+    r = t.registers('r0')
+    b.store(r, 2.0, 0)
+    with b.for_(0, 2, 1):
+        branch = _versioned(t)
+        with branch.then():
+            b.store(r, 1.0, 0)
+        with branch.otherwise():
+            b.store(t.p, b.load(r, 0), t.lane)
+    f = t.flow()
+    load, = _stmts(f, Op.LOAD, MemSpace.REGISTER)
+    first, second = ([r for r in f.reach[n]] for n in f.executions(load))
+    assert [r.certain for r in first] == [True]
+    assert not any(r.certain for r in second)
+
+
+def test_a_loop_that_runs_again_hands_the_other_arm_on():
+    """A batch loop around the branch: what the block body stored on one
+    run is what the fallback's read may find on the next."""
+    t = Body()
+    b = t.b
+    r = t.registers('r0')
+    b.store(r, 2.0, 0)
+    n = b.extern_value('numElements', SIZE, uniform=Uniformity.GRID, hint='n')
+    with b.for_(0, n, 1):
+        branch = _versioned(t)
+        with branch.then():
+            b.store(r, 1.0, 0)
+        with branch.otherwise():
+            b.store(t.p, b.load(r, 0), t.lane)
+    f = t.flow()
+    load, = _stmts(f, Op.LOAD, MemSpace.REGISTER)
+    (reach,) = _reaches(f, load)
+    assert not reach.certain
+    late = [s for s in _stmts(f, Op.STORE, MemSpace.REGISTER)
+            if s.args[1] == 1.0][0]
+    assert any(f.insts[w].stmt is late for w in reach.maybe)
+
+
 def test_a_store_knows_what_it_replaced():
     """A store's record of what the element held right before it."""
     t = Body()

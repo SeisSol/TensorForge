@@ -1167,7 +1167,7 @@ class BatchLoop(AbstractInstruction):
         accumulations would read memory back.  None where the option is off,
         the target has no blocks, the body is text, or no transfer takes a
         block: then the body is what it always was."""
-        if (not element_blocks.asked(self._context)
+        if (not element_blocks.wanted(self._context)
                 or element_blocks.target_refusal(self._context) is not None
                 or not hasattr(writer, 'if_else')
                 or not hasattr(writer, 'rawexpr')):
@@ -1220,6 +1220,22 @@ class BatchLoop(AbstractInstruction):
                 surfaces[symbol.name] = surface
         if not chosen:
             return None
+        if element_blocks.auto(self._context):
+            # `auto`: the blocks where pvcport J6b's timings say they pay
+            # (`element_blocks.auto_refusal`), the body as it was elsewhere.
+            def first_row(instr, kind):
+                if kind == 'store':
+                    return (instr._src.data_view.get_bbox().lower()[0]
+                            + instr._dest_offset[0])
+                return instr._bbox.lower()[0] + instr._offset[0]
+            why = element_blocks.auto_refusal(
+                self._context,
+                [(kind, symbol.name, first_row(instr, kind))
+                 for instr, symbol, kind, _ in seen
+                 if symbol.name in bound],
+                surfaces)
+            if why is not None:
+                return None
         if getattr(self._context.get_user_options(),
                    'sycl_element_streaming', False):
             # Through IGC's cache-opts forms: refused, naming the reason,

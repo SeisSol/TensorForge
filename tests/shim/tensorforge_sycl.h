@@ -231,6 +231,16 @@ template <typename G, typename T> T permute_group_by_xor(G, T x, std::size_t) {
   return x;
 }
 
+// A value from the lane `delta` above or below: what an element's last slot
+// read or written as the block ending with its column is rotated with
+// (`element_blocks.overlap_shift`).
+template <typename G, typename T> T shift_group_left(G, T x, std::size_t = 1) {
+  return x;
+}
+template <typename G, typename T> T shift_group_right(G, T x, std::size_t = 1) {
+  return x;
+}
+
 template <typename G> void group_barrier(G) {}
 
 // -- math ------------------------------------------------------------------

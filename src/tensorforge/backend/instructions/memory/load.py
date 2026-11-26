@@ -1345,7 +1345,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     sixteen lanes a slot, its rows on the lanes -- the multiplication's, one
     element a sub-group -- one element a lane, its columns in registers,
     with at least one slot inside the operand's columns."""
-    if (self._linearize or not element_blocks.asked(self._context)
+    if (self._linearize or not element_blocks.wanted(self._context)
         or element_blocks.target_refusal(self._context) is not None):
       return None
     found = element_blocks.surface(self._src)
@@ -1365,7 +1365,9 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     first = self._offset[0]
     span = element_blocks.LANES
     slots = range(lo // span, -(-hi // span))
-    if not any(element_blocks.slots_inside(found, first, s) for s in slots):
+    if not any(element_blocks.slots_inside(found, first, s)
+               or element_blocks.overlap_shift(found, first, s) is not None
+               for s in slots):
       return None
     if not (0 <= bbox.lower()[1] + self._offset[1]
             and bbox.upper()[1] + self._offset[1] <= found.columns):
@@ -1388,10 +1390,29 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     tail's `valid` or before a head's `first` get the zero the predicated
     read gives them (`Symbol._valid_access`).
 
+    A slot whose 16 rows leave the operand's columns -- the last of a
+    leading dimension that is no multiple of 16 -- is read as the block
+    that ends with the column, 16 rows inside it, and each column's value
+    rotated down the sub-group by the rows it starts before the slot
+    (`element_blocks.overlap_shift`, `Lexic.sub_group_shift`): two messages
+    and nine rotations for SeisSol's rows 48-55 of 56, where today's reads
+    took nine.  The lanes the rotation leaves past the column are padding,
+    and the guard of today's read zeroes them as before.
+
+    A value the read holds to its lanes by a select (`_fresh_window`'s
+    form, `Options.unguard_window_loads`) selects over an element read
+    into a variable first, on every lane: spelled inline, `g ? (v_eblk[3])
+    : 0.0f`, the element is a call the front end makes in the select's
+    true arm alone, and the select a branch -- the guarded register write
+    the option exists to avoid, which IGC 2.41.5 computes wrong.  pvcport
+    J8: the bench layout's order-7 neighbor flux lost two terms of one
+    cell in every element under two of its block forms, the ninth
+    column's chain of the last slot, sunk into that branch, reading its
+    broadcasts out of a register the other arm had zeroed.
+
     False, and nothing built, where the bound buffer is not in this body."""
     from tensorforge.backend.pir import block_reads
     from tensorforge.backend.pir.core import ScalarType
-    from tensorforge.backend.symbol import LeadIndex
     base = self._src.pir_buffer(writer)
     if base is None or not hasattr(writer, 'lane_index'):
       return False
@@ -1408,18 +1429,28 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
           width=found.pitch, height=found.columns, pitch=found.pitch,
           element=True, hint='eblk') for q, rows in pieces]
 
-    def column(blocks, q):
+    def column(blocks, q, materialize=False):
       for (start, rows), block in zip(pieces, blocks):
         if start <= q < start + rows:
-          return block if rows == 1 else writer.extract(block, q - start)
+          return block if rows == 1 else writer.extract(
+              block, q - start, materialize=materialize)
       raise ValueError(q)
 
     start, end = lead.start, lead.end
     loop_lo, loop_hi = -(-start // span), end // span
     static = sorted(set(range(start // span, -(-end // span)))
                     - (set() if lead.unroll else set(range(loop_lo, loop_hi))))
-    up_front = {s: read(s * span + first_row) for s in static
-                if element_blocks.slots_inside(found, first_row, s)}
+    up_front = {}
+    rotate = {}
+    lexic = self._context.target.lexic
+    for s in static:
+      if element_blocks.slots_inside(found, first_row, s):
+        up_front[s] = read(s * span + first_row)
+        continue
+      shift = element_blocks.overlap_shift(found, first_row, s)
+      if shift is not None and lexic.sub_group_shift('{0}', shift) is not None:
+        up_front[s] = read(found.rows - span)
+        rotate[s] = shift
     in_loop = (loop_lo < loop_hi and not lead.unroll
                and element_blocks.slots_inside(found, first_row, loop_lo)
                and element_blocks.slots_inside(found, first_row,
@@ -1442,15 +1473,26 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         cols_loop.write(self._context, writer, lambda w: inner(v + w))
         return
 
+      shift = rotate.get(int(slot)) if isinstance(
+          slot, (int, np.integer)) else None
+
       def at(w):
         indices = v + w
-        value = column(blocks, int(w[0]._value))
         held = self._src._valid_access(writer,
                                        [add_offset(x, self._offset[i])
                                         for i, x in enumerate(indices)],
                                        getattr(index, 'valid', None),
                                        first=getattr(index, 'first', 0) or 0,
                                        read=True).get('predicate')
+        # Held by a select, the element in a variable of its own: inline,
+        # the front end reads it in the select's true arm alone, a branch
+        # (the docstring).  A rotation's operand is a call's argument.
+        value = column(blocks, int(w[0]._value),
+                       materialize=held is not None and not shift)
+        if shift:
+          value = writer.rawexpr(lexic.sub_group_shift('{0}', shift), value,
+                                 type_=ScalarType(elem), hint='erot',
+                                 pure=True, crosslane=True)
         if held is not None:
           value = writer.op('select', ScalarType(elem), held, value,
                             writer.const(0), hint='edata')

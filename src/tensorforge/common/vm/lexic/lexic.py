@@ -235,6 +235,14 @@ class Lexic(ABC):
     None where there is no such hint."""
     return None
 
+  def sub_group_shift(self, variable, delta: int, down: bool = True):
+    """`variable` of the lane `delta` lanes above this one (`down`) or below
+    it, as an expression of the sub-group -- the rotation that puts a block
+    of an element's last rows where the register image wants them
+    (`element_blocks.overlap_shift`).  What the lanes past the edge get is
+    unstated.  None where there is no such exchange."""
+    return None
+
   def element_blocks_check(self, pitch: int, base: str):
     """Whether the element at `base`, its columns `pitch` bytes apart, has
     a surface 2D block messages can address, as an expression of the

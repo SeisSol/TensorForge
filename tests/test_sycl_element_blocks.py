@@ -17,6 +17,7 @@ the text the generator writes; what the device computes is held by tfemu
 """
 
 import contextlib
+import functools
 import io
 import re
 import warnings
@@ -54,12 +55,49 @@ def _kernel(name='gpu_volume', order=6, precision='s', backend='oneapi',
         'elastic-linearck', f'elastic-linearck-o{order}-{precision}',
         name))[0]
     fp = Datatype.F64 if precision == 'd' else Datatype.F32
+    return _generate(descrs, backend=backend, fp=fp, **options).get_kernel()
+
+
+@functools.lru_cache(maxsize=None)
+def _cached(name, order, pvc, items):
+    """`_kernel` once for each kernel and options, on the suite's layout or
+    SeisSol's PVC one (`_pvc`)."""
+    options = dict(items)
+    if not pvc:
+        return _kernel(name, order, **options)
+    return _text(_pvc(suite.description(
+        'elastic-linearck', f'elastic-linearck-o{order}-s', name)), **options)
+
+
+def _once(name='gpu_volume', order=6, pvc=False, **options):
+    return _cached(name, order, pvc, tuple(sorted(options.items())))
+
+
+def _pvc(desc):
+    """SeisSol's own layout on PVC: an element's I and Q in columns of 56
+    rows, yateto's padding to 32 bytes, where the suite's is NVIDIA's 64 --
+    3.5 lane slots a column, the last one past the column's end."""
+    for tensor in desc['tensors']:
+        storage = tensor['storage']
+        if tensor['addressing'] == 'n&+o&' and storage.get('shape') == [64, 9]:
+            storage['shape'] = [56, 9]
+            storage['sizes'] = [min(storage['sizes'][0], 56), 9]
+            tensor['alignment'] = 32
+    return desc
+
+
+def _text(desc, **options):
+    descrs = DescriptionReader(None, {}).read(desc)[0]
+    return _generate(descrs, **options).get_kernel()
+
+
+def _generate(descrs, backend='oneapi', fp=Datatype.F32, **options):
     gen = Generator(descrs, Context(arch='pvc', backend=backend, fp_type=fp,
                                     options=Options(**options)))
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter('ignore')
         gen.generate()
-    return gen.get_kernel()
+    return gen
 
 
 def _norm(text):
@@ -77,6 +115,18 @@ CHECK = re.compile(r'bool (\w+) = tensorforge::elementBlocks<(\d+)>\('
                    r'item\.get_sub_group\(\), (glb_m\d+)\);')
 
 
+def _block(text, at):
+    """`(start, end)` of the text inside the braces that open at or after
+    `at`."""
+    head = re.compile(r'\{\n').search(text, at)
+    depth, k = 1, head.end()
+    while depth:
+        brace = re.compile(r'[{}]').search(text, k)
+        depth += 1 if brace.group(0) == '{' else -1
+        k = brace.end()
+    return head.end(), k - 1
+
+
 def _bodies(text):
     """`[(then, else)]`: for every element body the check versions, the two
     bodies it chooses between, as text -- read off the braces after the `if`
@@ -84,13 +134,7 @@ def _bodies(text):
     out = []
 
     def block(at):
-        head = re.compile(r'\{\n').search(text, at)
-        depth, k = 1, head.end()
-        while depth:
-            brace = re.compile(r'[{}]').search(text, k)
-            depth += 1 if brace.group(0) == '{' else -1
-            k = brace.end()
-        return head.end(), k - 1
+        return _block(text, at)
 
     at = 0
     while True:
@@ -119,13 +163,198 @@ def _bodies(text):
 # -- off --------------------------------------------------------------------- #
 
 @pytest.mark.parametrize('dpas', [False, True], ids=['fma', 'dpas'])
-def test_off_and_auto_change_nothing(dpas):
-    """The option off, and `auto` until the blocks are measured, write the
-    kernel they always wrote."""
-    plain = _norm(_kernel(sycl_dpas=dpas))
+def test_off_changes_nothing(dpas):
+    """The option off writes the kernel it always wrote."""
+    plain = _norm(_once(sycl_dpas=dpas))
     assert _norm(_kernel(sycl_dpas=dpas, sycl_element_blocks=False)) == plain
-    assert _norm(_kernel(sycl_dpas=dpas, sycl_element_blocks='auto')) == plain
     assert 'elementBlock' not in plain
+
+
+# -- auto -------------------------------------------------------------------- #
+
+def test_auto_under_fma_changes_nothing():
+    """Under FMA the blocks lost localFluxAll (pvcport J6b): `auto` writes
+    the kernel the option off writes."""
+    assert (_norm(_once(sycl_element_blocks='auto'))
+            == _norm(_once(sycl_dpas=False)))
+
+
+@pytest.mark.parametrize('name,order', [
+    ('gpu_volume', 6), ('gpu_localFluxAll', 6), ('gpu_volume', 7),
+], ids=['volume-6', 'lfa-6', 'volume-7'])
+def test_auto_takes_the_blocks_where_they_paid(name, order):
+    """Under DPAS the volume -- its Q accumulated three times, from row 1 --
+    and localFluxAll at order 6, and the volume at order 7, six slots a
+    column, where pvcport J7 found it 6-10 % faster: the kernel `True`
+    writes."""
+    assert (_norm(_once(name, order, sycl_dpas=True,
+                        sycl_element_blocks='auto'))
+            == _norm(_once(name, order, sycl_dpas=True, **ON)))
+
+
+@pytest.mark.parametrize('name,order', [
+    ('gpu_neighboringFlux[0]', 6), ('gpu_localFluxAll', 8),
+], ids=['nf-6', 'lfa-8'])
+def test_auto_keeps_where_the_blocks_lost(name, order):
+    """The neighbor flux, which writes its Q once, and localFluxAll at
+    order 8, eight slots a column -- both behind with the blocks in J7 --
+    get the kernel the option off writes."""
+    assert (_norm(_once(name, order, sycl_dpas=True,
+                        sycl_element_blocks='auto'))
+            == _norm(_once(name, order, sycl_dpas=True)))
+
+
+def test_auto_keeps_the_derivative_as_it_was():
+    """The derivative reads each derivative it wrote back for the next and
+    for the integral: `auto` writes the kernel the option off writes."""
+    assert (_norm(_once('gpu_derivative', sycl_dpas=True,
+                        sycl_element_blocks='auto'))
+            == _norm(_once('gpu_derivative', sycl_dpas=True)))
+
+
+def test_auto_keeps_a_derivative_cut_in_two_as_it_was():
+    """The derivative cut into two sections (`fission=2`): the section after
+    the cut reads back derivatives the one before stored, a load of nothing
+    it stored itself -- the chain is asked of the kernel's operations
+    (`element_blocks.chain_refusal`), and `auto` writes the kernel the
+    option off writes, both sections."""
+    cut = _once('gpu_derivative', sycl_dpas=True, sycl_element_blocks='auto',
+                fission=2)
+    assert len(re.findall(r'for \(size_t v\d+_batchId0', cut)) == 2
+    assert _norm(cut) == _norm(_once('gpu_derivative', sycl_dpas=True,
+                                     fission=2))
+
+
+@pytest.mark.parametrize('name,why', [
+    ('gpu_volume', None), ('gpu_localFluxAll', None),
+    ('gpu_neighboringFlux[0]', None),
+    ('gpu_derivative', 'dQ(1) read back for I'),
+])
+def test_the_chain_is_asked_of_the_kernel(name, why):
+    """A tensor of the element's own that one operation writes and a later
+    one reads to write another: the derivative's first derivative, read
+    for the integral.  The volume's temporaries are no such tensor, nor is
+    an accumulator its own operation's destination."""
+    assert eb.chain_refusal(_descrs(name)) == why
+
+
+def _transfers(*spec):
+    """`'l m0 0'`: a load (`l`) or store (`s`) of `glb_m0` from row 0."""
+    out = []
+    for word in spec:
+        kind, name, row = word.split()
+        out.append(({'l': 'load', 's': 'store'}[kind], 'glb_' + name,
+                    int(row)))
+    return out
+
+
+#: The volume's transfers, as `BatchLoop._element_plan` hands them on: I
+#: (m0) and a star matrix read, Q (m2) from row 1 read and written back, a
+#: product at a time.
+VOLUME = ('l m0 0', 'l m1 0', 'l m2 1', 's m2 1', 'l m0 0', 'l m3 0',
+          'l m2 1', 's m2 1')
+#: localFluxAll's: Q from row 0.
+LFA = ('l m0 0', 'l m1 0', 'l m2 0', 's m2 0', 'l m0 0', 'l m3 0', 'l m2 0',
+       's m2 0')
+#: The neighbor flux's: I and the flux matrix read, Q read and written once.
+NF = ('l m0 0', 'l m1 0', 'l m2 0', 's m2 0')
+#: The derivative's first two: Q (m1) into the integral (m0) and the first
+#: derivative (m5), which is read back to be added to the integral.
+DERIVATIVE = ('l m1 0', 's m0 0', 'l m1 0', 'l m4 0', 's m5 0', 'l m1 0',
+              'l m6 0', 'l m5 0', 's m5 0', 'l m5 0', 'l m0 0', 's m0 0')
+ONCE = 'no element operand written more than once'
+
+
+@pytest.mark.parametrize('transfers,rows,why', [
+    (VOLUME, 56, None), (VOLUME, 64, None), (VOLUME, 96, None),
+    (VOLUME, 120, 'glb_m0: 8 lane slots a column'),
+    (LFA, 88, None), (LFA, 120, 'glb_m0: 8 lane slots a column'),
+    (NF, 56, ONCE), (('s m2 1',), 56, ONCE),
+    (('s m2 0', 'l m2 0', 's m2 0'), 64, None),
+    (DERIVATIVE, 64, 'glb_m5 read back for glb_m0'),
+], ids=['volume-56', 'volume-64', 'volume-96', 'volume-120', 'lfa-88',
+        'lfa-120', 'nf', 'written-once', 'into-itself', 'derivative'])
+def test_the_auto_rule(transfers, rows, why):
+    """J7's rule on the transfers alone: an accumulation is no chain, an
+    operand the body wrote read back for another one's product is the
+    derivative's chain; at most six slots a column, whichever operand; and
+    some operand written more than once."""
+    ctx = SimpleNamespace(get_user_options=lambda: SimpleNamespace(
+        sycl_dpas=True))
+    surfaces = {n: eb.Surface(4 * rows, 9, rows) for n in ('glb_m0',
+                                                           'glb_m2')}
+    assert eb.auto_refusal(ctx, _transfers(*transfers), surfaces) == why
+
+
+@pytest.mark.parametrize('value,asked,auto', [
+    (False, False, False), (True, True, False), ('auto', False, True),
+])
+def test_on_and_auto_are_told_apart(value, asked, auto):
+    """`True` asks for the blocks outright, `auto` leaves them to the rule
+    (`auto_refusal`): both may take blocks, and only `True` offers the
+    next element's 2D prefetch (`Options.sycl_element_prefetch`)."""
+    ctx = SimpleNamespace(get_user_options=lambda: SimpleNamespace(
+        sycl_element_blocks=value))
+    assert eb.asked(ctx) is asked and eb.auto(ctx) is auto
+    assert eb.wanted(ctx) is (asked or auto)
+
+
+@pytest.mark.parametrize('options,why', [
+    (dict(), None), (dict(backend='esimd'), 'not SPMD SYCL under oneAPI'),
+    (dict(backend='acpp'), 'not SPMD SYCL under oneAPI'),
+    (dict(fp=Datatype.F64), 'not single precision'),
+    (dict(arch='sm_90', backend='cuda'), 'not SYCL'),
+], ids=['oneapi', 'esimd', 'acpp', 'f64', 'cuda'])
+def test_the_targets_with_blocks(options, why):
+    """SPMD SYCL under oneAPI on Intel, its sub-group of 16 stated, F32:
+    the explicit vector has a backend of its own, and so has AdaptiveCpp."""
+    arch = options.pop('arch', 'pvc')
+    fp = options.pop('fp', Datatype.F32)
+    ctx = Context(arch=arch, backend=options.pop('backend', 'oneapi'),
+                  fp_type=fp, options=Options(**ON))
+    answer = eb.target_refusal(ctx)
+    assert (answer is None) if why is None else (why in (answer or '')), answer
+
+
+def test_the_auto_rule_wants_dpas():
+    ctx = SimpleNamespace(get_user_options=lambda: SimpleNamespace(
+        sycl_dpas=False))
+    assert eb.auto_refusal(ctx, _transfers(*LFA), {}) == 'not the DPAS path'
+
+
+#: localFluxAll's four writes of Q and the volume's three, in the shape the
+#: transfers above have.
+LFA4 = LFA + LFA
+VOLUME3 = VOLUME + ('l m0 0', 'l m4 0', 'l m2 1', 's m2 1')
+
+
+@pytest.mark.parametrize('transfers,block2d,why', [
+    (LFA4, True, 'glb_m2 written 4 times under sycl_dpas_block2d'),
+    (LFA4, 'auto', 'glb_m2 written 4 times under sycl_dpas_block2d'),
+    (LFA4, False, None), (VOLUME3, True, None),
+], ids=['lfa-block2d', 'lfa-block2d-auto', 'lfa-tiles', 'volume-block2d'])
+def test_the_auto_rule_under_the_operator_blocks(transfers, block2d, why):
+    """Rule 6: under the operators' 2D blocks no element operand written
+    more than three times -- localFluxAll's four lost with the blocks there
+    at every order pvcport J9 timed, the volume's three paid; `auto` block2d
+    counts as on.  Without them the four take the blocks as before."""
+    ctx = SimpleNamespace(get_user_options=lambda: SimpleNamespace(
+        sycl_dpas=True, sycl_dpas_block2d=block2d))
+    surfaces = {n: eb.Surface(4 * 56, 9, 56) for n in ('glb_m0', 'glb_m2')}
+    assert eb.auto_refusal(ctx, _transfers(*transfers), surfaces) == why
+
+
+@pytest.mark.parametrize('name,blocks', [
+    ('gpu_volume', True), ('gpu_localFluxAll', False),
+], ids=['volume-6', 'lfa-6'])
+def test_auto_under_the_operator_blocks(name, blocks):
+    """Under dpbt32 (`sycl_dpas_block2d`, 32 threads a core) at order 6:
+    the volume takes the blocks, the kernel `True` writes; localFluxAll, its
+    Q written four times, keeps the kernel the option off writes."""
+    base = dict(sycl_dpas=True, sycl_dpas_block2d=True, sycl_core_threads=32)
+    want = _once(name, 6, **base, **ON) if blocks else _once(name, 6, **base)
+    assert (_norm(_once(name, 6, sycl_element_blocks='auto', **base))
+            == _norm(want))
 
 
 @pytest.mark.parametrize('options', [
@@ -145,7 +374,7 @@ def test_no_blocks_where_the_target_has_none(options):
 def test_the_body_is_built_twice_behind_the_check(dpas):
     """One check an operand, the element's pointer at the surface's pitch;
     the blocks only behind it, and behind its failure today's body."""
-    kernel = _kernel(sycl_dpas=dpas, **ON)
+    kernel = _once(sycl_dpas=dpas, **ON)
     checks = {(m.group(3), int(m.group(2))) for m in CHECK.finditer(kernel)}
     assert checks == {('glb_m0', 256), ('glb_m2', 256)}
     (then, otherwise), = _bodies(kernel)
@@ -153,27 +382,70 @@ def test_the_body_is_built_twice_behind_the_check(dpas):
     assert 'elementBlock' not in otherwise
 
 
-def test_the_fallback_is_todays_transfers():
-    """Behind the check's failure today's transfers, in today's order and
-    lane by lane.  Not today's text: the pseudo-IR takes a read from what
-    the lane stored only where the store is certain to it (`pir.flow`), and
-    a store of the block body is possible to a read of the fallback -- so
-    the fallback keeps reads and writes today's body forwards, which cost
-    the cold path time and nothing of what it computes."""
-    transfers = re.compile(r'// (r\d+ = load\{g>r\}\(glb_m\d+\)|glb_m\d+ = '
-                           r'store\{r>g\}\(r\d+\));')
-    (then, otherwise), = _bodies(_kernel(sycl_dpas=True, **ON))
-    today = _kernel(sycl_dpas=True)
-    assert transfers.findall(otherwise) == transfers.findall(today)
-    assert transfers.findall(then) == transfers.findall(today)
+def _element_body(text):
+    """Today's element body: what the block of the element's bindings holds
+    after them."""
+    first = re.search(r'glb_m\d+ = &m\d+\[v\d+_batchId', text)
+    start = text.rindex('{\n', 0, first.start())
+    start, end = _block(text, start)
+    return '\n'.join(line for line in text[start:end].split('\n')
+                     if not re.search(r'= &m\d+\[v\d+_batchId', line))
+
+
+def _same_text(text):
+    """A body's lines but for the names the IR numbers and the comments."""
+    text = re.sub(r'\bv\d+_', 'v_', text)
+    text = re.sub(r'\b(i?r)\d+\b', r'\1', text)
+    return [line.strip() for line in text.split('\n')
+            if line.strip() and not line.strip().startswith('//')]
+
+
+@pytest.mark.parametrize('name', ['gpu_volume', 'gpu_derivative'])
+def test_the_fallback_is_todays_body(name):
+    """Behind the check's failure today's body, the text it always was but
+    for the names the IR numbers: the two arms exclude each other, so a
+    store of the block body is no store to a read of the fallback
+    (`pir.flow`), which forwards what today's body forwards -- pvcport J6b's
+    fallback, without it, kept reads today's body does not make and ran up
+    to 25 % slower, the derivative 69 %."""
+    bodies = _bodies(_once(name, sycl_dpas=True, **ON))
+    assert len(bodies) == 1
+    (_, otherwise), = bodies
+    assert (_same_text(otherwise)
+            == _same_text(_element_body(_once(name, sycl_dpas=True))))
     assert 'elementBlock' not in otherwise
+
+
+def test_the_two_bodies_weigh_as_the_larger():
+    """The code fission and the instruction cache weigh counts the arm an
+    element runs, not both (`Emitter._one_arm_of_two`): the volume's
+    versioned body about today's, not twice it."""
+    plain = _generate(_descrs('gpu_volume'), sycl_dpas=True).metrics
+    both = _generate(_descrs('gpu_volume'), sycl_dpas=True, **ON).metrics
+    assert plain.code_units <= both.code_units < 1.05 * plain.code_units
+    assert (plain.written_code_units <= both.written_code_units
+            < 1.05 * plain.written_code_units)
+
+
+def test_the_two_bodies_split_no_kernel_today_s_does_not():
+    """The order-6 derivative stays one section with the blocks, as without
+    -- J6b's two bodies cut it in two, and it lost for that."""
+    loops = re.compile(r'for \(size_t v\d+_batchId0')
+    assert len(loops.findall(_once('gpu_derivative', sycl_dpas=True,
+                                   **ON))) == 1
+    assert len(loops.findall(_once('gpu_derivative', sycl_dpas=True))) == 1
+
+
+def _descrs(name, order=6):
+    return DescriptionReader(None, {}).read(suite.description(
+        'elastic-linearck', f'elastic-linearck-o{order}-s', name))[0]
 
 
 @pytest.mark.parametrize('dpas', [False, True], ids=['fma', 'dpas'])
 def test_a_block_is_a_slot_of_nine_columns(dpas):
     """Eight columns a message and the ninth one of its own, the element's
     columns 256 bytes apart: the order-6 volume's I and Q."""
-    (then, _), = _bodies(_kernel(sycl_dpas=dpas, **ON))
+    (then, _), = _bodies(_once(sycl_dpas=dpas, **ON))
     shapes = {(int(r), int(p), int(c)) for r, p, c, _ in READ.findall(then)}
     assert shapes == {(8, 256, 9), (1, 256, 9)}
     assert {op for *_, op in READ.findall(then)} == {'glb_m0', 'glb_m2'}
@@ -182,7 +454,7 @@ def test_a_block_is_a_slot_of_nine_columns(dpas):
 def test_the_nine_by_nine_matrices_keep_their_reads():
     """A star matrix's column is 36 bytes: no surface (the messages want 64
     and a whole number of 16)."""
-    kernel = _kernel(sycl_dpas=True, **ON)
+    kernel = _once(sycl_dpas=True, **ON)
     for name in ('glb_m1', 'glb_m3', 'glb_m4'):
         assert not re.search(r'elementBlock2d<[^>]*>\(item\.get_sub_group\(\), '
                              + name + ',', kernel)
@@ -192,10 +464,44 @@ def test_a_guarded_slot_of_an_accumulation_keeps_its_lanes():
     """Q's final write: the slots whose every lane the store writes go by
     blocks, the ragged ones of the accumulation -- row 0 and the rows past
     53 -- lane by lane, under their guards."""
-    (then, _), = _bodies(_kernel(sycl_dpas=True, **ON))
+    (then, _), = _bodies(_once(sycl_dpas=True, **ON))
     tail = then[then.rindex('glb_m2 = store{r>g}'):]
     assert WRITE.search(tail)
     assert re.search(r'if \(v\d+_g\) \{\s*glb_m2\[', tail)
+
+
+@pytest.mark.parametrize('form', [{}, dict(element_base_align=64),
+                                  dict(sycl_dpas_block2d=True,
+                                       sycl_core_threads=32)],
+                         ids=['dpeb', 'dpebp', 'dpbt32eb'])
+def test_a_held_element_of_a_block_is_read_before_its_select(form):
+    """IGC 2.41.5's form (`Options.unguard_window_loads`): the last slot of
+    the order-7 I and Q, rows 80-83 of 96, read by its block and held to its
+    lanes by a select over the element in a variable of its own, never over
+    `v_eblk[3]` inline -- the front end reads an inline element in the
+    select's true arm alone, and the select is the guarded write the option
+    is there to avoid (`GlbToRegLoader._block_loops`).  pvcport J8: the
+    neighbor flux on the bench layout wrong in one cell of every element
+    under IGC 2.41.5, the ninth column's chain sunk into that branch."""
+    kernel = _once('gpu_neighboringFlux[0]', 7, sycl_dpas=True,
+                   unguard_window_loads=True, **form, **ON)
+    assert not re.search(r'\? \(v\d+_eblk\[\d+\]\)', kernel)
+    named = re.findall(r'float (v\d+_el) = v\d+_eblk\[\d+\];', kernel)
+    # I's and Q's, eight columns each: the ninth is a block of its own, a
+    # float; the fallback body reads as today.
+    assert len(named) == 2 * 8
+    for name in named:
+        assert re.search(r'= \(v\d+_g \? ' + name + r' : 0\.0f\);', kernel)
+
+
+def test_without_the_held_form_the_element_keeps_its_guard():
+    """Another IGC than 2.41.5: the slot's elements written under the
+    lane guard as before, nothing named."""
+    kernel = _once('gpu_neighboringFlux[0]', 7, sycl_dpas=True,
+                   unguard_window_loads=False, element_base_align=64, **ON)
+    assert not re.search(r'float v\d+_el = v\d+_eblk\[', kernel)
+    assert re.search(r'if \(v\d+_g\) \{\s*r\d+\[\d+\] = \(v\d+_eblk\[0\]\);',
+                     kernel)
 
 
 def test_a_read_after_a_write_stays_a_read_the_ir_forwards():
@@ -203,7 +509,7 @@ def test_a_read_after_a_write_stays_a_read_the_ir_forwards():
     stay per lane, for `pir.forward` to take from the registers, and so do
     the writes a read follows -- in each of its bodies, no read of an
     operand after its first block write, and no block read after a write."""
-    bodies = _bodies(_kernel('gpu_derivative', sycl_dpas=True, **ON))
+    bodies = _bodies(_once('gpu_derivative', sycl_dpas=True, **ON))
     for then, _ in bodies:
         for op in {o for *_, o in WRITE.findall(then)}:
             first = next(m for m in WRITE.finditer(then) if m.group(4) == op)
@@ -217,22 +523,130 @@ def test_a_read_after_a_write_stays_a_read_the_ir_forwards():
     assert any(WRITE.search(t) for t, _ in bodies)
 
 
+def test_a_transfer_inside_a_region_keeps_its_lanes():
+    """The volume's last product under a guard of the element's own (a
+    `GuardedRegion`): its transfers -- Q's last write among them -- stay
+    lane by lane; the blocks take only the body's own transfers."""
+    from tensorforge.common.basic_types import Addressing
+    from tensorforge.common.matrix.boundingbox import BoundingBox
+    from tensorforge.common.matrix.tensor import SubTensor, Tensor
+    from tensorforge.generators.descriptions import GuardLiteral
+    descrs = _descrs('gpu_volume')
+    flag = SubTensor(Tensor([1], Addressing.PTR_BASED, BoundingBox([0], [1]),
+                            alias='c', datatype=Datatype.BOOL))
+    descrs[-1].condition = [GuardLiteral(flag)]
+    kernel = _generate(descrs, sycl_dpas=True, **ON).get_kernel()
+    (then, _), = _bodies(kernel)
+    guard = re.search(r'bool (v\d+_data) = glb_m\d+\[0\];\s*if \(\1\) ',
+                      then)
+    start, end = _block(then, guard.end())
+    assert READ.search(then[:guard.start()])
+    assert 'glb_m2 = store{r>g}' in then[start:end]
+    assert 'elementBlock' not in then[start:end]
+
+
 def test_a_promise_takes_the_check_away():
     """`element_base_align` at the surfaces' grain or above: blocks in the
     one body, no check; below it the check stays."""
-    kernel = _kernel(sycl_dpas=True, element_base_align=64, **ON)
+    kernel = _once(sycl_dpas=True, element_base_align=64, **ON)
     assert READ.search(kernel) and not CHECK.search(kernel)
-    assert CHECK.search(_kernel(sycl_dpas=True, element_base_align=32, **ON))
+    assert CHECK.search(_once(sycl_dpas=True, element_base_align=32, **ON))
 
 
 def test_the_kernels_parse():
     from harness import syntax
     if syntax.compiler() is None:
         pytest.skip('no host C++ compiler')
-    for name in ('gpu_volume', 'gpu_derivative'):
-        result = syntax.check_source(_kernel(name, sycl_dpas=True, **ON),
+    for name, pvc in (('gpu_volume', False), ('gpu_derivative', False),
+                      ('gpu_volume', True), ('gpu_neighboringFlux[0]', True)):
+        result = syntax.check_source(_once(name, pvc=pvc, sycl_dpas=True,
+                                           **ON),
                                      shim=syntax.SYCL_SHIM)
-        assert result.ok, (name, result.errors())
+        assert result.ok, (name, pvc, result.errors())
+
+
+# -- the last slot of a column of no whole number of slots ------------------- #
+
+READ_AT = re.compile(r'tensorforge::elementBlock2d<float, (\d), (\d+), (\d+)>'
+                     r'\(item\.get_sub_group\(\), (glb_m\d+), (\w+|\([^)]*\)), '
+                     r'(\d+)\)')
+WRITE_AT = re.compile(r'tensorforge::elementBlock2dStore<float, (\d), (\d+), '
+                      r'(\d+)>\(item\.get_sub_group\(\), (glb_m\d+), (\w+), '
+                      r'(\d+), (\w+)\)')
+
+
+def test_the_last_slot_of_a_ragged_column_is_the_block_before_its_end():
+    """The neighbor flux on SeisSol's PVC layout, 56 rows a column: rows
+    48-55 of I and Q read as the block of rows 40-55, rotated down by 8
+    lanes (`sycl::shift_group_left`); Q written back as that block, its
+    lanes 0-7 the slot before's upper ones rotated down, 8-15 the slot's own
+    rotated up (`shift_group_right`), merged by lane -- and no lane of
+    either reads or writes alone, where J6b's blocks left the slot nine
+    messages a lane."""
+    (then, otherwise), = _bodies(_once('gpu_neighboringFlux[0]', pvc=True,
+                                       sycl_dpas=True, **ON))
+    reads = {(m.group(4), m.group(5)) for m in READ_AT.finditer(then)}
+    assert ('glb_m0', '40') in reads and ('glb_m2', '40') in reads
+    assert {m.group(2) for m in READ_AT.finditer(then)} == {'224'}
+    writes = {(m.group(4), m.group(5)) for m in WRITE_AT.finditer(then)}
+    assert ('glb_m2', '40') in writes
+    block = re.search(r'sycl::vec<float, 8> (v\d+_eblk) = tensorforge::'
+                      r'elementBlock2d<float, 8, 224, 9>\(item\.get_sub_group'
+                      r'\(\), glb_m0, 40, 0\);', then).group(1)
+    assert re.search(r'sycl::shift_group_left\(item\.get_sub_group\(\), \('
+                     + block + r'\[0\]\), 8\)', then)
+    merge = re.search(r'float (v\d+)_emerge = (v\d+_\w+) \? (v\d+)_erot : '
+                      r'(v\d+)_erot;', then)
+    assert merge
+    assert re.search(r'float ' + merge.group(3) + r'_erot = sycl::'
+                     r'shift_group_left\(item\.get_sub_group\(\), \w+, 8\);',
+                     then)
+    assert re.search(r'float ' + merge.group(4) + r'_erot = sycl::'
+                     r'shift_group_right\(item\.get_sub_group\(\), \w+, 8\);',
+                     then)
+    assert not re.search(r'glb_m[02]\[', then)
+    assert re.search(r'glb_m2\[', otherwise)
+
+
+def test_a_padded_tail_is_written_whole():
+    """The derivative's copy of Q into its first derivative, 56 rows of 64:
+    today's write zeroes rows 56-63 with the data, so its last slot stays
+    the whole block at row 48 -- the block that ends with row 55 would
+    leave them as they were."""
+    (then, _), = _bodies(_once('gpu_derivative', sycl_dpas=True, **ON))
+    at = {m.group(5) for m in WRITE_AT.finditer(then)
+          if m.group(4) == 'glb_m3'}
+    assert '48' in at and '40' not in at
+
+
+@pytest.mark.parametrize('rows,first,shifts', [
+    (56, 0, {3: 8}), (120, 0, {7: 8}), (64, 0, {}), (64, 1, {3: 1}),
+    (56, 1, {3: 9}), (40, 0, {2: 8}), (16, 0, {}),
+])
+def test_the_lanes_a_ragged_slot_lies_past_its_block(rows, first, shifts):
+    """A slot leaving its columns at their end is the block of the 16 rows
+    that end with them, its lane `l` that block's lane `l + shift`; inside
+    the columns, or before them, it has none."""
+    found = eb.Surface(pitch=4 * rows, columns=9, rows=rows)
+    assert {s: eb.overlap_shift(found, first, s) for s in range(-1, 10)
+            if eb.overlap_shift(found, first, s) is not None} == shifts
+
+
+def test_the_rotation_is_spelled_by_the_sycl_lexic():
+    """Down the sub-group by `shift_group_left`, up by `shift_group_right`;
+    the explicit vector, and a lexic with no sub-group, spell none."""
+    def lexic(backend):
+        return Context(arch='pvc', backend=backend, fp_type=Datatype.F32,
+                       options=Options(**ON)).target.lexic
+    spmd = lexic('oneapi')
+    assert (spmd.sub_group_shift('{0}', 8)
+            == 'sycl::shift_group_left(item.get_sub_group(), {0}, 8)')
+    assert (spmd.sub_group_shift('{0}', 3, down=False)
+            == 'sycl::shift_group_right(item.get_sub_group(), {0}, 3)')
+    assert lexic('esimd').sub_group_shift('{0}', 8) is None
+    cuda = Context(arch='sm_90', backend='cuda',
+                   fp_type=Datatype.F32).target.lexic
+    assert cuda.sub_group_shift('{0}', 8) is None
 
 
 # -- the surfaces ------------------------------------------------------------ #
@@ -294,7 +708,8 @@ def test_a_shared_operand_has_no_surface():
 ])
 def test_a_slot_inside_its_columns(rows, first, slots):
     """A block moves 16 rows whole: the last slot of a leading dimension
-    that is no multiple of 16 sticks out and stays per lane."""
+    that is no multiple of 16 sticks out, and is the block that ends with
+    the column (`overlap_shift`)."""
     found = eb.Surface(pitch=4 * rows, columns=9, rows=rows)
     assert [s for s in range(-1, 10)
             if eb.slots_inside(found, first, s)] == slots
@@ -346,8 +761,8 @@ def test_streaming_puts_the_cache_option_on_every_block():
     """Each block read and write of the element through IGC's cache-opts
     form, L1 uncached (2); the per-lane transfers and the fallback as they
     were."""
-    kernel = _kernel(sycl_dpas=True, **STREAM)
-    plain = _kernel(sycl_dpas=True, **ON)
+    kernel = _once(sycl_dpas=True, **STREAM)
+    plain = _once(sycl_dpas=True, **ON)
     blocks = STREAMED.findall(kernel)
     assert blocks and {c for _, c in blocks} == {'2'}
     assert {w for w, _ in blocks} == {'', 'Store'}
@@ -391,10 +806,10 @@ def test_an_igc_without_the_forms_is_named_at_generation(monkeypatch, options,
 def test_the_next_elements_i_and_q_by_2d_prefetches(order, nbytes):
     """The operands with an element surface, I and Q, by one 2D prefetch of
     their storage each; the star matrices keep a hint a lane."""
-    kernel = _kernel(order=order, sycl_dpas=True, **AHEAD)
+    kernel = _once(order=order, sycl_dpas=True, **AHEAD)
     assert sorted(PREFETCH2D.findall(kernel)) == [
         (str(nbytes), 'glb_m0'), (str(nbytes), 'glb_m2')]
-    lanes = _kernel(order=order, sycl_dpas=True, prefetch_data=True, **ON)
+    lanes = _once(order=order, sycl_dpas=True, prefetch_data=True, **ON)
     assert not PREFETCH2D.search(lanes)
     assert '&pf_glb_m0[' in lanes and '&pf_glb_m0[' not in kernel
     assert '&pf_glb_m1[' in kernel
@@ -424,6 +839,6 @@ def test_the_streamed_and_prefetching_kernels_parse():
     if syntax.compiler() is None:
         pytest.skip('no host C++ compiler')
     for options in (STREAM, AHEAD):
-        result = syntax.check_source(_kernel(sycl_dpas=True, **options),
+        result = syntax.check_source(_once(sycl_dpas=True, **options),
                                      shim=syntax.SYCL_SHIM)
         assert result.ok, (options, result.errors())

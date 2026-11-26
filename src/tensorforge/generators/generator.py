@@ -982,6 +982,12 @@ class Generator:
       self._emit_loops = True
 
     self._name_operands(self._descr_list)
+    from tensorforge.backend.instructions.memory import element_blocks
+    if element_blocks.auto(context):
+      # `sycl_element_blocks=auto`: the derivative's chain asked of the
+      # kernel's operations, which a section's transfers do not show once
+      # fission has cut the kernel (`element_blocks.chain_refusal`).
+      context.element_chain = element_blocks.chain_refusal(self._descr_list)
 
     # Asked for and unavailable is an error, not a fallback.  A caller who
     # switched the traversal and silently got the other one would attribute

@@ -2526,6 +2526,13 @@ class Emitter:
         diverges = share is not None or getattr(
             s.cond, 'uniformity', Uniformity.LANE) < Uniformity.MULT
         cond = _unwrap(self.operand(s.cond))
+        # The element blocks' two bodies (`BatchLoop._emit_versions`): an
+        # element runs one of them, so the code an element's run fetches is
+        # the larger one's -- the lesser arm's units are taken back out once
+        # both are written (`_one_arm_of_two`).
+        exclusive = (s.attr('guard') == 'element_blocks'
+                     and len(s.regions) > 1)
+        marks = [self._code_mark()] if exclusive else None
         then = w.If(cond)
         with then:
             if share is not None:
@@ -2536,6 +2543,8 @@ class Emitter:
             finally:
                 self._lane_scale = outer
                 self._converged = converged
+        if marks is not None:
+            marks.append(self._code_mark())
         if len(s.regions) > 1:
             # An arm that writes nothing is left out by the writer, its head
             # with it (`Writer.speculate`): behind such a first arm the
@@ -2552,6 +2561,31 @@ class Emitter:
                 finally:
                     self._lane_scale = outer
                     self._converged = converged
+        if marks is not None:
+            marks.append(self._code_mark())
+            self._one_arm_of_two(*marks)
+
+    def _code_mark(self) -> Tuple[int, int]:
+        """The code units counted so far, as laid down and as written out
+        (`BuildMetrics.code_units`, `written_code_units`)."""
+        m = self.metrics
+        return ((getattr(m, 'code_units', None) or 0,
+                 getattr(m, 'written_code_units', None) or 0)
+                if m is not None else (0, 0))
+
+    def _one_arm_of_two(self, start, middle, end) -> None:
+        """Count the code of two exclusive arms, written from `start` to
+        `middle` and from `middle` to `end`, as the larger one's: what an
+        element's run of the body fetches, and what fission and the
+        instruction cache weigh (`generator._decide_fission`) -- the two
+        bodies of the element blocks would otherwise look twice the body
+        they are, and the derivative was cut in two for it (pvcport J6b)."""
+        record = getattr(self.metrics, 'record_code', None)
+        if record is not None:
+            record(-min(middle[0] - start[0], end[0] - middle[0]))
+        record = getattr(self.metrics, 'record_written_code', None)
+        if record is not None:
+            record(-min(middle[1] - start[1], end[1] - middle[1]))
 
 
 def emit(body: Tuple[Stmt, ...], writer, context: Any = None,

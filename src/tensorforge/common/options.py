@@ -1638,10 +1638,15 @@ declare('sycl_element_blocks',
             'element\'s, so no stride between elements is assumed and a '
             'shuffled or repeating pointer table is read as it is.  Only F32 '
             'operands stored dense in their box, a column at least 64 bytes '
-            'and a whole number of 16, a slot inside its column; a write only '
-            'of slots every lane of which it writes today (whole slots, '
-            'full-lane tails), an accumulation\'s ragged slots keep their '
-            'lanes\' writes.  The messages want a 64-byte base: the element '
+            'and a whole number of 16, a slot inside its column -- the last '
+            'slot of a column of no whole number of slots (56 rows, 120) is '
+            'read as the 16 rows that end with the column and rotated into '
+            'place across the sub-group (`sycl::shift_group_left`); a write '
+            'only of slots every lane of which it writes today (whole slots, '
+            'full-lane tails) and of such a last slot, merged with the upper '
+            'lanes of the slot before, an accumulation\'s other ragged slots '
+            'keep their lanes\' writes.  The messages want a 64-byte base: '
+            'the element '
             'needs only the alignment its pitch and 64 share -- 32 bytes for '
             'SeisSol\'s padding to 32 on PVC -- and the surface starts the '
             'pitches before it that are on the boundary.  That is checked on '
@@ -1652,9 +1657,33 @@ declare('sycl_element_blocks',
             '(SeisSol\'s order-6 volume) and two copies of the body cost the '
             'static code twice and IGC\'s time 1.3 to 2 times (order-8 '
             '`localFluxAll` 60 to 113 s, IGC 2.41.5) -- a cost of SeisSol\'s '
-            'build should the option ever be a default.  Without a check '
-            'where `element_base_align` promises the alignment.  `auto`: off, '
-            'until measured.  Off by default.')
+            'build should the option ever be a default; the two bodies '
+            'exclude each other, and the flow of values and the code size '
+            'that splits a kernel (`fission`) take them so.  Without a check '
+            'where `element_base_align` promises the alignment.  pvcport J6b '
+            '(Max 1550, SeisSol\'s elastic kernels, each kernel its best form '
+            'against the best without blocks): the step -8.5 % at order 6 and '
+            '-7.9 % at order 8 on 64-byte columns, -1.2 % and 0 on SeisSol\'s '
+            'PVC layout before its last slots were blocks; the derivative '
+            'lost everywhere.  pvcport J7 (orders 5 to 8, those two layouts '
+            'and the layouts step-2 rule, the blocks under `sycl_dpas` '
+            'against `sycl_dpas` alone): the volume x0.86-1.00 and '
+            'localFluxAll x0.70-0.96 at orders 5 to 7; at order 8 the volume '
+            'behind (x1.11-1.22), localFluxAll on two of the three layouts; '
+            'the neighbor flux behind on SeisSol\'s PVC layout and the step-2 '
+            'rule, x1.10-1.35 at orders 6 to 8; the derivative behind at '
+            'every order.  `auto`: the blocks where those timings say they '
+            'pay (`element_blocks.auto_refusal`) -- under `sycl_dpas`, not '
+            'for a body that reads an operand it wrote back for another\'s '
+            'product (the derivative), at most six lane slots a column (not '
+            'at order 8), and only where the body writes an operand more than '
+            'once (the volume\'s and localFluxAll\'s accumulations; the '
+            'neighbor flux writes its Q once) -- a calibration on three '
+            'kernels: J7\'s step 2-9 % faster at orders 5 to 7.  Under '
+            '`sycl_dpas_block2d` not where the body writes an operand more '
+            'than three times: localFluxAll\'s four writes lost the blocks '
+            'under the operators\' 2D blocks at every order pvcport J9 '
+            'timed, the volume\'s three paid.  Off by default.')
 
 declare('sycl_element_streaming',
         default=False,
@@ -1670,13 +1699,20 @@ declare('sycl_element_streaming',
             '2.41.5 and 2.42.6 resolve: refused, naming the reason, where the '
             '`ocloc` on PATH does not (`toolchain.intel_block2d_cacheopts`), '
             'never a quiet return to the plain messages.  The per-lane '
-            'transfers are as they are.  Off by default.')
+            'transfers are as they are.  pvcport J6b (Max 1550, against the '
+            'blocks without it): it pays for order-8 `localFluxAll` (-13 % on '
+            '64-byte columns, -18 % on SeisSol\'s PVC layout), where keeping '
+            'L1 for the operator tiles was the point; elsewhere it is noise '
+            'or costs, up to 14 %, but for the order-8 derivative on 64-byte '
+            'columns, -36 %: IGC allocating that build with 1.2 kB of spill '
+            'instead of 62.  Off by default.')
 
 declare('sycl_element_prefetch',
         default=False,
         env='TF_SYCL_ELEMENT_PREFETCH',
         parse=parse_bool,
-        doc='Under `sycl_element_blocks` and `prefetch_data`, the next '
+        doc='Under `sycl_element_blocks` on (not `auto`) and `prefetch_data`, '
+            'the next '
             'element\'s operands that have an element surface hinted by 2D '
             'block prefetches over their storage, where `prefetch_data` asks '
             'for a line a lane: rows of 256 bytes from the 64-byte line the '
@@ -1689,7 +1725,11 @@ declare('sycl_element_prefetch',
             'seven against six, two or five against fifteen, by where the '
             'element starts.  Through IGC\'s prefetch forms, refused as '
             '`sycl_element_streaming` is where the `ocloc` on PATH does not '
-            'resolve them.  Off by default.')
+            'resolve them.  pvcport J6b (Max 1550, the volume): up to 8 % '
+            'ahead of the hint a lane on 64-byte columns at order 6, nothing '
+            'on SeisSol\'s PVC layout, and at order 8 every hint costs, this '
+            'one '
+            'the less.  Off by default.')
 
 declare('element_base_align',
         default=0,

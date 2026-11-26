@@ -33,7 +33,14 @@ spelled in text -- is the same value wherever the body tests it, and is
 carried as a named condition (`Inst.conds`): a store under it is certain to
 a load under it as well and possible to any other.  A load whose element a
 store may or may not have written reads either; such a load reads nothing
-for certain, and both stores stay read.
+for certain, and both stores stay read.  The two arms of a branch that says
+they exclude each other -- the element blocks' body and today's, of which an
+element runs one (`guard='element_blocks'`, `BatchLoop._emit_versions`) --
+are taken at their word, one run of the branch at a time: a store in the one
+is no store at all to a load in the other of the same run (`_excluded`).  A
+run of a counted loop is a run of the branch of its own; what one run of a
+region that may run again hands the next is added after it (`_wrap`), the
+arms' stores with the rest.
 
 An element's mask is a condition of the second kind with a contract of its
 own (`elementmask`): where it does not hold, the element is past the batch
@@ -426,6 +433,9 @@ class Flow:
             if x.op == Op.ALLOC and x.target and arena is not None
             and x.attr('arena') == arena}
         self.full = (1 << threads) - 1
+        #: The runs of branches whose arms exclude each other (`_excluded`),
+        #: a condition of their own each, as `_run` meets them.
+        self._exclusive: Set[Any] = set()
         self._ix = _Indices(self.body, {'x': threads}, simd=simd)
         self.insts: List[Inst] = []
         self.by_stmt: Dict[int, List[int]] = defaultdict(list)
@@ -667,6 +677,31 @@ class Flow:
                 out |= 1 << lane
         return out
 
+    def _excluded(self, written, read) -> bool:
+        """Whether a write under the conditions `written` can never be what a
+        read under `read` finds: they stand in the two arms of one run of a
+        branch whose arms exclude each other (`_exclusive`), the run's
+        condition true for the one and false for the other -- for an element
+        the two never both run.  Such a write is none to the read: not a
+        certain one, nor one it may read."""
+        if not self._exclusive:
+            return False
+        for name, value in written:
+            if name in self._exclusive and (name, not value) in read:
+                return True
+        return False
+
+    def _smears(self, key, conds) -> List[int]:
+        """The writes nothing could place that may have touched the buffer
+        of `key` -- `(space, base)` -- as a read under `conds` meets them:
+        those of the other arm of an exclusive branch are none to it."""
+        out = list(self._smeared.get(key[:2], ())) + list(
+            self._smeared_space.get(key[0], ()))
+        if self._exclusive:
+            out = [w for w in out
+                   if not self._excluded(self.insts[w].conds, conds)]
+        return out
+
     def _run(self, stmts: Sequence[Stmt], env: Dict[int, int], mask: int,
              conds) -> None:
         for s in stmts:
@@ -687,11 +722,15 @@ class Flow:
                 if name in self.masks:
                     self._run(s.regions[0].body, env, mask, conds)
                     continue
-                self._run(s.regions[0].body, env, mask,
-                          conds | {(name, True)})
+                then, other = conds | {(name, True)}, conds | {(name, False)}
+                if s.attr('guard') == 'element_blocks':
+                    # This run's arms, apart from another run's.
+                    arm = ('arms', len(self._exclusive))
+                    self._exclusive.add(arm)
+                    then, other = then | {(arm, True)}, other | {(arm, False)}
+                self._run(s.regions[0].body, env, mask, then)
                 if len(s.regions) > 1:
-                    self._run(s.regions[1].body, env, mask,
-                              conds | {(name, False)})
+                    self._run(s.regions[1].body, env, mask, other)
                 continue
             if s.op == Op.RAWBLOCK and s.regions:
                 inner = conds if s.text in self.masks \
@@ -1135,8 +1174,7 @@ class Flow:
         lanes.  A lane whose last write stands under a condition the read
         does not, or wrote anything but a number, holds none."""
         out: Dict[Any, int] = {}
-        if (self._smeared.get(cell[0][:2])
-                or self._smeared_space.get(cell[0][0])):
+        if self._smears(cell[0], conds):
             return out
         left = lanes
 
@@ -1147,7 +1185,7 @@ class Flow:
 
         for layer in reversed(self._reg.get(cell, ())):
             hit = left & layer.mask
-            if not hit:
+            if not hit or self._excluded(layer.conds, conds):
                 continue
             left &= ~hit
             if layer.conds <= conds:
@@ -1162,13 +1200,12 @@ class Flow:
     def _holds(self, cell, writer: int, lanes: int, conds) -> bool:
         """Does `cell`, a register, hold what `writer` wrote for every lane
         of `lanes`, as a read under `conds` would find it now?"""
-        if (self._smeared.get(cell[0][:2])
-                or self._smeared_space.get(cell[0][0])):
+        if self._smears(cell[0], conds):
             return False
         left = lanes
         for layer in reversed(self._reg.get(cell, ())):
             hit = left & layer.mask
-            if not hit:
+            if not hit or self._excluded(layer.conds, conds):
                 continue
             if not layer.conds <= conds or layer.writer != writer:
                 return False
@@ -1464,8 +1501,7 @@ class Flow:
             key = cell.key if memory else cell[0]
             smeared = others.get(key[:2])
             if smeared is None:
-                smeared = frozenset(self._smeared.get(key[:2], ())) | \
-                    frozenset(self._smeared_space.get(key[0], ()))
+                smeared = frozenset(self._smears(key, conds))
                 if self._shared(key):
                     smeared = smeared | {EXTERNAL}
                 others[key[:2]] = smeared = self._frozen(smeared)
@@ -1482,7 +1518,7 @@ class Flow:
         maybe: Set[int] = set(smeared)
         for layer in reversed(layers):
             hit = left & layer.mask
-            if not hit:
+            if not hit or self._excluded(layer.conds, conds):
                 continue
             if layer.conds <= conds:
                 out.append(Reach(hit, layer.writer, self._frozen(maybe),
@@ -1514,6 +1550,8 @@ class Flow:
             pending = [(bits, smeared)]
             if pieces:
                 for piece in reversed(pieces):
+                    if self._excluded(piece.conds, conds):
+                        continue
                     later = []
                     for left, maybe in pending:
                         hit = left & piece.bits
@@ -1590,7 +1628,8 @@ class Flow:
             for lane in self.lanes(m) if self._before else ():
                 prior, certain = INITIAL, True
                 for layer in reversed(layers):
-                    if not layer.mask & (1 << lane):
+                    if (not layer.mask & (1 << lane)
+                            or self._excluded(layer.conds, conds)):
                         continue
                     if layer.conds <= conds:
                         prior = layer.writer
@@ -1598,8 +1637,7 @@ class Flow:
                     certain = False
                 if prior == INITIAL:
                     prior = self._fresh.get(cell[0][1], INITIAL)
-                if (self._smeared.get(cell[0][:2])
-                        or self._smeared_space.get(cell[0][0])):
+                if self._smears(cell[0], conds):
                     certain = False
                 before[(lane, cell)] = (prior, certain)
             kept: List[_Layer] = []
@@ -1653,9 +1691,7 @@ class Flow:
         certain -- a lane's that another lane of the same write wrote ahead
         of it, that write."""
         key = cells.key
-        uncertain = bool(self._smeared.get(key[:2])
-                         or self._smeared_space.get(key[0])
-                         or self._shared(key))
+        uncertain = bool(self._smears(key, conds) or self._shared(key))
         done: Set[int] = set()
         for lane, k, e in cells.each():
             if e >> 6 != block:
@@ -1667,7 +1703,8 @@ class Flow:
                 prior, certain = INITIAL, True
                 bit = 1 << (e & 63)
                 for piece in reversed(pieces):
-                    if not piece.bits & bit:
+                    if not piece.bits & bit or self._excluded(piece.conds,
+                                                              conds):
                         continue
                     if piece.conds <= conds:
                         prior = piece.writer
