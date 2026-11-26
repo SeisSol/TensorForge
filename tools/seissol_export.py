@@ -2,11 +2,14 @@
 #
 # SPDX-License-Identifier: MIT
 """Record what SeisSol's code generator hands a GPU exporter (yateto interface 7), for one configuration.
-  seissol_export.py EQUATION SOLVER ORDER PRECISION OUT.json [--mechanisms N]
+  seissol_export.py EQUATION SOLVER ORDER PRECISION OUT.json [--mechanisms N] [--rule]
 Runs seissol21/codegen/generate.py (its yateto: codegen/yateto -> submodules/yateto) with TensorForge as
 the device code generator, and swaps TensorForge's routine generator for one that records every kernel
 description and generates nothing.  Kernels are named as yateto names them (`namespace::kernel`,
-`family[group]` for a family member).  The CPU half is generated as SeisSol would (gemm tools: none)."""
+`family[group]` for a family member).  The CPU half is generated as SeisSol would (gemm tools: none).
+The recorder states of itself what TensorForge's does (`DEVICE_LAYOUTS`, `device_layout_rule`), so that a
+yateto which asks gets the layouts TensorForge's kernels read, not the host's.  --rule builds under the
+device layout rule TensorForge states (generate.py's --device_layout_rule; a SeisSol that has it)."""
 import contextlib, io, json, os, pathlib, sys, tempfile, time
 
 CODEGEN = pathlib.Path(os.environ.get("SEISSOL_CODEGEN", pathlib.Path(__file__).resolve().parents[2] / "seissol21" / "codegen"))
@@ -17,6 +20,7 @@ out = os.path.abspath(out)          # the generator runs from the codegen direct
 mechanisms = int(sys.argv[sys.argv.index('--mechanisms') + 1]) if '--mechanisms' in sys.argv else 0
 arch = sys.argv[sys.argv.index('--arch') + 1].split(':') if '--arch' in sys.argv else 'nvidia:cuda:sm_86'.split(':')
 simcount = int(sys.argv[sys.argv.index('--simcount') + 1]) if '--simcount' in sys.argv else 1
+rule = '--rule' in sys.argv
 
 sys.path.insert(0, str(TF))
 sys.path.insert(0, str(CODEGEN))
@@ -81,7 +85,31 @@ def named_generate(self, cpp, header, name, kernelOutlines, *args, **kwargs):
 
 
 visitor.OptimizedKernelGenerator.generate = named_generate
-tensorforge.get_routine_generator = lambda yateto: (lambda arch, attrs=None: Recorder(arch, attrs))
+
+# yateto asks what is registered, before it optimizes a kernel, whether the kernels read the device layouts
+# (`ExportFactory.readsDeviceLayouts`) and which layout rule it states (`layoutRuleOf`): the recorder answers what
+# TensorForge's routine generator does.  A TensorForge or a yateto without device layouts neither states nor asks.
+tensorforge_generator = tensorforge.get_routine_generator
+stated = {}
+
+
+def recording_generator(yateto):
+    registered = tensorforge_generator(yateto)
+
+    def recorder(arch, attrs=None):
+        return Recorder(arch, attrs)
+
+    for attr in ('DEVICE_LAYOUTS', 'device_layout_rule'):
+        if hasattr(registered, attr):
+            setattr(recorder, attr, getattr(registered, attr))
+    if rule:
+        if not hasattr(registered, 'device_layout_rule'):
+            sys.exit('--rule: this TensorForge states no device layout rule')
+        stated['device_layout_rule'] = registered.device_layout_rule(None)
+    return recorder
+
+
+tensorforge.get_routine_generator = recording_generator
 
 import generate                                                     # noqa: E402
 
@@ -92,7 +120,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 '--host_arch', 'hsw', '--device_backend', arch[1], '--device_arch', arch[2],
                 '--device_vendor', arch[0], '--numMechanisms', str(mechanisms), '--memLayout', 'auto',
                 '--multipleSimulations', str(simcount), '--PlasticityMethod', 'nb', '--gemm_tools', 'none',
-                '--device_codegen', 'tensorforge', '--drQuadRule', 'stroud']
+                '--device_codegen', 'tensorforge', '--drQuadRule', 'stroud'] + (
+                    ['--device_layout_rule'] if rule else [])
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         generate.main()
@@ -100,10 +129,11 @@ name_pending('<unnamed>')
 
 config = dict(equation=equation, solver=solver, order=int(order), precision=precision,
               mechanisms=mechanisms, device=f'{arch[1]}/{arch[2]}', host='hsw', plasticity='nb', dr_quad='stroud',
-              mem_layout='auto', multiple_simulations=simcount, workarounds=sorted(workarounds))
+              mem_layout='auto', multiple_simulations=simcount, workarounds=sorted(workarounds), **stated)
 pathlib.Path(out).write_text(json.dumps({
     'source': ('SeisSol codegen (seissol21, master plus the damage and viscoacoustic systems) through '
-               'seissol/yateto 50200d3, interface 7; recorded by tools/seissol_export.py'),
+               'seissol/yateto 50200d3, interface 7; recorded by tools/seissol_export.py'
+               + ('; the device layout rule on' if rule else '')),
     'config': config,
     'descriptions': recorded}, separators=(',', ':')))
 print(f'{equation} {solver} O{order} {precision}: {len(recorded)} kernels, '
