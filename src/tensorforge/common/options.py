@@ -1569,12 +1569,22 @@ declare('sycl_element_blocks',
             'against the best without blocks): the step -8.5 % at order 6 and '
             '-7.9 % at order 8 on 64-byte columns, -1.2 % and 0 on SeisSol\'s '
             'PVC layout before its last slots were blocks; the derivative '
-            'lost everywhere.  `auto`: the blocks where those timings say '
-            'they pay (`element_blocks.auto_refusal`) -- under `sycl_dpas`, '
-            'not for a body that reads an operand it wrote back for '
-            'another\'s product (the derivative), and an accumulation from '
-            'inside a slot (the '
-            'volume\'s Q) only up to four slots a column.  Off by default.')
+            'lost everywhere.  pvcport J7 (orders 5 to 8, those two layouts '
+            'and the layouts step-2 rule, the blocks under `sycl_dpas` '
+            'against `sycl_dpas` alone): the volume x0.86-1.00 and '
+            'localFluxAll x0.70-0.96 at orders 5 to 7; at order 8 the volume '
+            'behind (x1.11-1.22), localFluxAll on two of the three layouts; '
+            'the neighbor flux behind on SeisSol\'s PVC layout and the step-2 '
+            'rule, x1.10-1.35 at orders 6 to 8; the derivative behind at '
+            'every order.  `auto`: the blocks where those timings say they '
+            'pay (`element_blocks.auto_refusal`) -- under `sycl_dpas`, not '
+            'for a body that reads an operand it wrote back for another\'s '
+            'product (the derivative), at most six lane slots a column (not '
+            'at order 8), and only where the body writes an operand more than '
+            'once (the volume\'s and localFluxAll\'s accumulations; the '
+            'neighbor flux writes its Q once) -- a calibration on three '
+            'kernels: J7\'s step 2-9 % faster at orders 5 to 7.  Off by '
+            'default.')
 
 declare('sycl_element_streaming',
         default=False,

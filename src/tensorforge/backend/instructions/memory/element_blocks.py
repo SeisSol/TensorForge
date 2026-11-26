@@ -83,48 +83,60 @@ def wanted(context) -> bool:
   return asked(context) or auto(context)
 
 
-#: The lane slots a column may have where `auto` blocks an operand
-#: accumulated over a box that starts inside a slot (`auto_refusal`).
-AUTO_RAGGED_SLOTS = 4
+#: The lane slots a column an operand the blocks take may have where `auto`
+#: builds them (`auto_refusal`, rule 4).
+AUTO_RAGGED_SLOTS = 6
 
 
 def auto_refusal(context, transfers, surfaces) -> Optional[str]:
   """Why `sycl_element_blocks=auto` keeps a kernel's element blocks off, or
-  None where it builds them -- the rule pvcport J6b's timings support
-  (SeisSol's elastic kernels at orders 6 and 8, two layouts):
+  None where it builds them -- the rule pvcport J6b's and J7's timings
+  support (the Max 1550; SeisSol's elastic kernels at orders 5 to 8 on
+  NVIDIA's padding, SeisSol's own PVC layout and the layouts step-2 rule;
+  the blocks under `sycl_dpas` against `sycl_dpas` alone, the batch as it
+  is and every element 16 bytes off its alignment):
 
-  1. the DPAS path (`Options.sycl_dpas` on): the step's best forms are DPAS
-     forms, and under FMA the blocks lose on localFluxAll (x1.11);
+  1. the DPAS path (`Options.sycl_dpas` on): under FMA the blocks lost on
+     localFluxAll (x1.11, J6b);
   2. whole lane slots for every operand -- moot since the last slot of a
      leading dimension that is no multiple of 16 is read and written as the
      block that ends with the column (`overlap_shift`);
   3. no element operand the body writes and then reads for another one's
      product -- the derivative's chain, each derivative read back for the
-     next and for the integral, lost with every form, x1.28 to x1.84 -- an
-     accumulator the body reads back to add to, the volume's and
-     localFluxAll's Q, is no chain;
-  4. an operand accumulated -- read and written -- over a box that does
-     not start at a column's first row, the volume's Q, rows 1-55, only up
-     to `AUTO_RAGGED_SLOTS` lane slots a column: the volume paid at order 6
-     (x0.90) and lost at order 8 (x1.19), where localFluxAll and the
-     neighbor flux, whose accumulations start at row 0, paid as well.
+     next and for the integral, x0.99-1.73 at orders 5 to 8 -- an
+     accumulator read back to be added to is no chain; across the sections
+     of a kernel fission cut, the kernel's (`chain_refusal`,
+     `context.element_chain`);
+  4. at most `AUTO_RAGGED_SLOTS` lane slots a column for every operand the
+     blocks take: at order 7, six slots (leading dimensions 84, 88, 96),
+     the volume paid (x0.90-0.94) and localFluxAll (x0.70-0.74); at order 8,
+     eight, the volume lost (x1.11-1.22) and so did localFluxAll on
+     NVIDIA's padding and SeisSol's PVC layout (x1.03-1.04);
+  5. an element operand the body writes more than once -- the volume's Q,
+     written once a product, three times, localFluxAll's four.  A
+     calibration, not a mechanism: it tells apart the three kernels J7
+     timed.  The neighbor flux writes its Q once, and lost with the blocks
+     on SeisSol's PVC layout and the step-2 rule (x1.10-1.35 at orders 6 to
+     8, its blocks' arm itself, for a reason J7 does not show) and gained at
+     most 7 % on NVIDIA's padding, where a batch off its alignment cost 23 %
+     at order 8.
 
   `transfers` are the body's `(kind, name, first_row)` in order, for every
   operand of the element -- a load or a store of `name`, the operand row
   it starts at -- a product's loads before the store of its result;
-  `surfaces` the surfaces of the operands the blocks take, by name.  Rule
-  3 across the sections of a kernel fission cut is the kernel's
-  (`chain_refusal`, `context.element_chain`).  Off by default: confirmed
-  at two orders of one equation, to be confirmed at orders 5 and 7."""
+  `surfaces` the surfaces of the operands the blocks take, by name.  With
+  the rule, J7's step (derivative, volume, localFluxAll, four neighbor
+  fluxes) is 1.6-2.7 % faster at order 5, 4.1-4.8 % at order 6 and 7.8-9.4 %
+  at order 7, order 8 as without, and a batch off its alignment is never
+  more than 0.1 % slower than without.  Off by default."""
   if getattr(context.get_user_options(), 'sycl_dpas', False) is not True:
     return 'not the DPAS path'
   chain = getattr(context, 'element_chain', None)
   if chain is not None:
     return chain
-  stored, loaded, read_back, ragged = set(), set(), set(), {}
-  for kind, name, first_row in transfers:
+  stored, read_back, writes = set(), set(), {}
+  for kind, name, _ in transfers:
     if kind != 'store':
-      loaded.add(name)
       if name in stored:
         read_back.add(name)
       continue
@@ -133,13 +145,13 @@ def auto_refusal(context, transfers, surfaces) -> Optional[str]:
       return f'{", ".join(chained)} read back for {name}'
     read_back.clear()
     stored.add(name)
-    if name in surfaces and first_row > 0:
-      ragged.setdefault(name, first_row)
-  for name, first_row in ragged.items():
+    writes[name] = writes.get(name, 0) + 1
+  for name in sorted(surfaces):
     slots = -(-surfaces[name].rows // LANES)
-    if name in loaded and slots > AUTO_RAGGED_SLOTS:
-      return (f'{name} accumulated from row {first_row} over {slots} lane '
-              f'slots')
+    if slots > AUTO_RAGGED_SLOTS:
+      return f'{name}: {slots} lane slots a column'
+  if not any(count > 1 for count in writes.values()):
+    return 'no element operand written more than once'
   return None
 
 

@@ -179,14 +179,29 @@ def test_auto_under_fma_changes_nothing():
             == _norm(_once(sycl_dpas=False)))
 
 
-@pytest.mark.parametrize('name', ['gpu_volume', 'gpu_localFluxAll',
-                                  'gpu_neighboringFlux[0]'])
-def test_auto_takes_the_blocks_where_they_paid(name):
-    """Under DPAS at order 6 the volume -- its Q accumulated from row 1 over
-    four slots -- localFluxAll and the neighbor flux: the kernel `True`
+@pytest.mark.parametrize('name,order', [
+    ('gpu_volume', 6), ('gpu_localFluxAll', 6), ('gpu_volume', 7),
+], ids=['volume-6', 'lfa-6', 'volume-7'])
+def test_auto_takes_the_blocks_where_they_paid(name, order):
+    """Under DPAS the volume -- its Q accumulated three times, from row 1 --
+    and localFluxAll at order 6, and the volume at order 7, six slots a
+    column, where pvcport J7 found it 6-10 % faster: the kernel `True`
     writes."""
-    assert (_norm(_once(name, sycl_dpas=True, sycl_element_blocks='auto'))
-            == _norm(_once(name, sycl_dpas=True, **ON)))
+    assert (_norm(_once(name, order, sycl_dpas=True,
+                        sycl_element_blocks='auto'))
+            == _norm(_once(name, order, sycl_dpas=True, **ON)))
+
+
+@pytest.mark.parametrize('name,order', [
+    ('gpu_neighboringFlux[0]', 6), ('gpu_localFluxAll', 8),
+], ids=['nf-6', 'lfa-8'])
+def test_auto_keeps_where_the_blocks_lost(name, order):
+    """The neighbor flux, which writes its Q once, and localFluxAll at
+    order 8, eight slots a column -- both behind with the blocks in J7 --
+    get the kernel the option off writes."""
+    assert (_norm(_once(name, order, sycl_dpas=True,
+                        sycl_element_blocks='auto'))
+            == _norm(_once(name, order, sycl_dpas=True)))
 
 
 def test_auto_keeps_the_derivative_as_it_was():
@@ -241,26 +256,29 @@ VOLUME = ('l m0 0', 'l m1 0', 'l m2 1', 's m2 1', 'l m0 0', 'l m3 0',
 #: localFluxAll's: Q from row 0.
 LFA = ('l m0 0', 'l m1 0', 'l m2 0', 's m2 0', 'l m0 0', 'l m3 0', 'l m2 0',
        's m2 0')
+#: The neighbor flux's: I and the flux matrix read, Q read and written once.
+NF = ('l m0 0', 'l m1 0', 'l m2 0', 's m2 0')
 #: The derivative's first two: Q (m1) into the integral (m0) and the first
 #: derivative (m5), which is read back to be added to the integral.
 DERIVATIVE = ('l m1 0', 's m0 0', 'l m1 0', 'l m4 0', 's m5 0', 'l m1 0',
               'l m6 0', 'l m5 0', 's m5 0', 'l m5 0', 'l m0 0', 's m0 0')
+ONCE = 'no element operand written more than once'
 
 
 @pytest.mark.parametrize('transfers,rows,why', [
-    (VOLUME, 56, None), (VOLUME, 64, None),
-    (VOLUME, 120, 'glb_m2 accumulated from row 1 over 8 lane slots'),
-    (LFA, 120, None),
-    (('s m2 1',), 120, None),
+    (VOLUME, 56, None), (VOLUME, 64, None), (VOLUME, 96, None),
+    (VOLUME, 120, 'glb_m0: 8 lane slots a column'),
+    (LFA, 88, None), (LFA, 120, 'glb_m0: 8 lane slots a column'),
+    (NF, 56, ONCE), (('s m2 1',), 56, ONCE),
     (('s m2 0', 'l m2 0', 's m2 0'), 64, None),
     (DERIVATIVE, 64, 'glb_m5 read back for glb_m0'),
-], ids=['volume-56', 'volume-64', 'volume-120', 'lfa-120', 'written-only',
-        'into-itself', 'derivative'])
+], ids=['volume-56', 'volume-64', 'volume-96', 'volume-120', 'lfa-88',
+        'lfa-120', 'nf', 'written-once', 'into-itself', 'derivative'])
 def test_the_auto_rule(transfers, rows, why):
-    """J6b's rule on the transfers alone: an accumulation is no chain, one
-    from inside a slot only up to four slots a column, and an operand the
-    body wrote read back for another one's product is the derivative's
-    chain."""
+    """J7's rule on the transfers alone: an accumulation is no chain, an
+    operand the body wrote read back for another one's product is the
+    derivative's chain; at most six slots a column, whichever operand; and
+    some operand written more than once."""
     ctx = SimpleNamespace(get_user_options=lambda: SimpleNamespace(
         sycl_dpas=True))
     surfaces = {n: eb.Surface(4 * rows, 9, rows) for n in ('glb_m0',
