@@ -2397,6 +2397,36 @@ class IRBuilder:
         self.on_rollback(undo)
         return Ring(name, obj, int(slots), int(full), int(empty))
 
+    def ticket_counters(self, name: str, count: int, leader: str,
+                        arena: Optional[str] = None) -> Optional[Value]:
+        """`count` ticket counters in shared memory, a word each, which
+        warps draw tickets of (`cuda.h`'s `ticketTake`): zeroed by the
+        thread `leader` picks in the setup, behind the block's barrier -- as
+        a ring's barriers are set up (`mbarrier_ring`) -- and handed: what
+        orders their draws and their resets is the code's rings, no barrier
+        of the block's (`barriers.handed_buffers`).  None in a body without
+        an arena."""
+        if self._arena is None:
+            return None
+        start = len(self._prologue)
+        b = self.scratch()
+        counters = b.alloc(Datatype.I32, (int(count),), MemSpace.SHARED,
+                           hint=name, lifetime='body', arena=arena,
+                           handed=True)
+        lead = b.rawexpr(leader, type_=BOOL, hint='lead',
+                         uniform=Uniformity.LANE)
+        with b.if_(lead):
+            for k in range(int(count)):
+                b.store(counters, b.const(0, INDEX), k)
+        b.barrier(Participants.BLOCK)
+        self._prologue += list(b.finish())
+
+        def undo():
+            # As `_ring`'s: the setup goes with a discarded attempt.
+            del self._prologue[start:]
+        self.on_rollback(undo)
+        return counters
+
     def ring_round(self, ring: Ring, trip: Operand,
                    hint: str = 'r') -> Tuple[Operand, Operand]:
         """The slot of `ring` the trip `trip` (0, 1, ... in a role's own

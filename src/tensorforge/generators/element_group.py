@@ -2020,6 +2020,11 @@ class TileRows:
     #: `try_wait` again (`try`), with a suspend-time hint (`suspend`), or
     #: `test_wait` in a spin (`test`).
     wait: str = 'try'
+    #: tcgen05's: whether A is mixed in a pool (`Options.matrix_pool`,
+    #: `tile_pool`): the star bands a block each in turn (`off`), or the
+    #: bands' warps and the epilogue's alike, a trip's blocks by tickets of
+    #: their quarter of the lanes, meeting when the trip's run out (`on`).
+    pool: str = 'off'
 
     @property
     def granule(self) -> int:
@@ -2339,6 +2344,56 @@ def tile_wait(engine: str, context) -> str:
     return wait_asked(context) if engine == 'tcgen05' else 'try'
 
 
+def pool_asked(context) -> str:
+    """Whether the options ask the tile to mix A in a pool
+    (`Options.matrix_pool`): `off` or `on`."""
+    return getattr(context.get_user_options(), 'matrix_pool', 'off')
+
+
+def pool_mixers(bands: int) -> int:
+    """The pool's mixers a quarter of tensor memory's lanes (`TileRows.
+    pool`): a warp of each star band and one of the epilogue warpgroup's."""
+    return bands + 1
+
+
+def pool_refusal(engine: str, schedule: str, groups: str, handoffs: str,
+                 aslots: int, bands: int) -> Optional[str]:
+    """Why the tile mixes no pool where the options ask for one
+    (`Options.matrix_pool` `on`), or None: on wgmma, whose warpgroups each
+    fill their own A; where the tiles go by claims, a trip's tile no stride
+    says; with the group's blocks written out, a block its band's by
+    number; with one ring for A and B, its full side the bands' and the
+    operator warp's; and where A's ring has fewer slots than a quarter has
+    mixers -- a mixer's wait for a slot would pass on the parity of a phase
+    two short of it (tests/pool_model.py)."""
+    if engine != 'tcgen05':
+        return 'wgmma\'s warpgroups each fill their own A'
+    if schedule != 'static':
+        return 'the tiles go by claims, a trip\'s tile no stride says'
+    if groups != 'loop':
+        return 'the group\'s blocks written out, a block its band\'s by number'
+    if handoffs != 'two':
+        return ('one ring for A and B, its full side the bands\' and the '
+                'operator warp\'s')
+    mixers = pool_mixers(bands)
+    if aslots < mixers:
+        return (f'A\'s ring has {aslots} slots, fewer than a quarter\'s '
+                f'{mixers} mixers: a mixer\'s wait for a slot would pass on '
+                f'the parity of a phase two short of it')
+    return None
+
+
+def tile_pool(engine: str, schedule: str, groups: str, handoffs: str,
+              aslots: int, bands: int, context) -> str:
+    """Whether the tile mixes A in a pool (`TileRows.pool`): as the
+    options ask where it may (`pool_refusal`), `off` otherwise."""
+    if pool_asked(context) != 'on':
+        return 'off'
+    if pool_refusal(engine, schedule, groups, handoffs, aslots, bands):
+        return 'off'
+    return 'on'
+
+
 def tile_depth(section: GroupSection) -> int:
     """How many blocks tcgen05's group loop writes out a trip of its body
     where both rings are numbered by the trip (`TileRows.slots` `trip`): a
@@ -2577,6 +2632,11 @@ TILE_OUTPUT_KEEP = 0.75
 #: pair of mbarriers each, and the claim, a 16-byte response and its
 #: mbarrier on sixteen bytes.
 SCHEDULE_BYTES = 2 * 4 + 2 * 2 * 8 + 32
+
+#: Shared memory the tile's pool takes (`TileRows.pool`): a ticket counter
+#: a quarter of tensor memory's lanes and a trip's parity, a word each, and
+#: the mixers' barrier, a pair of mbarriers on sixteen bytes.
+POOL_BYTES = 4 * 2 * 4 + 2 * 8
 
 #: The columns of tensor memory the high-order tile's plan may take: a
 #: block's 512 on sm_100a -- one number, for the target to give later
@@ -2855,7 +2915,11 @@ def _tcgen05_tile_search(section: GroupSection, context, budget: int,
                                 TILE_BANDS)), aslots)
         groups = tile_groups('tcgen05', context)
         handoffs = tile_handoffs('tcgen05', context)
-        owned = bands * (aslots // bands)
+        pool = tile_pool('tcgen05', tile_schedule('tcgen05', context),
+                         groups, handoffs, aslots, bands, context)
+        # In the pool no slot is a band's (`TileRows.pool`): every slot of
+        # A's ring the mixers' alike.
+        owned = aslots if pool == 'on' else bands * (aslots // bands)
         tile = TileRows('tcgen05', width, elements, 1, spans_asked(context),
                         groups, bands, dslots,
                         tile_schedule('tcgen05', context),
@@ -2867,7 +2931,8 @@ def _tcgen05_tile_search(section: GroupSection, context, budget: int,
                         handoffs=handoffs, wait=tile_wait('tcgen05', context),
                         inputs=tile_input_issue('tcgen05', context),
                         ahead=tile_input_ahead(
-                            tile_schedule('tcgen05', context), context))
+                            tile_schedule('tcgen05', context), context),
+                        pool=pool)
         # One ring for A and B (`TileRows.handoffs` `one`): B's of A's
         # slots, a block's slot of each alike.
         for operators in ((owned,) if handoffs == 'one'
@@ -2929,7 +2994,8 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
                 f'B\'s ring', _spans_note(group.section)] + \
             _schedule_notes(group.section, context) + \
             _issue_notes(group.section, context) + \
-            _ahead_notes(group.section, context)
+            _ahead_notes(group.section, context) + \
+            _pool_notes(group.section, context)
     b = WARPGROUP_WARPS * tile.bands
     return [f'the high-order tile: {rows}; warps 0 to {b - 1} its star '
             f'bands, A into tensor memory; warps {b} to {b + 3} the epilogue, '
@@ -2945,7 +3011,26 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
             f'{_issue_note(tile)}',
             _spans_note(group.section)] + \
         _schedule_notes(group.section, context) + \
-        _ahead_notes(group.section, context)
+        _ahead_notes(group.section, context) + \
+        _pool_notes(group.section, context)
+
+
+def _pool_notes(section: GroupSection, context) -> List[str]:
+    """The kernel's word on the pool (`TileRows.pool`) where the options
+    ask for it: what it mixes, or why the tile declined it."""
+    if pool_asked(context) != 'on':
+        return []
+    tile = section.tile
+    if tile.pool == 'on':
+        mixers = 4 * pool_mixers(tile.bands)
+        return [f'A mixed in a pool of {mixers} warps -- the star bands\' and '
+                f'the epilogue\'s -- each taking the trip\'s blocks by '
+                f'tickets of its quarter of the lanes, the mixers meeting '
+                f'when the trip\'s run out, the epilogue draining D behind '
+                f'them']
+    why = pool_refusal(tile.engine, tile.schedule, tile.groups,
+                       tile.handoffs, tile.aslots, tile.bands)
+    return [f'matrix_pool=on declined: {why}']
 
 
 def _depth_note(section: GroupSection) -> str:
@@ -3934,6 +4019,10 @@ def shared_bytes(section: GroupSection, elements: int) -> int:
         # The tiles' ring -- its ids and a pair of mbarriers a slot -- and the
         # claim's response with its mbarrier (`batch_loop.TileSchedule`).
         operators += SCHEDULE_BYTES // size
+    if section.tile is not None and section.tile.pool == 'on':
+        # The pool's ticket counters and its barrier
+        # (`compute.multi_element._Pool`).
+        operators += POOL_BYTES // size
     # tcgen05's D staged in shared memory for every element warp to write
     # (`compute.multi_element._tcgen05`): the widest step's rows of the
     # element, an odd number of floats apart -- for bulk reductions, the
@@ -5272,11 +5361,13 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'slots_asked', 'tile_slots', 'tile_depth', 'handoffs_asked',
            'tile_handoffs', 'wait_asked', 'tile_wait', 'input_issue_asked',
            'tile_input_issue', 'input_ahead_asked', 'tile_input_ahead',
+           'pool_asked', 'pool_mixers', 'pool_refusal', 'tile_pool',
            'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_BULK_ROWS', 'TILE_TCGEN05',
            'TMEM_BUDGET',
            'tile_dslots', 'tile_groups', 'tile_output', 'TILE_UNROLLED_ROWS',
            'TILE_OUTPUT_KEEP',
-           'SCHEDULE_BYTES', 'schedule_asked', 'tile_schedule', 'tile_tmem',
+           'SCHEDULE_BYTES', 'POOL_BYTES', 'schedule_asked', 'tile_schedule',
+           'tile_tmem',
            'TILE_ACCUMULATORS', 'tile_passes', 'tile_pass_bounds',
            'tile_pass_chunks',
            'tile_lowered', 'tile_notes', 'tile_plan', 'tile_refusal',

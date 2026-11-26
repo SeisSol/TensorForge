@@ -185,6 +185,11 @@ def _tile_consumers(section) -> tuple:
     behind the warp's barrier, and their roles."""
     from tensorforge.generators.element_group import WARPGROUP_WARPS
     if section.tile.engine == 'tcgen05':
+        if section.tile.pool == 'on':
+            # The pool's mixers (`_Pool`): the star bands' warps and the
+            # epilogue's, a warp's arrival each.
+            return (WARPGROUP_WARPS * (section.tile.bands + 1),
+                    ('star', 'epilogue'))
         # The input ring's: tcgen05's star bands, a warp's arrival each.
         return WARPGROUP_WARPS * section.tile.bands, ('star',)
     tiles = section.tile.tiles
@@ -2862,8 +2867,13 @@ class _Fold:
             # filled last and the next band's not read yet -- and a wait on
             # the phase's parity cannot tell the two apart: the band would
             # write A the products have not read.
-            bands = _fold_bands(trip)
-            self.slots = bands * (self.slots // bands)
+            tile = getattr(section, 'tile', None)
+            if tile is None or tile.pool != 'on':
+                # In the pool no slot is a band's: A's slots at least a
+                # quarter's mixers, which no wait's parity confuses
+                # (`element_group.pool_refusal`, tests/pool_model.py).
+                bands = _fold_bands(trip)
+                self.slots = bands * (self.slots // bands)
         #: Whether A's ring is B's too (`TileRows.handoffs` `one`): a
         #: block's one wait for both and one commit.
         self.shared = (section.tile is not None
@@ -3118,6 +3128,128 @@ class _Fold:
 
 #: The widest N one tcgen05.mma takes (PTX ISA, "tcgen05.mma": N to 256).
 TCGEN05_N_MAX = 256
+
+
+class _Pool:
+    """The high-order tile's mixer pool on tcgen05 (`TileRows.pool`): the
+    star bands' warps and the epilogue's, each in its quarter of tensor
+    memory's lanes (its warp modulo four), mixing a trip's blocks of A by
+    tickets of its quarter's counter of the trip's parity (`cuda.h`'s
+    `ticketTake`) -- a ticket below the trip's blocks a block, whose quarter
+    of A the warp fills as a band does (`_Fold._fill_one`); a ticket past
+    them the warp's last of the trip.  Each walks I's chunks in order,
+    taking and giving back every one as a band does, and gives the trip's
+    input slot back behind its last ticket.  Then every mixer arrives at the
+    mixers' trip barrier -- an mbarrier its warps' elected arrivals complete
+    -- and waits for the trip's phase; behind it the first band warp's first
+    lane resets the counters of the trip's parity for the trip two on, which
+    the barrier's next phase orders ahead of every draw of that trip.  No
+    wait on the barrier aliases: a warp's next arrival needs the phase it
+    waits for (tests/pool_model.py)."""
+
+    def __init__(self, trip, fold, M):
+        from tensorforge.generators.element_group import WARPGROUP_WARPS
+        b = trip.builder
+        tile = trip.section.tile
+        self.trip, self.fold, self.M = trip, fold, M
+        self.mixers = WARPGROUP_WARPS * (tile.bands + 1)
+        leader = 'threadIdx.x == 0 && threadIdx.y == 0'
+        # A counter a quarter and a trip's parity.
+        self.counters = b.ticket_counters(
+            'tk', 2 * WARPGROUP_WARPS, leader,
+            arena=GeneralLexicon.TOTAL_SHR_MEM)
+        # The mixers' trip barrier: a ring of one slot whose full side every
+        # mixer warp arrives at and waits on -- no role of it the other's
+        # producer (`RingSpec.producer` None).
+        self.meet = b.mbarrier_ring('tp', 1, full=self.mixers, empty=1,
+                                    leader=leader,
+                                    arena=GeneralLexicon.TOTAL_SHR_MEM)
+        if self.counters is None or self.meet is None:
+            raise InternalError('the pool in a body without an arena for '
+                                'its counters and its barrier')
+
+    def _draw(self, index):
+        """The warp's next ticket of its counter `index`."""
+        return self.trip.builder.rawexpr(
+            'tensorforge::ticketTake(&{0}[{1}])', self.counters, index,
+            type_=INDEX, hint='tk', uniform=Uniformity.MULT, crosslane=True)
+
+    def _items(self, tk, index, held, trips, every, end, chunk) -> None:
+        """The warp's tickets below `end`, each a block it fills, the one
+        past them left in `tk`."""
+        b = self.trip.builder
+        with b.while_(tk, hint='t', uniform=Uniformity.MULT) as loop:
+            t = loop.induction
+            loop.exit_when(b.op('ge', BOOL, t, end, hint='past'))
+            self.fold._fill_one(self.trip, held, trips, every, t, chunk)
+            nxt = self._draw(index)
+            b.assign(tk, nxt)
+            loop.yield_(nxt)
+
+    def mix(self, ring, slot, parity, windows, trips, lane0,
+            resets: bool) -> None:
+        """A mixer's trip (the star bands' warps and the epilogue's alike):
+        the trip's input slot as it lands, its tickets' blocks of A, the
+        input slot back, the mixers' barrier -- and, where `resets`, the
+        counters of the trip's parity reset behind it."""
+        from tensorforge.generators.element_group import STAR_ROWS
+        trip, fold = self.trip, self.fold
+        b = trip.builder
+        b.ring_take(ring, slot, parity, writes=windows)
+        held = fold.rows(trip, self.M)
+        chunks = trip.chunks
+        if chunks is not None:
+            # As the bands': the star matrices in registers now, the input
+            # slot back at once.
+            b.barrier(Participants.WAVE)
+            b.ring_release(ring, slot, lane0)
+        every = b.const(True, BOOL)
+        odd = b.op('rem', INDEX, trips, 2, hint='tko')
+        index = b.op('add', INDEX, b.op('mul', INDEX, b.op(
+            'rem', INDEX, trip.slot, 4, hint='q'), 2, hint='tk'), odd,
+            hint='tk')
+        apart = b.rawexpr('tensorforge::warpsApart()', type_=BOOL,
+                          hint='apart', uniform=Uniformity.MULT)
+        with b.if_(apart):
+            tk = b.declare(INDEX, hint='tk', uniform=Uniformity.MULT)
+            b.assign(tk, self._draw(index))
+            if chunks is None:
+                self._items(tk, index, held, trips, every, fold.blocks,
+                            None)
+            else:
+                # I's chunks in order, every one taken and given back --
+                # those no ticket of the warp's falls in too, so that each
+                # round's arrivals are every mixer's.
+                per = chunks.rows // STAR_ROWS
+                cbase = chunks.base(trip)
+                with b.for_(0, -(-fold.blocks // per), unroll=1, hint='h',
+                            uniform=Uniformity.MULT) as outer:
+                    h = outer.induction
+                    cslot, cparity, cat = chunks.round(trip, h, cbase)
+                    chunks.take(trip, cslot, cparity)
+                    end = b.op('min', INDEX, b.op('mul', INDEX, b.op(
+                        'add', INDEX, h, 1, hint='he'), per, hint='he'),
+                        fold.blocks, hint='he')
+                    self._items(tk, index, held, trips, every, end,
+                                (cat, chunks.row(b, h)))
+                    chunks.release(trip, cslot)
+        if chunks is None:
+            # Every ticket of the warp's mixed: the input slot back.
+            b.barrier(Participants.WAVE)
+            b.ring_release(ring, slot, lane0)
+        # The mixers' barrier: a warp's arrival, then the trip's phase.
+        mslot, mparity = b.ring_round(self.meet, trips, hint='tp')
+        b.ring_publish(self.meet, mslot, lane0)
+        b.ring_take(self.meet, mslot, mparity, writes=[self.counters])
+        if resets:
+            # Behind it the trip's counters reset for the trip two on.
+            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,
+                                           hint='reset'), lane0,
+                         hint='reset')
+            with b.if_(first):
+                for q in range(4):
+                    b.store(self.counters, b.const(0, INDEX), b.op(
+                        'add', INDEX, odd, 2 * q, hint='tk'))
 
 
 def _fold_bands(trip) -> int:
@@ -6096,9 +6228,13 @@ class MultiElementSection(AbstractInstruction):
         _, n16, _ = matrix_shape('tcgen05', 100)
         n = _round_up(step.rows[1] - step.rows[0], n16)
         M = elements * (step.cols[1] - step.cols[0])
-        # A's ring in tensor memory, from the star bands to the mma warp.
-        fold = _Fold(trip, step, M, producer='star',
+        pool = tile.pool == 'on'
+        # A's ring in tensor memory, from the star bands -- in the pool the
+        # bands' and the epilogue's mixers (`_Pool`) -- to the mma warp.
+        fold = _Fold(trip, step, M,
+                     producer=('star', 'epilogue') if pool else 'star',
                      consumers=('mma',))
+        mixing = _Pool(trip, fold, M) if pool else None
         # D's ring in tensor memory: a slot a trip, full where the trip's
         # products complete (their commit), empty where every epilogue
         # warp is done reading it.
@@ -6122,42 +6258,57 @@ class MultiElementSection(AbstractInstruction):
         lane0 = b.op('eq', BOOL, trip.lane, 0, hint='first')
         roles = b.split_roles(_tile_roles(self._context, self._group))
         with roles.role('star'):
-            b.ring_take(ring, slot, parity, writes=windows)
-            held = fold.rows(trip, M)
-            if trip.chunks is not None:
-                # I streams in chunks through a ring of its own: the input
-                # slot holds the trip's star matrices alone, in registers
-                # now -- back at once, the next trip's staged under this one.
-                b.barrier(Participants.WAVE)
-                b.ring_release(ring, slot, lane0)
-            every = b.const(True, BOOL)
-            if tile.groups == 'loop':
-                fold.fill_loop(trip, held, trips, every)
+            if pool:
+                # The bands' warps mix by tickets (`_Pool`), the counters'
+                # reset theirs behind the mixers' barrier.
+                mixing.mix(ring, slot, parity, windows, trips, lane0,
+                           resets=True)
             else:
-                # I in chunks (`_InputChunks`): every band takes a chunk's
-                # slot at its first block and gives it back behind its last.
-                chunks = trip.chunks
-                per = chunks.rows // STAR_ROWS if chunks is not None else 0
-                cbase = chunks.base(trip) if chunks is not None else None
-                for j in range(fold.blocks):
-                    chunk = None
-                    if chunks is not None:
-                        cslot, cparity, cat = chunks.round(trip, j // per,
-                                                           cbase)
-                        if j % per == 0:
-                            chunks.take(trip, cslot, cparity)
-                        chunk = (cat, chunks.row(b, j // per))
-                    jslot, jparity, at = fold.round(trips, j)
-                    fold.fill(trip, held, j, jslot, jparity, at, every,
-                              chunk)
-                    if chunks is not None and (j % per == per - 1
-                                               or j + 1 == fold.blocks):
-                        chunks.release(trip, cslot)
-            if trip.chunks is None:
-                # Every block of A computed: the input slot back.
-                b.barrier(Participants.WAVE)
-                b.ring_release(ring, slot, lane0)
+                b.ring_take(ring, slot, parity, writes=windows)
+                held = fold.rows(trip, M)
+                if trip.chunks is not None:
+                    # I streams in chunks through a ring of its own: the
+                    # input slot holds the trip's star matrices alone, in
+                    # registers now -- back at once, the next trip's staged
+                    # under this one.
+                    b.barrier(Participants.WAVE)
+                    b.ring_release(ring, slot, lane0)
+                every = b.const(True, BOOL)
+                if tile.groups == 'loop':
+                    fold.fill_loop(trip, held, trips, every)
+                else:
+                    # I in chunks (`_InputChunks`): every band takes a
+                    # chunk's slot at its first block and gives it back
+                    # behind its last.
+                    chunks = trip.chunks
+                    per = (chunks.rows // STAR_ROWS if chunks is not None
+                           else 0)
+                    cbase = (chunks.base(trip) if chunks is not None
+                             else None)
+                    for j in range(fold.blocks):
+                        chunk = None
+                        if chunks is not None:
+                            cslot, cparity, cat = chunks.round(trip, j // per,
+                                                               cbase)
+                            if j % per == 0:
+                                chunks.take(trip, cslot, cparity)
+                            chunk = (cat, chunks.row(b, j // per))
+                        jslot, jparity, at = fold.round(trips, j)
+                        fold.fill(trip, held, j, jslot, jparity, at, every,
+                                  chunk)
+                        if chunks is not None and (j % per == per - 1
+                                                   or j + 1 == fold.blocks):
+                            chunks.release(trip, cslot)
+                if trip.chunks is None:
+                    # Every block of A computed: the input slot back.
+                    b.barrier(Participants.WAVE)
+                    b.ring_release(ring, slot, lane0)
         with roles.role('epilogue'):
+            if pool:
+                # The epilogue's warps mix too (`_Pool`), and drain the
+                # trip's D behind the mixers' barrier, as without the pool.
+                mixing.mix(ring, slot, parity, windows, trips, lane0,
+                           resets=False)
             b.ring_take(dring, dslot, dparity)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
 

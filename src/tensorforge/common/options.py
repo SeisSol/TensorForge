@@ -442,6 +442,18 @@ def parse_matrix_input_ahead(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_pool` takes.
+MATRIX_POOLS = ('off', 'on')
+
+
+def parse_matrix_pool(text: str) -> str:
+  """`off` or `on` (`Options.matrix_pool`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_POOLS:
+    raise ValueError(f'expected one of {MATRIX_POOLS}, got {text!r}')
+  return value
+
+
 #: What `Options.matrix_handoffs` takes.
 MATRIX_HANDOFFS = ('two', 'one')
 
@@ -3313,6 +3325,26 @@ declare('matrix_input_ahead',
             'the next trip\'s pointer loads and bulk copies find their lines '
             'nearer.  Declined where the tiles go by claims (`tile_schedule`), '
             'whose next tile no stride says.')
+
+declare('matrix_pool',
+        default='off',
+        env='TF_MATRIX_POOL',
+        parse=parse_matrix_pool,
+        doc='Whether the high-order tile on tcgen05 mixes A in a pool '
+            '(`matrix_tile` `high`, `element_group.TileRows.pool`): `off`, '
+            'the default, the star bands a block each in turn '
+            '(`matrix_bands`), the epilogue warpgroup waiting for D; `on`, '
+            'the bands\' warps and the epilogue\'s mixers alike, each '
+            'taking the trip\'s blocks by tickets of its quarter of tensor '
+            'memory\'s lanes and filling that quarter of the block\'s A, the '
+            'mixers meeting when the trip\'s tickets run out and the '
+            'epilogue draining D behind them (`multi_element._Pool`).  '
+            'Declined on wgmma, where the tiles go by claims '
+            '(`tile_schedule`), with the group\'s blocks written out '
+            '(`matrix_groups` `unrolled`), with one ring for A and B '
+            '(`matrix_handoffs` `one`), and where A\'s ring has fewer slots '
+            'than a quarter has mixers, whose waits would pass on the '
+            'parity of a phase two short (tests/pool_model.py).')
 
 declare('matrix_handoffs',
         default='two',

@@ -7336,8 +7336,8 @@ GROUPS = {
          sub(ME_SECTION, '                    if chunks is not None and (j % per == per - 1\n',
              '                    if chunks is not None and (j % per == 0\n', 1)),
         ("tcgen05's input slot back behind the blocks with I in chunks",
-         sub(ME_SECTION, '            held = fold.rows(trip, M)\n            if trip.chunks is not None:\n',
-             '            held = fold.rows(trip, M)\n            if False:\n', 1)),
+         sub(ME_SECTION, '                held = fold.rows(trip, M)\n                if trip.chunks is not None:\n',
+             '                held = fold.rows(trip, M)\n                if False:\n', 1)),
     ]),
     'foldslots': ('tests/test_three_roles.py tests/test_hiorder_tile.py -n 6', [
         ("the bands' slots of A in turn between roles",
@@ -7353,7 +7353,7 @@ GROUPS = {
          sub(ME_GROUP, "                                TILE_BANDS)), aslots)\n",
              "                                TILE_BANDS)), 4)\n", 1)),
         ("the tile's slots of A past the bands' own",
-         sub(ME_GROUP, '        owned = bands * (aslots // bands)\n',
+         sub(ME_GROUP, "        owned = aslots if pool == 'on' else bands * (aslots // bands)\n",
              '        owned = aslots\n', 1)),
     ]),
     'hiout': ('tests/test_hiorder_tile.py -n 6', [
@@ -7866,6 +7866,160 @@ GROUPS = {
         ("a warp's turn going on past its tickets",
          sub(ORACLE, '                if COROUTINE_ARMS and _TICKET_CALL.search(node[1]):\n',
              '                if False:\n', 1)),
+    ]),
+    # The high-order tile's mixer pool on tcgen05 (`Options.matrix_pool`,
+    # `element_group.tile_pool`, `compute.multi_element._Pool`): the plan's
+    # refusals and its shared memory, the kernel's counters, regions, the
+    # mixers' barrier and the reset behind it.  The protocol's own rules
+    # dropped: tests/test_pool_model.py.
+    'hipool': ('tests/test_hiorder_pool.py -n 6', [
+        ("the options' pool unread",
+         sub(ME_GROUP, "    return getattr(context.get_user_options(), 'matrix_pool', 'off')\n",
+             "    return 'off'\n", 1)),
+        ("the pool's refusal on wgmma dropped",
+         sub(ME_GROUP, "    if engine != 'tcgen05':\n        return 'wgmma\\'s warpgroups each fill their own A'\n",
+             "", 1)),
+        ("the pool where the tiles go by claims",
+         sub(ME_GROUP, "    if schedule != 'static':\n", "    if False:\n", 1)),
+        ("the pool with the group's blocks written out",
+         sub(ME_GROUP, "    if groups != 'loop':\n", "    if False:\n", 1)),
+        ("the pool on one ring for A and B",
+         sub(ME_GROUP, "    if handoffs != 'two':\n", "    if False:\n", 1)),
+        ("the pool on fewer slots of A than a quarter's mixers",
+         sub(ME_GROUP, "    if aslots < mixers:\n", "    if False:\n", 1)),
+        ("as many slots of A as a quarter's mixers refused",
+         sub(ME_GROUP, "    if aslots < mixers:\n", "    if aslots <= mixers:\n", 1)),
+        ("a quarter's mixers its band warps alone",
+         sub(ME_GROUP, "    return bands + 1\n", "    return bands\n", 1)),
+        ("the pool's slots of A as many a band as every band has",
+         sub(ME_GROUP, "        owned = aslots if pool == 'on' else bands * (aslots // bands)\n",
+             "        owned = bands * (aslots // bands)\n", 1)),
+        ("the pool's shared memory without its barrier",
+         sub(ME_GROUP, "POOL_BYTES = 4 * 2 * 4 + 2 * 8\n", "POOL_BYTES = 4 * 2 * 4\n", 1)),
+        ("the pool's shared memory uncounted",
+         sub(ME_GROUP, "        operators += POOL_BYTES // size\n", "        operators += 0\n", 1)),
+        ("the pool's note dropped",
+         sub(ME_GROUP, "    if tile.pool == 'on':\n        mixers = 4 * pool_mixers(tile.bands)\n",
+             "    if False:\n        mixers = 4 * pool_mixers(tile.bands)\n", 1)),
+        ("A's slots a band's each in the pool too",
+         sub(ME_SECTION, "            if tile is None or tile.pool != 'on':\n", "            if True:\n", 1)),
+        ("the input slots given back by the bands' warps alone",
+         sub(ME_SECTION, "            return (WARPGROUP_WARPS * (section.tile.bands + 1),\n",
+             "            return (WARPGROUP_WARPS * section.tile.bands,\n", 1)),
+        ("the epilogue's warps no mixers",
+         sub(ME_SECTION, "                mixing.mix(ring, slot, parity, windows, trips, lane0,\n"
+                         "                           resets=False)\n",
+             "                pass\n", 1)),
+        ("one counter a quarter for both parities of the trip",
+         sub(ME_SECTION, "            'rem', INDEX, trip.slot, 4, hint='q'), 2, hint='tk'), odd,\n",
+             "            'rem', INDEX, trip.slot, 4, hint='q'), 2, hint='tk'), 0,\n", 1)),
+        ("a ticket at the blocks' end filled",
+         sub(ME_SECTION, "            loop.exit_when(b.op('ge', BOOL, t, end, hint='past'))\n",
+             "            loop.exit_when(b.op('gt', BOOL, t, end, hint='past'))\n", 1)),
+        ("the last chunk's tickets past the blocks filled",
+         sub(ME_SECTION, "                    end = b.op('min', INDEX, b.op('mul', INDEX, b.op(\n"
+                         "                        'add', INDEX, h, 1, hint='he'), per, hint='he'),\n"
+                         "                        fold.blocks, hint='he')\n",
+             "                    end = b.op('mul', INDEX, b.op(\n"
+             "                        'add', INDEX, h, 1, hint='he'), per, hint='he')\n", 1)),
+        ("the mixers' barrier the bands' warps' alone",
+         sub(ME_SECTION, "        self.mixers = WARPGROUP_WARPS * (tile.bands + 1)\n",
+             "        self.mixers = WARPGROUP_WARPS * tile.bands\n", 1)),
+        ("the mixers' barrier every lane's arrival",
+         sub(ME_SECTION, "        b.ring_publish(self.meet, mslot, lane0)\n",
+             "        b.ring_publish(self.meet, mslot, b.const(True, BOOL))\n", 1)),
+        ("the counters never reset",
+         sub(ME_SECTION, "        if resets:\n", "        if False:\n", 1)),
+        ("the counters reset ahead of the mixers' barrier",
+         sub(ME_SECTION, "        b.ring_publish(self.meet, mslot, lane0)\n"
+                         "        b.ring_take(self.meet, mslot, mparity, writes=[self.counters])\n"
+                         "        if resets:\n"
+                         "            # Behind it the trip's counters reset for the trip two on.\n"
+                         "            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,\n"
+                         "                                           hint='reset'), lane0,\n"
+                         "                         hint='reset')\n"
+                         "            with b.if_(first):\n"
+                         "                for q in range(4):\n"
+                         "                    b.store(self.counters, b.const(0, INDEX), b.op(\n"
+                         "                        'add', INDEX, odd, 2 * q, hint='tk'))\n",
+             "        if resets:\n"
+             "            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,\n"
+             "                                           hint='reset'), lane0,\n"
+             "                         hint='reset')\n"
+             "            with b.if_(first):\n"
+             "                for q in range(4):\n"
+             "                    b.store(self.counters, b.const(0, INDEX), b.op(\n"
+             "                        'add', INDEX, odd, 2 * q, hint='tk'))\n"
+             "        b.ring_publish(self.meet, mslot, lane0)\n"
+             "        b.ring_take(self.meet, mslot, mparity, writes=[self.counters])\n", 1)),
+        ("the counters reset by every band warp",
+         sub(ME_SECTION, "            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,\n"
+                         "                                           hint='reset'), lane0,\n"
+                         "                         hint='reset')\n",
+             "            first = lane0\n", 1)),
+        ("the counters not zeroed in the setup",
+         sub(BUILD, "                b.store(counters, b.const(0, INDEX), k)\n", "                pass\n", 1)),
+    ]),
+    # The pool's protocol in the kernel against the host oracle alone -- no
+    # text test: each mutant a hang, a race the oracle's tracker sees, or an
+    # output not the bands' (`test_hiorder_pool.test_the_pool_on_the_oracle`).
+    'hipooloracle': ('tests/test_hiorder_pool.py::test_the_pool_on_the_oracle -n 4', [
+        ("the oracle: the input slots given back by the bands' warps alone",
+         sub(ME_SECTION, "            return (WARPGROUP_WARPS * (section.tile.bands + 1),\n",
+             "            return (WARPGROUP_WARPS * section.tile.bands,\n", 1)),
+        ("the oracle: the epilogue's warps no mixers",
+         sub(ME_SECTION, "                mixing.mix(ring, slot, parity, windows, trips, lane0,\n"
+                         "                           resets=False)\n",
+             "                pass\n", 1)),
+        ("the oracle: one counter a quarter for both parities of the trip",
+         sub(ME_SECTION, "            'rem', INDEX, trip.slot, 4, hint='q'), 2, hint='tk'), odd,\n",
+             "            'rem', INDEX, trip.slot, 4, hint='q'), 2, hint='tk'), 0,\n", 1)),
+        ("the oracle: a ticket at the blocks' end filled",
+         sub(ME_SECTION, "            loop.exit_when(b.op('ge', BOOL, t, end, hint='past'))\n",
+             "            loop.exit_when(b.op('gt', BOOL, t, end, hint='past'))\n", 1)),
+        ("the oracle: the last chunk's tickets past the blocks filled",
+         sub(ME_SECTION, "                    end = b.op('min', INDEX, b.op('mul', INDEX, b.op(\n"
+                         "                        'add', INDEX, h, 1, hint='he'), per, hint='he'),\n"
+                         "                        fold.blocks, hint='he')\n",
+             "                    end = b.op('mul', INDEX, b.op(\n"
+             "                        'add', INDEX, h, 1, hint='he'), per, hint='he')\n", 1)),
+        ("the oracle: the mixers' barrier the bands' warps' alone",
+         sub(ME_SECTION, "        self.mixers = WARPGROUP_WARPS * (tile.bands + 1)\n",
+             "        self.mixers = WARPGROUP_WARPS * tile.bands\n", 1)),
+        ("the oracle: the mixers' barrier every lane's arrival",
+         sub(ME_SECTION, "        b.ring_publish(self.meet, mslot, lane0)\n",
+             "        b.ring_publish(self.meet, mslot, b.const(True, BOOL))\n", 1)),
+        ("the oracle: the counters never reset",
+         sub(ME_SECTION, "        if resets:\n", "        if False:\n", 1)),
+        ("the oracle: the counters reset ahead of the mixers' barrier",
+         sub(ME_SECTION, "        b.ring_publish(self.meet, mslot, lane0)\n"
+                         "        b.ring_take(self.meet, mslot, mparity, writes=[self.counters])\n"
+                         "        if resets:\n"
+                         "            # Behind it the trip's counters reset for the trip two on.\n"
+                         "            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,\n"
+                         "                                           hint='reset'), lane0,\n"
+                         "                         hint='reset')\n"
+                         "            with b.if_(first):\n"
+                         "                for q in range(4):\n"
+                         "                    b.store(self.counters, b.const(0, INDEX), b.op(\n"
+                         "                        'add', INDEX, odd, 2 * q, hint='tk'))\n",
+             "        if resets:\n"
+             "            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,\n"
+             "                                           hint='reset'), lane0,\n"
+             "                         hint='reset')\n"
+             "            with b.if_(first):\n"
+             "                for q in range(4):\n"
+             "                    b.store(self.counters, b.const(0, INDEX), b.op(\n"
+             "                        'add', INDEX, odd, 2 * q, hint='tk'))\n"
+             "        b.ring_publish(self.meet, mslot, lane0)\n"
+             "        b.ring_take(self.meet, mslot, mparity, writes=[self.counters])\n", 1)),
+        ("the oracle: the counters reset by every band warp",
+         sub(ME_SECTION, "            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,\n"
+                         "                                           hint='reset'), lane0,\n"
+                         "                         hint='reset')\n",
+             "            first = lane0\n", 1)),
+        ("the oracle: the counters not zeroed in the setup",
+         sub(BUILD, "                b.store(counters, b.const(0, INDEX), k)\n", "                pass\n", 1)),
     ]),
     # `auto`'s input issue (`element_group.tile_input_issue`, J5): the elected
     # lane on tcgen05, each element's lane on wgmma.

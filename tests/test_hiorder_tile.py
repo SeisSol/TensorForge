@@ -467,7 +467,8 @@ def test_tcgen05_s_kernel_text():
 
 # -- the oracle ------------------------------------------------------------------ #
 
-def _on_the_oracle(arch, order, count, grid=1, launches=(), **options):
+def _on_the_oracle(arch, order, count, grid=1, launches=(), schedule=None,
+                   **options):
     """Every element of `count` against NumPy on the host oracle, the
     group's trips over them -- the last one's elements past the batch
     masked -- and no access a ring, a role's barrier or a wait does not
@@ -520,7 +521,7 @@ def _on_the_oracle(arch, order, count, grid=1, launches=(), **options):
         mem = kernel_eval.evaluate_wave(
             gen.get_kernel(), lanes, seed=me.SEED, globals_only=True,
             mults=mults, block=True, preset=preset, elements=count,
-            races=races, grid=grid, launches=launches)
+            races=races, grid=grid, launches=launches, schedule=schedule)
     assert not races, races[:3]
     got = memory(output, lambda e, s: mem.get((f'{output.name}@{e}', s),
                                               fill.read(f'{output.name}@{e}',
@@ -2516,7 +2517,8 @@ def test_the_wait_forms_build(form, tmp_path):
 #: both; A's ring and B's as one, alone and with both, and so with the mma
 #: warp waiting by try_wait with a suspend-time hint and by test_wait; and
 #: I's bulk copies by the lane elect.sync picks, in chunks and whole, and
-#: the next trip's I asked of L2 a trip ahead, alone and with it.
+#: the next trip's I asked of L2 a trip ahead, alone and with it; and A
+#: mixed in a pool, I in chunks and whole (`test_hiorder_pool`).
 GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                 'loop': {'matrix_groups': 'loop'},
                 'whole': {'matrix_input_chunks': 'whole'},
@@ -2542,12 +2544,16 @@ GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                              'matrix_input_chunks': 'whole'},
                 'ahead': {'matrix_input_ahead': 'l2'},
                 'ie-ahead': {'matrix_input_issue': 'elect',
-                             'matrix_input_ahead': 'l2'}}
+                             'matrix_input_ahead': 'l2'},
+                'pool': {'matrix_pool': 'on'},
+                'pool-whole': {'matrix_pool': 'on',
+                               'matrix_input_chunks': 'whole'}}
 #: The variants of tcgen05's levers alone (`test_the_tile_computes_on_the_
 #: gpu`): wgmma's tile has no bands, adds D a cell or a row a reduction,
-#: and its products are the warpgroup's.
+#: and its products are the warpgroup's, whose warps fill their own A.
 TCGEN05_VARIANTS = ('b3', 'red', 'box', 'elect', 'constant', 'trip',
-                    'trip-ec', 'one', 'one-ec', 'one-ec-s', 'one-ec-t')
+                    'trip-ec', 'one', 'one-ec', 'one-ec-s', 'one-ec-t',
+                    'pool', 'pool-whole')
 
 
 @pytest.mark.parametrize('variant', sorted(GPU_VARIANTS))
@@ -2595,7 +2601,7 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
                                      'elect', 'constant', 'trip', 'trip-ec',
                                      'one', 'one-ec', 'one-ec-s', 'one-ec-t',
                                      'ie', 'ie-whole', 'ahead', 'ie-ahead',
-                                     'il'])
+                                     'il', 'pool', 'pool-whole'])
 @pytest.mark.parametrize('order', [6, 8])
 def test_many_trips_of_the_tile_on_the_gpu(order, variant, target, cache_root,
                                            tensorforge_include):
