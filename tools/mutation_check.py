@@ -6994,26 +6994,32 @@ GROUPS = {
              "    with b.for_(first, first + taken, unroll=True, hint='g') as loop:\n", 1)),
         # tcgen05's group engine
         ("tcgen05's block products into D's first columns",
-         sub(ME_SECTION, '                          d_column=lo, term=(ia, ib), plan=plan,\n',
-             '                          d_column=0, term=(ia, ib), plan=plan,\n', 1)),
+         sub(ME_SECTION, '                      d_column=lo, term=(ia, ib), plan=plan,\n',
+             '                      d_column=0, term=(ia, ib), plan=plan,\n', 1)),
         ("tcgen05's blocks at the widest N",
-         sub(ME_SECTION, '                b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,\n'
-                         '                          enable_input_d=fresh if first else 1,\n',
-             '                b.tcgen05(widths[-1], tmem, bs[ib], tmem, issue=issue,\n'
-             '                          enable_input_d=fresh if first else 1,\n', 1)),
+         sub(ME_SECTION, '            b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,\n'
+                         '                      enable_input_d=fresh if first else 1,\n',
+             '            b.tcgen05(widths[-1], tmem, bs[ib], tmem, issue=issue,\n'
+             '                      enable_input_d=fresh if first else 1,\n', 1)),
         ("the star role's loop taking a slot of A not given back",
          sub(ME_SECTION, '        b.ring_acquire(self.areas, slot, parity=parity)\n', '', 1)),
         ("tcgen05's every block writing D fresh",
-         sub(ME_SECTION, '                          enable_input_d=fresh if first else 1,\n',
-             '                          enable_input_d=0 if first else 1,\n', 1)),
+         sub(ME_SECTION, '                      enable_input_d=fresh if first else 1,\n',
+             '                      enable_input_d=0 if first else 1,\n', 1)),
         ("tcgen05's lower halves of A read where the upper ones are",
-         sub(ME_SECTION, '                                        2 * STAR_ROWS * p + STAR_ROWS * ia,\n',
-             '                                        2 * STAR_ROWS * p,\n', 1)),
+         sub(ME_SECTION, '                      a_column=(at + 2 * STAR_ROWS * p + STAR_ROWS * ia\n'
+                         '                                if isinstance(at, int) else b.op(\n'
+                         "                                    'add', INDEX, at,\n"
+                         '                                    2 * STAR_ROWS * p + STAR_ROWS * ia,\n',
+             '                      a_column=(at + 2 * STAR_ROWS * p\n'
+             '                                if isinstance(at, int) else b.op(\n'
+             "                                    'add', INDEX, at,\n"
+             '                                    2 * STAR_ROWS * p,\n', 1)),
         ("tcgen05's lower halves of B read where the upper ones are",
-         sub(ME_SECTION, "                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),\n"
-                         "                                desc=desc, hint='b')\n",
-             "                'mul', INDEX, part, 2 * p, hint='gb'), hint='gb'),\n"
-             "                                desc=desc, hint='b')\n", 1)),
+         sub(ME_SECTION, "            'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),\n"
+                         "                            desc=desc, hint='b')\n",
+             "            'mul', INDEX, part, 2 * p, hint='gb'), hint='gb'),\n"
+             "                            desc=desc, hint='b')\n", 1)),
         ("the star role's loop mixing the first rows of K",
          sub(ME_SECTION, "        k0 = b.op('mul', INDEX, j, STAR_ROWS, hint='k')\n",
              "        k0 = b.op('mul', INDEX, j, 0, hint='k')\n", 1)),
@@ -7499,6 +7505,70 @@ GROUPS = {
         ("CUDA's constant tables in global memory",
          sub(CUDA_LEXIC, "    storage = '__constant__' if space == 'constant' else '__device__'\n",
              "    storage = '__device__'\n", 1)),
+    ]),
+    # The high-order tile's rings on tcgen05 numbered by the trip, the group
+    # loop written out a slot of both at a time, the slots numbers in it
+    # (`Options.matrix_slots` `trip`, `element_group.tile_slots`,
+    # `tile_depth`, `multi_element._OperatorRing._by_trip`, `_Fold.round_at`).
+    # The tests of the numbering alone, as `hiissue`'s.
+    'hislots': (' '.join(f'tests/test_hiorder_tile.py::{t}' for t in (
+        'test_the_issue_options_parse',
+        'test_the_slots_the_options_ask_for',
+        'test_the_ring_model_numbers_b_s_ring_by_the_trip',
+        'test_the_slots_by_the_trip_text',
+        'test_the_slots_by_the_trip_on_the_oracle',
+        'test_the_slots_by_the_trip_over_o8_s_blocks_on_the_oracle',
+        'test_the_slots_by_the_trip_build',
+        )) + ' -n 6', [
+        ("B's ring by its rounds under trip",
+         sub(ME_GROUP, "    return slots_asked(context) if engine == 'tcgen05' else 'round'\n",
+             "    return 'round'\n", 1)),
+        ("wgmma's tile taking trip",
+         sub(ME_GROUP, "    return slots_asked(context) if engine == 'tcgen05' else 'round'\n",
+             '    return slots_asked(context)\n', 1)),
+        ("trip by default",
+         sub(OPTIONS, "declare('matrix_slots',\n        default='round',\n",
+             "declare('matrix_slots',\n        default='trip',\n", 1)),
+        ("the group loop's body once under trip",
+         sub(ME_GROUP, '    return math.lcm(tile.aslots, max(1, section.ring_slots))\n',
+             '    return 1\n', 1)),
+        ("the group loop written out by A's slots alone",
+         sub(ME_GROUP, '    return math.lcm(tile.aslots, max(1, section.ring_slots))\n',
+             '    return tile.aslots\n', 1)),
+        ("B's slot the first where its block's is a number",
+         sub(ME_SECTION, '            s_ = chunk % slots\n', '            s_ = 0\n', 1)),
+        ("B's parity without the trip's rounds",
+         sub(ME_SECTION, '            uses = -(-(count - s_) // slots)\n', '            uses = 0\n', 1)),
+        ("B's parity without the loop's base",
+         sub(ME_SECTION, "                b, 'add', b.op('div', INDEX, i, slots, hint='bkr'),\n",
+             "                b, 'add', 0,\n", 1)),
+        ("A's parity without the trip's rounds in the written-out loop",
+         sub(ME_SECTION, '        s_ = offset % self.slots\n        uses = -(-(self.blocks - s_) // self.slots)\n',
+             '        s_ = offset % self.slots\n        uses = 0\n', 1)),
+        ("A's parity without the loop's base",
+         sub(ME_SECTION, "        within = _index(b, 'add', b.op('div', INDEX, base, self.slots,\n",
+             "        within = _index(b, 'add', b.op('mul', INDEX, base, 0,\n", 1)),
+        ("the bodies past the last block unguarded",
+         sub(ME_SECTION, '            past = count % depth and offset >= count % depth\n',
+             '            past = False\n', 1)),
+        ("the written-out loop stepping a block at a time",
+         sub(ME_SECTION, "    with b.for_(0, count, depth, unroll=1, hint='g') as loop:\n",
+             "    with b.for_(0, count, 1, unroll=1, hint='g') as loop:\n", 1)),
+        ("B's ring by its rounds in the lowering under trip",
+         sub(ME_SECTION, "        if tile is not None and tile.slots == 'trip':\n"
+                         "            return self._by_trip(trip, i, offset)\n", '', 1)),
+        ("the comment silent on B's numbering",
+         sub(ME_GROUP, "    return ', block j its slot j modulo the slots every trip, as A\\'s'\n",
+             "    return ''\n", 1)),
+        ("the comment silent on the loop's bodies",
+         sub(ME_GROUP, "    return f', its body {depth} times, a slot of the rings\\' each'\n",
+             "    return ''\n", 1)),
+        ("wgmma's tile silent on the numbering it declines",
+         sub(ME_GROUP, '    if slots != section.tile.slots:\n', '    if False:\n', 1)),
+        ("the ring model's two sides numbering alike",
+         sub(Path('tests/ring_model.py'),
+             '    made, used = ((numbering, numbering) if isinstance(numbering, str)\n',
+             '    made, used = ((numbering, numbering) if True\n', 1)),
     ]),
     # The high-order tile's defaults on tcgen05, as a GB200 measured them
     # (`Options.matrix_bands`, `Options.matrix_output` `auto`,

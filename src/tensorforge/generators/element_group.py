@@ -1998,6 +1998,11 @@ class TileRows:
     #: tcgen05's group loop: where its tables are (`Options.tile_tables`,
     #: `tile_tables`), global memory (`device`) or constant memory.
     tables: str = 'device'
+    #: tcgen05's: how B's ring is numbered (`Options.matrix_slots`,
+    #: `tile_slots`): its chunks' rounds counted over the trips (`round`), or
+    #: by the trip as A's ring is, block `j` slot `j % slots` every trip, the
+    #: group loop's body written out a slot of the rings' depth at a time.
+    slots: str = 'round'
 
     @property
     def granule(self) -> int:
@@ -2245,6 +2250,31 @@ def tile_issue(engine: str, context) -> str:
     issue`): as the options ask on tcgen05, whose products a thread issues;
     on wgmma the warpgroup's, `thread` as ever."""
     return issue_asked(context) if engine == 'tcgen05' else 'thread'
+
+
+def slots_asked(context) -> str:
+    """How the options ask the tile to number B's ring (`Options.
+    matrix_slots`): `round` or `trip`."""
+    return getattr(context.get_user_options(), 'matrix_slots', 'round')
+
+
+def tile_slots(engine: str, context) -> str:
+    """How the tile on `engine` numbers B's ring (`TileRows.slots`): as
+    the options ask on tcgen05, `round` on wgmma, whose passes walk B's
+    chunks again."""
+    return slots_asked(context) if engine == 'tcgen05' else 'round'
+
+
+def tile_depth(section: GroupSection) -> int:
+    """How many blocks tcgen05's group loop writes out a trip of its body
+    where both rings are numbered by the trip (`TileRows.slots` `trip`): a
+    slot of A's ring and of B's each, their slots' least common multiple --
+    so that each body's slots are numbers; else 1."""
+    import math
+    tile = section.tile
+    if tile is None or tile.slots != 'trip' or tile.engine != 'tcgen05':
+        return 1
+    return math.lcm(tile.aslots, max(1, section.ring_slots))
 
 
 def tables_asked(context) -> str:
@@ -2669,7 +2699,8 @@ def _wgmma_tile_search(section: GroupSection, context, budget: int,
                         output=tile_output('wgmma', step.rows[1]
                                            - step.rows[0], context),
                         issue=tile_issue('wgmma', context),
-                        tables=tile_tables('wgmma', groups, context))
+                        tables=tile_tables('wgmma', groups, context),
+                        slots=tile_slots('wgmma', context))
         for operators in operator_slots_tried(context):
             for slots in PRODUCER_SLOTS + (1,):
                 lowered = tile_lowered(section, context, tile, slots,
@@ -2712,7 +2743,8 @@ def _tcgen05_tile_search(section: GroupSection, context, budget: int,
                         tile_schedule('tcgen05', context),
                         bands * (aslots // bands), chunk=chunk, cslots=cslots,
                         output=output, issue=tile_issue('tcgen05', context),
-                        tables=tile_tables('tcgen05', groups, context))
+                        tables=tile_tables('tcgen05', groups, context),
+                        slots=tile_slots('tcgen05', context))
         for operators in operator_slots_tried(context):
             for ring in PRODUCER_SLOTS[1:] + (1,):
                 lowered = tile_lowered(section, context, tile, ring,
@@ -2780,9 +2812,27 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
             f'{group.section.ring} slot'
             f'{"s" if group.section.ring > 1 else ""}'
             f'{_chunks_note(group.section)}, warp {b + 5} fills '
-            f'B\'s ring, warp {b + 6} issues{_issue_note(tile)}',
+            f'B\'s ring{_slots_note(tile)}, warp {b + 6} issues'
+            f'{_issue_note(tile)}',
             _spans_note(group.section)] + \
         _schedule_notes(group.section, context)
+
+
+def _depth_note(section: GroupSection) -> str:
+    """The kernel's word on how often the group loop writes its body out
+    (`tile_depth`), where it is more than once."""
+    depth = tile_depth(section)
+    if depth == 1:
+        return ''
+    return f', its body {depth} times, a slot of the rings\' each'
+
+
+def _slots_note(tile: TileRows) -> str:
+    """The kernel's word on how B's ring is numbered (`TileRows.slots`),
+    where it is by the trip."""
+    if tile.slots != 'trip':
+        return ''
+    return ', block j its slot j modulo the slots every trip, as A\'s'
 
 
 def _issue_note(tile: TileRows) -> str:
@@ -2808,6 +2858,10 @@ def _issue_notes(section: GroupSection, context) -> List[str]:
     if tables != 'device':
         notes.append(f'tile_tables={tables} declined: tcgen05\'s group '
                      f'loop\'s alone')
+    slots = slots_asked(context)
+    if slots != section.tile.slots:
+        notes.append(f'matrix_slots={slots} declined: wgmma\'s passes walk '
+                     f'B\'s chunks again')
     return notes
 
 
@@ -2858,6 +2912,7 @@ def _spans_note(section: GroupSection) -> str:
                 + ('; the blocks one loop' + (
                     ', its tables in constant memory'
                     if section.tile.tables == 'constant' else '')
+                   + _depth_note(section)
                    if section.tile.groups == 'loop' else ''))
     stages = _step_stages(section, step)
     chunks = tile_chunks(section, step)
@@ -2871,6 +2926,7 @@ def _spans_note(section: GroupSection) -> str:
     walk = (f'; the {len(chunks)} blocks of K one loop, a dispatch on their '
             f'width' + (', its tables in constant memory'
                         if section.tile.tables == 'constant' else '')
+            + _depth_note(section)
             if section.tile.groups == 'loop' else '')
     return (f'B in kept spans: {round(100 * kept / dense)} % of the dense '
             f'rows of N, {shown}' + (', each to the stage\'s last row, its '
@@ -5041,6 +5097,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'TILE_PRODUCER_WARPS', 'TileRows', 'rowless', 'tile_asked',
            'groups_asked', 'issue_asked', 'kept_span', 'spans_asked',
            'tile_chunks', 'tile_issue', 'tables_asked', 'tile_tables',
+           'slots_asked', 'tile_slots', 'tile_depth',
            'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_TCGEN05', 'TMEM_BUDGET',
            'tile_dslots', 'tile_groups', 'tile_output', 'TILE_UNROLLED_ROWS',
            'TILE_OUTPUT_KEEP',

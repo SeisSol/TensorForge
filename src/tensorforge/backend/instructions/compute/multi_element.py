@@ -2199,16 +2199,54 @@ class _OperatorRing:
         it has just committed."""
         return self.slots - self.hold + (self.step.lowering != 'tcgen05')
 
-    def round(self, trip, i, base=None):
-        """The ring's round of chunk `i` of the trip's step, its slot and
-        the parity of its phase, as values -- and where the slot starts in
-        the ring's buffer."""
+    def round(self, trip, i, base=None, offset=None):
+        """The ring's round of chunk `i + offset` of the trip's step, its
+        slot and the parity of its phase, as values -- and where the slot
+        starts in the ring's buffer.  Numbered by the trip where the high-
+        order tile says so (`TileRows.slots` `trip`, `_by_trip`); there an
+        `offset` given says `i` is a multiple of the slots."""
         b = trip.builder
+        tile = trip.section.tile
+        if tile is not None and tile.slots == 'trip':
+            return self._by_trip(trip, i, offset)
         if base is None:
             base = self.base(trip, 0)
-        g = _index(b, 'add', base, i, 'g')
+        g = _index(b, 'add', _index(b, 'add', base, i, 'g'), offset or 0,
+                   'g')
         slot, parity = b.ring_round(self.ring, g, hint='bk')
         return slot, parity, b.op('mul', INDEX, slot, self.size, hint='bs')
+
+    def _by_trip(self, trip, i, offset):
+        """`round` with the ring numbered by the trip, as A's is (`_Fold.
+        round`): chunk `c = i + offset` takes slot `c % slots` every trip,
+        the slot used `ceil((chunks - slot) / slots)` times a trip, its rounds
+        counted over the trips (`_trip_count`).  Where `i` is a number, or a
+        multiple of the slots -- the group loop's base, written out a slot at
+        a time (`_tcgen05_groups`) -- the slot is the number `offset %
+        slots` and its parity a sum of the trip's and numbers; a value
+        otherwise."""
+        b = trip.builder
+        slots, count = self.slots, len(self.chunks)
+        trips = _trip_count(trip)
+        if isinstance(i, int) or offset is not None:
+            chunk = (i if isinstance(i, int) else 0) + (offset or 0)
+            s_ = chunk % slots
+            uses = -(-(count - s_) // slots)
+            # The round in the trip: the chunk's index over the slots, the
+            # loop's base apart where it is a value.
+            within = chunk // slots if isinstance(i, int) else _index(
+                b, 'add', b.op('div', INDEX, i, slots, hint='bkr'),
+                chunk // slots, 'bkr')
+            parity = b.op('rem', INDEX, _index(b, 'add', _index(
+                b, 'mul', trips, uses, 'bkr'), within, 'bkr'), 2, hint='bkp')
+            return b.const(s_, INDEX), parity, s_ * self.size
+        s_ = b.op('rem', INDEX, i, slots, hint='bks')
+        uses = b.op('div', INDEX, b.op('sub', INDEX, count + slots - 1, s_,
+                                        hint='bku'), slots, hint='bku')
+        parity = b.op('rem', INDEX, b.op('add', INDEX, b.op(
+            'mul', INDEX, trips, uses, hint='bkr'), b.op(
+            'div', INDEX, i, slots, hint='bkr'), hint='bkr'), 2, hint='bkp')
+        return s_, parity, b.op('mul', INDEX, s_, self.size, hint='bs')
 
     def base(self, trip, pass_):
         """The round of the first chunk of pass `pass_` of the trip."""
@@ -2303,14 +2341,15 @@ class _OperatorRing:
             offset += 2 * rows * (hi - lo)
         return pieces
 
-    def release(self, trip, i, base, issue=None) -> None:
-        """Chunk `i`'s slot back to its producer: tcgen05's products of it
-        committed onto its empty side by the thread `issue` picks, which
-        they arrive at once complete; elsewhere each warp's first lane's
-        arrival, behind the warp's wait for them and the warp's barrier,
-        which hands what every lane of it is done with to the arrival."""
+    def release(self, trip, i, base, issue=None, offset=None) -> None:
+        """Chunk `i + offset`'s slot back to its producer (`round`):
+        tcgen05's products of it committed onto its empty side by the thread
+        `issue` picks, which they arrive at once complete; elsewhere each
+        warp's first lane's arrival, behind the warp's wait for them and the
+        warp's barrier, which hands what every lane of it is done with to
+        the arrival."""
         b = trip.builder
-        slot, _, _ = self.round(trip, i, base)
+        slot, _, _ = self.round(trip, i, base, offset)
         if issue is not None:
             b.ring_release(self.ring, slot, issue, engine='tcgen05')
             return
@@ -2831,6 +2870,22 @@ class _Fold:
                                      hint='tac'), self.columns[0],
                   hint='tac')
         return s_, parity, at
+
+    def round_at(self, trips, base, offset: int):
+        """`round`'s for block `base + offset`, `base` a value that is a
+        multiple of the slots (`_tcgen05_groups` written out a slot at a
+        time): its slot the number `offset % slots`, its first column a
+        number, its parity the trip's rounds and the block's."""
+        b = self.builder
+        s_ = offset % self.slots
+        uses = -(-(self.blocks - s_) // self.slots)
+        within = _index(b, 'add', b.op('div', INDEX, base, self.slots,
+                                        hint='ta'), offset // self.slots,
+                        'ta')
+        parity = b.op('rem', INDEX, _index(b, 'add', _index(
+            b, 'mul', trips, uses, 'ta'), within, 'ta'), 2, hint='tap')
+        return (b.const(s_, INDEX), parity,
+                self.columns[0] + s_ * self.slot_columns)
 
     def fill_loop(self, trip, rows, trips, every) -> None:
         """Every block's A as one loop a band (`TileRows.groups` `loop`):
@@ -3881,10 +3936,8 @@ def _tcgen05_groups(trip, step, fold, ring, base, trips, issue,
     to.  D written fresh by the first product of the trip's first block,
     whose span is whole.  The last `hold - 1` chunks are the caller's to
     give back."""
-    from tensorforge.backend.pir.engines import FenceKind, MatrixDescType
-    from tensorforge.generators.element_group import STAR_ROWS
+    from tensorforge.generators.element_group import STAR_ROWS, tile_depth
     b = trip.builder
-    tmem = trip.tmem
     chunks = ring.chunks
     spans = []
     for chunk in chunks:
@@ -3903,72 +3956,108 @@ def _tcgen05_groups(trip, step, fold, ring, base, trips, issue,
     space = 'constant' if trip.section.tile.tables == 'constant' else None
     los = trip.table('tl', [lo for lo, _ in spans], space)
     ns = trip.table('tn', [hi - lo for lo, hi in spans], space)
+    # Numbered by the trip (`TileRows.slots` `trip`): the body written out
+    # once a slot of both rings' depth (`element_group.tile_depth`), each
+    # its slots numbers -- the bodies past the last block guarded.
+    depth = tile_depth(trip.section)
+    count = len(chunks)
+    with b.for_(0, count, depth, unroll=1, hint='g') as loop:
+        base0 = loop.induction
+        for offset in range(depth):
+            past = count % depth and offset >= count % depth
+            with (b.if_(b.op('lt', BOOL, _index(b, 'add', base0, offset,
+                                                'g'), count, hint='gx'))
+                  if past else contextlib.nullcontext()):
+                _tcgen05_group(trip, step, fold, ring, base, trips, issue,
+                               d_base, los, ns, widths, base0,
+                               offset if depth > 1 else None)
+
+
+def _tcgen05_group(trip, step, fold, ring, base, trips, issue, d_base, los,
+                   ns, widths, j0, offset) -> None:
+    """A block of tcgen05's group loop (`_tcgen05_groups`): block `j0`, or
+    `j0 + offset` where the loop is written out a slot at a time -- its
+    slots of A's ring and of B's then numbers."""
+    from tensorforge.backend.pir.engines import FenceKind, MatrixDescType
+    from tensorforge.generators.element_group import STAR_ROWS
+    b = trip.builder
+    tmem = trip.tmem
     hold = ring.hold
-    with b.for_(0, len(chunks), unroll=1, hint='g') as loop:
-        j = loop.induction
+    if offset is None:
+        j = j0
         slot, parity, at = fold.round_of(trips, j)
-        with b.if_(issue):
-            b.ring_take(fold.areas, slot, parity)
-            b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
-        bslot, bparity, start = ring.round(trip, j, base)
-        with b.if_(issue):
-            b.ring_take(ring.ring, bslot, bparity, writes=[ring.storage])
-        lo = b.rawexpr(f'{los}[{{0}}]', j, type_=INDEX, pure=True,
-                       movable=True, hint='gl')
-        if d_base is not None:
-            # D's slot in tensor memory (`TileRows.dslots`).
-            lo = b.op('add', INDEX, lo, d_base, hint='gl')
-        n = b.rawexpr(f'{ns}[{{0}}]', j, type_=INDEX, pure=True,
-                      movable=True, hint='gn')
-        # A product's piece in the chunk: both halves of its rows of K by
-        # the block's width, the lower ones that far behind the upper.
-        part = b.op('mul', INDEX, n, STAR_ROWS, hint='gp')
-        fresh = b.op('ne', BOOL, j, 0, hint='gf')
-        first = True
-        for p, stage in enumerate(ring.stages):
-            desc = MatrixDescType(Datatype.TF32, lbo=stage.leading,
-                                  sbo=STAR_ROWS * 32, form='tcgen05')
-            bs = [b.matrix_desc(ring.storage, b.op('add', INDEX, start, b.op(
-                'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),
-                                desc=desc, hint='b')
-                  for k in range(1 + stage.split)]
-            plan = _plan(stage)
-            if widths[-1] > TCGEN05_N_MAX:
-                # D wider than an instruction's N (o12, `element_group.
-                # tile_tmem`): a block's products in two, its first 256
-                # columns and, where the block is wider, the rest.
-                head = b.op('select', INDEX, b.op(
-                    'lt', BOOL, n, TCGEN05_N_MAX, hint='gw'), n,
-                    TCGEN05_N_MAX, hint='gh')
-                _tcgen05_cut(b, tmem, ring, start, part, p, stage, plan,
-                             at, lo, issue, fresh if first else 1, head, 0,
-                             sorted({min(w, TCGEN05_N_MAX) for w in widths}))
-                with b.if_(b.op('gt', BOOL, n, TCGEN05_N_MAX, hint='gw')):
-                    _tcgen05_cut(
-                        b, tmem, ring, start, part, p, stage, plan, at, lo,
-                        issue, fresh if first else 1,
-                        b.op('sub', INDEX, n, TCGEN05_N_MAX, hint='gt'),
-                        TCGEN05_N_MAX, sorted({w - TCGEN05_N_MAX
-                                               for w in widths
-                                               if w > TCGEN05_N_MAX}))
-                first = False
-                continue
-            for ia, ib in plan.products:
-                b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
-                          enable_input_d=fresh if first else 1,
-                          a_column=b.op('add', INDEX, at,
-                                        2 * STAR_ROWS * p + STAR_ROWS * ia,
-                                        hint='gc'),
-                          d_column=lo, term=(ia, ib), plan=plan,
-                          widths=widths)
-                first = False
-        b.ring_release(fold.areas, slot, issue, engine='tcgen05')
-        if hold > 1:
-            with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):
+    else:
+        j = _index(b, 'add', j0, offset, 'g')
+        slot, parity, at = fold.round_at(trips, j0, offset)
+    with b.if_(issue):
+        b.ring_take(fold.areas, slot, parity)
+        b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
+    bslot, bparity, start = ring.round(trip, j0, base, offset)
+    with b.if_(issue):
+        b.ring_take(ring.ring, bslot, bparity, writes=[ring.storage])
+    lo = b.rawexpr(f'{los}[{{0}}]', j, type_=INDEX, pure=True,
+                   movable=True, hint='gl')
+    if d_base is not None:
+        # D's slot in tensor memory (`TileRows.dslots`).
+        lo = b.op('add', INDEX, lo, d_base, hint='gl')
+    n = b.rawexpr(f'{ns}[{{0}}]', j, type_=INDEX, pure=True,
+                  movable=True, hint='gn')
+    # A product's piece in the chunk: both halves of its rows of K by
+    # the block's width, the lower ones that far behind the upper.
+    part = b.op('mul', INDEX, n, STAR_ROWS, hint='gp')
+    fresh = b.op('ne', BOOL, j, 0, hint='gf')
+    first = True
+    for p, stage in enumerate(ring.stages):
+        desc = MatrixDescType(Datatype.TF32, lbo=stage.leading,
+                              sbo=STAR_ROWS * 32, form='tcgen05')
+        bs = [b.matrix_desc(ring.storage, b.op('add', INDEX, start, b.op(
+            'mul', INDEX, part, 2 * p + k, hint='gb'), hint='gb'),
+                            desc=desc, hint='b')
+              for k in range(1 + stage.split)]
+        plan = _plan(stage)
+        if widths[-1] > TCGEN05_N_MAX:
+            # D wider than an instruction's N (o12, `element_group.
+            # tile_tmem`): a block's products in two, its first 256
+            # columns and, where the block is wider, the rest.
+            head = b.op('select', INDEX, b.op(
+                'lt', BOOL, n, TCGEN05_N_MAX, hint='gw'), n,
+                TCGEN05_N_MAX, hint='gh')
+            _tcgen05_cut(b, tmem, ring, start, part, p, stage, plan,
+                         at, lo, issue, fresh if first else 1, head, 0,
+                         sorted({min(w, TCGEN05_N_MAX) for w in widths}))
+            with b.if_(b.op('gt', BOOL, n, TCGEN05_N_MAX, hint='gw')):
+                _tcgen05_cut(
+                    b, tmem, ring, start, part, p, stage, plan, at, lo,
+                    issue, fresh if first else 1,
+                    b.op('sub', INDEX, n, TCGEN05_N_MAX, hint='gt'),
+                    TCGEN05_N_MAX, sorted({w - TCGEN05_N_MAX
+                                           for w in widths
+                                           if w > TCGEN05_N_MAX}))
+            first = False
+            continue
+        for ia, ib in plan.products:
+            b.tcgen05(n, tmem, bs[ib], tmem, issue=issue,
+                      enable_input_d=fresh if first else 1,
+                      a_column=(at + 2 * STAR_ROWS * p + STAR_ROWS * ia
+                                if isinstance(at, int) else b.op(
+                                    'add', INDEX, at,
+                                    2 * STAR_ROWS * p + STAR_ROWS * ia,
+                                    hint='gc')),
+                      d_column=lo, term=(ia, ib), plan=plan,
+                      widths=widths)
+            first = False
+    b.ring_release(fold.areas, slot, issue, engine='tcgen05')
+    if hold > 1:
+        with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):
+            if offset is None:
                 ring.release(trip, b.op('sub', INDEX, j, hold - 1,
                                         hint='gr'), base, issue)
-        else:
-            ring.release(trip, j, base, issue)
+            else:
+                ring.release(trip, j0, base, issue, offset - hold + 1)
+    elif offset is None:
+        ring.release(trip, j, base, issue)
+    else:
+        ring.release(trip, j0, base, issue, offset)
 
 
 def _tcgen05_cut(b, tmem, ring, start, part, p, stage, plan, at, lo, issue,
@@ -3990,9 +4079,11 @@ def _tcgen05_cut(b, tmem, ring, start, part, p, stage, plan, at, lo, issue,
     d = b.op('add', INDEX, lo, column, hint='gl') if column else lo
     for ia, ib in plan.products:
         b.tcgen05(n, tmem, bs[ib], tmem, issue=issue, enable_input_d=enable,
-                  a_column=b.op('add', INDEX, at,
+                  a_column=(at + 2 * STAR_ROWS * p + STAR_ROWS * ia
+                            if isinstance(at, int) else b.op(
+                                'add', INDEX, at,
                                 2 * STAR_ROWS * p + STAR_ROWS * ia,
-                                hint='gc'),
+                                hint='gc')),
                   d_column=d, term=(ia, ib), plan=plan, widths=widths)
         enable = 1
 

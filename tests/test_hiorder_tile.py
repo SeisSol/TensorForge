@@ -1623,9 +1623,15 @@ def test_wgmma_s_bulk_epilogue_in_rounds_on_the_oracle(monkeypatch, rows):
 
 def test_the_issue_options_parse():
     from tensorforge.common.options import (parse_matrix_issue,
+                                            parse_matrix_slots,
                                             parse_tile_tables, registry)
     assert registry()['matrix_issue'].default == 'thread'
     assert registry()['tile_tables'].default == 'device'
+    assert registry()['matrix_slots'].default == 'round'
+    assert [parse_matrix_slots(t) for t in ('round', 'TRIP')] == [
+        'round', 'trip']
+    with pytest.raises(ValueError):
+        parse_matrix_slots('block')
     assert [parse_matrix_issue(t) for t in ('thread', 'ELECT')] == [
         'thread', 'elect']
     assert [parse_tile_tables(t) for t in ('device', 'Constant')] == [
@@ -1688,6 +1694,87 @@ def test_the_loop_s_tables_in_constant_memory():
     assert not re.search(r'\btf_t[ln]_', src)
     assert 'one loop, a dispatch on their width, its tables in constant ' \
            'memory' in src
+
+
+@pytest.mark.parametrize('order,bands,depth', [(4, 2, 4), (8, 2, 4),
+                                               (8, 3, 12), (12, 2, 2)])
+def test_the_slots_the_options_ask_for(order, bands, depth):
+    """`trip` on tcgen05's tile, the group loop written out a slot of both
+    rings at a time -- their slots' least common multiple, A's three of
+    three bands against B's four twelve, o12's two of each two; on wgmma,
+    whose passes walk B's
+    chunks again, `round`, declined in its comment; `round` as the options
+    leave it."""
+    assert _group(order, 'sm_100a').section.tile.slots == 'round'
+    group = _group(order, 'sm_100a', matrix_slots='trip', matrix_bands=bands)
+    assert group.section.tile.slots == 'trip'
+    assert eg.tile_depth(group.section) == depth
+    assert eg.tile_depth(_group(order, 'sm_100a').section) == 1
+    wgmma = _group(order, 'sm_90a', matrix_slots='trip')
+    assert wgmma.section.tile.slots == 'round'
+    notes = eg.tile_notes(wgmma, me._context(
+        'sm_90a', 's', multi_element='force',
+        **{**HIGH, 'matrix_slots': 'trip'}))
+    assert ('matrix_slots=trip declined: wgmma\'s passes walk B\'s chunks '
+            'again') in notes
+
+
+def test_the_ring_model_numbers_b_s_ring_by_the_trip():
+    """The protocol model of B's ring (`ring_model.operator_violations`),
+    the operator warp and the issuing thread each an agent: numbered by the
+    trip as by its rounds over the trips, at o4's two blocks, o6's five and
+    o8's eleven on four slots, it hands every chunk over -- and where the
+    two sides number it differently, never."""
+    import ring_model
+    for blocks in (2, 5, 11):
+        for numbering in ring_model.NUMBERINGS:
+            assert ring_model.operator_violations(4, blocks,
+                                                  numbering=numbering) == 0
+        assert ring_model.operator_violations(
+            4, blocks, numbering=('round', 'trip')) > 0
+
+
+def test_the_ring_model_shares_a_s_ring_and_b_s():
+    """The protocol model of A's ring and B's as one (`ring_model.
+    shared_violations`) -- a slot's full barrier the band's 128 threads and
+    the operator warp's arrival with B's bytes, its empty one the products'
+    one commit, which both producers wait for -- hands every block over
+    wherever A's ring alone does, the bands owning their slots (two bands
+    on two or four, three on three, one on four), and races where it does:
+    three bands on four slots, two on three.  At o6's five blocks and o8's
+    eleven, the bands never meeting."""
+    import ring_model
+    for blocks in (5, 11):
+        for bands, slots in ((1, 4), (2, 4), (2, 2), (3, 3)):
+            assert ring_model.shared_violations(bands, slots, blocks) == 0
+        for bands, slots in ((3, 4), (2, 3)):
+            assert ring_model.shared_violations(bands, slots, blocks) > 0
+            assert ring_model.violations(bands, slots, blocks,
+                                         sync='none') > 0
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_the_slots_by_the_trip_text(groups):
+    """`trip` at o8: the issuing thread's every wait and commit of A's and
+    B's rings at a slot that is a number -- the group loop four bodies a
+    trip of it, the last one's past the eleventh block guarded -- and B's
+    producer alike, its waits, copies and bytes; the comment says so.  (A's
+    producers, the star bands, take their slots by their band.)"""
+    src = _kernel(8, 'sm_100a', matrix_groups=groups,
+                  matrix_slots='trip').get_kernel()
+    number = r'(?:4 \+ \()?\d+(?:_i32)?\)?'
+    taken = (re.findall(r'mbarrierWait\(&ta3_ring\[(?!4 \+)([^]]*)\]', src)
+             + re.findall(r'tcgen05CommitOn\(&ta3_ring\[([^]]*)\]', src)
+             + re.findall(r'(?:mbarrierWait|tcgen05CommitOn|bulkCopyOn|'
+                          r'mbarrierExpect)\(&bk3_ring\[([^]]*)\]', src))
+    assert taken and all(re.fullmatch(number, x) for x in taken), taken
+    if groups == 'loop':
+        assert re.search(r'for \(int32_t (v\d+_g) = 0; \1 < 11; \1 \+= 4\)',
+                         src)
+        assert len(re.findall(r'if \(v\d+_g < 11\)', src)) == 1
+        assert 'its body 4 times, a slot of the rings\' each' in src
+    assert ('fills B\'s ring, block j its slot j modulo the slots every '
+            'trip, as A\'s') in src
 
 
 def _region(src: str, head: int) -> str:
@@ -1783,6 +1870,33 @@ def test_the_elect_issue_over_o8_s_blocks_on_the_oracle():
     against NumPy without a race."""
     gen, _ = _on_the_oracle('sm_100a', 8, 17, matrix_issue='elect')
     assert gen.built._element_group.section.tile.issue == 'elect'
+
+
+@pytest.mark.parametrize('order,groups,options', [
+    (4, 'loop', {}), (4, 'unrolled', {}), (6, 'loop', {}),
+    (6, 'unrolled', {}), (6, 'loop', {'matrix_bands': 3}),
+    (6, 'loop', {'matrix_issue': 'elect', 'tile_tables': 'constant'})])
+def test_the_slots_by_the_trip_on_the_oracle(order, groups, options):
+    """`trip` over three trips, o4's two blocks and o6's five, the loop --
+    four bodies a trip of it, twelve at three bands -- and written out,
+    with the elected lane's issue and the tables in constant memory too:
+    against NumPy without a race, and bit for bit what B's rounds over the
+    trips give."""
+    _, rounds = _on_the_oracle('sm_100a', order, 31, matrix_groups=groups,
+                               **{k: v for k, v in options.items()
+                                  if k == 'matrix_bands'})
+    _, trip = _on_the_oracle('sm_100a', order, 31, matrix_groups=groups,
+                             matrix_slots='trip', **options)
+    assert (trip == rounds).all()
+
+
+def test_the_slots_by_the_trip_over_o8_s_blocks_on_the_oracle():
+    """`trip` at o8 with the elected lane's issue and the tables in
+    constant memory: eleven blocks over two trips, the loop's last body
+    past them guarded, against NumPy without a race."""
+    gen, _ = _on_the_oracle('sm_100a', 8, 17, matrix_issue='elect',
+                            tile_tables='constant', matrix_slots='trip')
+    assert gen.built._element_group.section.tile.slots == 'trip'
 
 
 # -- the build and the hardware ------------------------------------------------- #
@@ -1898,6 +2012,25 @@ def test_the_elect_issue_builds(groups, products, tables, tmp_path):
         assert code not in report, report[-2000:]
 
 
+def test_the_slots_by_the_trip_build(tmp_path):
+    """o8 built for sm_100a with both rings numbered by the trip, the
+    elected lane's issue and the tables in constant memory: the group loop
+    four bodies a trip of it, 36 UTCHMMA, none of them in a loop over the
+    lanes and nothing spilled or reloaded from the first to the last."""
+    sass, report = _ptxas('sm_100a', tmp_path, matrix_issue='elect',
+                          tile_tables='constant', matrix_slots='trip')
+    ops = [m.group(1).strip() for m in re.finditer(
+        r'/\*[0-9a-f]{4,}\*/\s+([^;]*);', sass)]
+    mmas = [i for i, op in enumerate(ops) if 'UTCHMMA' in op]
+    assert len(mmas) == 4 * 9
+    span = ops[mmas[0]:mmas[-1] + 1]
+    assert not any('ELECT' in op or 'BRA.U.ANY' in op for op in span)
+    assert not any(re.match(r'(?:@!?U?P\w+\s+)?(?:LDL|STL)\b', op)
+                   for op in span)
+    for code in ('C7510', 'C7511', 'C7514', 'C7517', 'C7519'):
+        assert code not in report, report[-2000:]
+
+
 #: The tile's variants on the GPU: as the options leave it, its blocks
 #: written out and in one loop, I whole in the input ring and in chunks
 #: (wgmma's as the options leave it is I whole where it fits, tcgen05's in
@@ -1905,7 +2038,8 @@ def test_the_elect_issue_builds(groups, products, tables, tmp_path):
 #: tcgen05's own levers -- three star bands, D added a cell at a time, by
 #: bulk reductions a column and an element's box, the mma warp's issue by
 #: the lane elect.sync picks, and with it the group loop's tables in
-#: constant memory.
+#: constant memory, and the rings numbered by the trip, alone and with
+#: both.
 GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                 'loop': {'matrix_groups': 'loop'},
                 'whole': {'matrix_input_chunks': 'whole'},
@@ -1915,7 +2049,10 @@ GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                 'box': {'matrix_output': 'box'},
                 'elect': {'matrix_issue': 'elect'},
                 'constant': {'matrix_issue': 'elect',
-                             'tile_tables': 'constant'}}
+                             'tile_tables': 'constant'},
+                'trip': {'matrix_slots': 'trip'},
+                'trip-ec': {'matrix_slots': 'trip', 'matrix_issue': 'elect',
+                            'tile_tables': 'constant'}}
 
 
 @pytest.mark.parametrize('variant', sorted(GPU_VARIANTS))
@@ -1929,16 +2066,18 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
     if target.backend != 'cuda' or target.arch not in ('sm_90', 'sm_100'):
         pytest.skip('no GPU with wgmma or tcgen05')
     if target.arch == 'sm_90' and variant in ('b3', 'red', 'box', 'elect',
-                                              'constant'):
+                                              'constant', 'trip', 'trip-ec'):
         pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands, adds D '
                     'a cell or a row a reduction, and its products are the '
                     'warpgroup\'s')
     if order > 8 and variant not in ('', 'unrolled', 'loop', 'whole',
-                                     'chunks', 'elect', 'constant'):
+                                     'chunks', 'elect', 'constant', 'trip',
+                                     'trip-ec'):
         pytest.skip('o10 and o12: the tile as the options leave it, its '
                     'blocks written out and in one loop, I whole and in '
                     'chunks, and the mma warp\'s issue by elect.sync\'s '
-                    'lane, its loop\'s tables in constant memory too')
+                    'lane, its loop\'s tables in constant memory too, and '
+                    'the rings numbered by the trip')
     from harness.runner import run_case
     options = {**HIGH, **GPU_VARIANTS[variant]}
     special = dataclasses.replace(target, arch=target.arch + 'a')
@@ -1960,7 +2099,7 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
 
 
 @pytest.mark.parametrize('variant', ['', 'unrolled', 'red', 'bulk', 'box',
-                                     'elect', 'constant'])
+                                     'elect', 'constant', 'trip', 'trip-ec'])
 @pytest.mark.parametrize('order', [6, 8])
 def test_many_trips_of_the_tile_on_the_gpu(order, variant, target, cache_root,
                                            tensorforge_include):

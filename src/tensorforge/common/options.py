@@ -406,6 +406,18 @@ def parse_matrix_issue(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_slots` takes.
+MATRIX_SLOTS = ('round', 'trip')
+
+
+def parse_matrix_slots(text: str) -> str:
+  """`round` or `trip` (`Options.matrix_slots`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_SLOTS:
+    raise ValueError(f'expected one of {MATRIX_SLOTS}, got {text!r}')
+  return value
+
+
 #: What `Options.tile_tables` takes.
 TILE_TABLES = ('device', 'constant')
 
@@ -3187,6 +3199,22 @@ declare('matrix_issue',
             'ELECT, under the first lane; 104 and 12 R2UR elected, its nine '
             'products ten instructions from the first to the last.  On wgmma, '
             'whose products are the warpgroup\'s, declined.')
+
+declare('matrix_slots',
+        default='round',
+        env='TF_MATRIX_SLOTS',
+        parse=parse_matrix_slots,
+        doc='How the high-order tile on tcgen05 numbers the slots of B\'s '
+            'ring (`matrix_tile` `high`, `element_group.TileRows.slots`): '
+            '`round`, the default, B\'s chunks counted over the trips -- '
+            'chunk `i` of trip `t` the ring\'s round `t C + i`, its slot that '
+            'modulo the slots -- and the group loop\'s body once, each block\'s '
+            'slots and parities from its index; `trip`, B\'s ring numbered by '
+            'the trip as A\'s is -- block `j` takes slot `j % slots` of each '
+            'every trip, a slot\'s parity from the trip and its rounds a trip '
+            '-- and the group loop\'s body written out once a slot of the '
+            'rings\' depth, the slots numbers in it, the bodies past the last '
+            'block guarded.  On wgmma declined.')
 
 declare('tile_tables',
         default='device',
