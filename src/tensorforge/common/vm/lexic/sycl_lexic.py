@@ -585,6 +585,35 @@ class SyclLexic(Lexic):
             f'item.get_sub_group(), {base}, {width}, {height}, {pitch}, '
             f'{x}, {y})')
 
+  def sub_group_block2d_store(self, elem, rows, cols, base, width, height,
+                              pitch, x, y, value):
+    if self._explicit_simd or self._sub_groups is None or cols != 16:
+      return None
+    return (f'tensorforge::subGroupBlock2dStore<{elem}, {rows}>('
+            f'item.get_sub_group(), {base}, {width}, {height}, {pitch}, '
+            f'{x}, {y}, {value});')
+
+  def element_block2d(self, elem, rows, base, pitch, columns, x, y):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    kind = elem if rows == 1 else f'sycl::vec<{elem}, {rows}>'
+    return (kind,
+            f'tensorforge::elementBlock2d<{elem}, {rows}, {pitch}, {columns}>('
+            f'item.get_sub_group(), {base}, {x}, {y})')
+
+  def element_block2d_store(self, elem, rows, base, pitch, columns, x, y,
+                            value):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    return (f'tensorforge::elementBlock2dStore<{elem}, {rows}, {pitch}, '
+            f'{columns}>(item.get_sub_group(), {base}, {x}, {y}, {value});')
+
+  def element_blocks_check(self, pitch, base):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    return (f'tensorforge::elementBlocks<{pitch}>(item.get_sub_group(), '
+            f'{base})')
+
   def block2d_load(self, elem, width, height, transpose, base, surface_width,
                    surface_height, pitch, x, y):
     if not self._explicit_simd:

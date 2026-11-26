@@ -485,6 +485,12 @@ class Emitter:
                                   ('shared.write', nbytes)]
         if op == Op.PREFETCH:
             return 'global.prefetch', []
+        if op == Op.CALL and s.attr('block2d_store'):
+            # A 2D block write (`block_reads.store_block2d`): the lane's
+            # column of the block, as a store's element.
+            return 'global.store', [('global.write',
+                                     _value_bytes(getattr(s.args[3], 'type',
+                                                          None)))]
         if op in Op.ARITH or op == Op.ACCUM:
             value = s.target[0] if s.target else (s.args[1] if len(s.args) > 1
                                                   else None)
@@ -1604,17 +1610,73 @@ class Emitter:
         rows, cols = s.attr('shape')
         surface_width, surface_height = s.attr('surface')
         lex = self._lexic()
-        read = (getattr(lex, 'sub_group_block2d', None) if lex is not None
-                else None)
-        spelled = (read(v.type.base.ctype(), rows, cols,
-                        bool(s.attr('transpose')), self.base_name(base),
-                        surface_width, surface_height, s.attr('pitch'),
-                        self.operand(s.args[1]), self.operand(s.args[2]))
-                   if read is not None else None)
+        if s.attr('element'):
+            # One element's own storage (`block_reads.load_block2d`): the
+            # helper finds the surface's base from the element's pointer.
+            read = (getattr(lex, 'element_block2d', None) if lex is not None
+                    else None)
+            spelled = (read(v.type.base.ctype(), rows, self.base_name(base),
+                            s.attr('pitch'), surface_height,
+                            self.operand(s.args[1]), self.operand(s.args[2]))
+                       if read is not None else None)
+        else:
+            read = (getattr(lex, 'sub_group_block2d', None)
+                    if lex is not None else None)
+            spelled = (read(v.type.base.ctype(), rows, cols,
+                            bool(s.attr('transpose')), self.base_name(base),
+                            surface_width, surface_height, s.attr('pitch'),
+                            self.operand(s.args[1]), self.operand(s.args[2]))
+                       if read is not None else None)
         if spelled is None:
             raise IRError(f'{v}: a 2D block read, which this target does '
                           f'not spell')
         self.writer(f'{spelled[0]} {self.name(v)} = {spelled[1]};')
+
+    def _emit_block2d_store(self, s: Stmt) -> None:
+        """A 2D block write under SPMD (`block_reads.store_block2d`): the
+        sub-group's block write, every work-item its column of the block.
+        On the terms of the read (`_emit_block2d`): a sub-group of 16 that
+        is the multiplication, no predicate -- the message writes the block
+        whole -- and the share one `sycl::vec` or a number."""
+        base, x, y, value = s.args
+        lanes = block_reads.BLOCK2D_LANES
+        target = self._target()
+        stated = (None if target is None or target.explicit_simd
+                  or target.pinned_sub_groups is None
+                  else target.sub_group_width(lanes))
+        if stated != lanes or lanes != getattr(self.context, 'mult_lanes',
+                                               None):
+            raise IRError(f'{value}: a 2D block write where no sub-group of '
+                          f'{lanes} is stated as the multiplication')
+        if s.predicate is not None:
+            raise IRError(f'{value}: a 2D block write under a predicate, '
+                          f'which one message for the sub-group has none of')
+        rows, cols = s.attr('shape')
+        surface_width, surface_height = s.attr('surface')
+        lex = self._lexic()
+        if not isinstance(value, Value):
+            raise IRError(f'{value}: a 2D block write of no value')
+        elem = value.type.base.ctype()
+        if s.attr('element'):
+            write = (getattr(lex, 'element_block2d_store', None)
+                     if lex is not None else None)
+            spelled = (write(elem, rows, self.base_name(base),
+                             s.attr('pitch'), surface_height,
+                             self.operand(x), self.operand(y),
+                             self.operand(value))
+                       if write is not None else None)
+        else:
+            write = (getattr(lex, 'sub_group_block2d_store', None)
+                     if lex is not None else None)
+            spelled = (write(elem, rows, cols, self.base_name(base),
+                             surface_width, surface_height, s.attr('pitch'),
+                             self.operand(x), self.operand(y),
+                             self.operand(value))
+                       if write is not None else None)
+        if spelled is None:
+            raise IRError(f'{value}: a 2D block write, which this target '
+                          f'does not spell')
+        self.writer(spelled)
 
     def _emit_block_part(self, s: Stmt) -> None:
         """A read a run serves under SPMD: its element of the vector."""
@@ -1639,6 +1701,9 @@ class Emitter:
 
         if block_reads.is_block2d(s):
             self._emit_block2d(s)
+            return
+        if block_reads.is_block2d_store(s):
+            self._emit_block2d_store(s)
             return
         if block_reads.is_block(s):
             self._emit_block(s)

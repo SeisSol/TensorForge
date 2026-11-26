@@ -49,6 +49,7 @@ SYM = Path('src/tensorforge/backend/symbol.py')
 HIP = Path('src/tensorforge/include/tensorforge_device/hip.h')
 EMIT = Path('src/tensorforge/backend/pir/emit.py')
 BLOCKS = Path('src/tensorforge/backend/pir/block_reads.py')
+SPMD_H = Path('src/tensorforge/include/tensorforge_device/sycl_spmd.h')
 ABSTR = Path('src/tensorforge/backend/instructions/abstract_instruction.py')
 EQUIV = Path('tools/access_equiv.py')
 ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
@@ -3896,10 +3897,61 @@ GROUPS = {
     # Intel's 2D block reads (`block_reads.load_block2d`): each limit its own
     # answer, the lanes' share, and both lowerings of the one statement.
     'block2d': ('tests/test_block2d.py', [
-        ('a transposed store refused as any store',
-         sub(BLOCKS, "        if transpose:\n"
-                     "            return 'the hardware has no transposed 2D block store'\n",
+        ('a transposed store taken for a read',
+         sub(BLOCKS, "    if store and transpose:\n"
+                     "        return 'the hardware has no transposed 2D block store'\n",
              '', 1)),
+        ('a store of 16 rows taken',
+         sub(BLOCKS, 'BLOCK2D_STORE_ROWS = (1, 2, 4, 8)\n',
+             'BLOCK2D_STORE_ROWS = (1, 2, 4, 8, 16)\n', 1)),
+        ('a store of another width than the lanes',
+         sub(BLOCKS, '    if store and (cols != BLOCK2D_LANES or rows not in BLOCK2D_STORE_ROWS):\n',
+             '    if store and rows not in BLOCK2D_STORE_ROWS:\n', 1)),
+        ('an element surface on the caller\'s alignment',
+         sub(BLOCKS, '    return SURFACE_BASE_ALIGN if element else align\n',
+             '    return align\n', 1)),
+        ('an element surface on any pitch',
+         sub(BLOCKS, '    return SURFACE_BASE_ALIGN if element else align\n',
+             '    return SURFACE_BASE_ALIGN if element else align\n'
+             '    if element:\n        pass\n', 1)),
+        ('the write recorded against no memory',
+         sub(BLOCKS, '        accesses=(Access(Effect.WRITE, MemSpace.GLOBAL,\n'
+                     '                         builder.alias_root(base)),),\n'
+                     "        attrs=(('block2d_store', True), ('shape', (rows, cols)),\n",
+             "        accesses=(),\n"
+             "        attrs=(('block2d_store', True), ('shape', (rows, cols)),\n", 1)),
+        ('the write moved by the passes',
+         sub(BLOCKS, '        op=Op.CALL, target=(), args=(base, x, y, value), pure=False,\n'
+                     '        movable=False, effect=Effect.WRITE,\n',
+             '        op=Op.CALL, target=(), args=(base, x, y, value), pure=False,\n'
+                     '        movable=True, effect=Effect.WRITE,\n', 1)),
+        ('a write of fewer elements than rows',
+         sub(BLOCKS, '    if length != rows:\n', '    if False:\n', 1)),
+        ('the write told apart from no call',
+         sub(BLOCKS, "    return s.op == Op.CALL and bool(s.attr('block2d_store'))\n",
+             "    return s.op == Op.CALL\n", 1)),
+        ('the element read spelled as a surface read',
+         sub(EMIT, "        if s.attr('element'):\n"
+                   "            # One element's own storage (`block_reads.load_block2d`): the\n",
+             "        if False:\n"
+             "            # One element's own storage (`block_reads.load_block2d`): the\n", 1)),
+        ('the element write spelled as a surface write',
+         sub(EMIT, "        if s.attr('element'):\n"
+                   "            write = (getattr(lex, 'element_block2d_store', None)\n",
+             "        if False:\n"
+             "            write = (getattr(lex, 'element_block2d_store', None)\n", 1)),
+        ('SPMD writing a block with a sub-group of 32',
+         sub(EMIT, "        if stated != lanes or lanes != getattr(self.context, 'mult_lanes',\n",
+             "        if stated != lanes or False and lanes != getattr(self.context, 'mult_lanes',\n", 1)),
+        ('the element surface\'s inverse taken as one',
+         sub(SPMD_H, '  static constexpr int inverse = (Pitch / grain) % period;\n',
+             '  static constexpr int inverse = 1;\n', 1)),
+        ('the element surface on whole cache lines only',
+         sub(SPMD_H, '  static constexpr int grain = (Pitch & -Pitch) < 64 ? (Pitch & -Pitch) : 64;\n',
+             '  static constexpr int grain = 64;\n', 1)),
+        ('the element surface shifted by the pitch\'s grains',
+         sub(SPMD_H, '    return static_cast<int>((((address & 63) / grain) * inverse) &\n',
+             '    return static_cast<int>((((address & 63) / grain)) &\n', 1)),
         ('elements through a table taken',
          sub(BLOCKS, '    table = elements and kind is not None and kind.follows_pointer()\n',
              '    table = False\n', 1)),
@@ -3935,8 +3987,8 @@ GROUPS = {
         ('a pitch of eight-byte steps',
          sub(BLOCKS, 'SURFACE_PITCH_ALIGN = 16\n', 'SURFACE_PITCH_ALIGN = 8\n', 1)),
         ('a surface in shared memory',
-         sub(BLOCKS, '    if space is not MemSpace.GLOBAL:\n        raise IRError(f\'a 2D block read of',
-             '    if False:\n        raise IRError(f\'a 2D block read of', 1)),
+         sub(BLOCKS, '    if space is not MemSpace.GLOBAL:\n        raise IRError(f\'a 2D block {what} of',
+             '    if False:\n        raise IRError(f\'a 2D block {what} of', 1)),
         ('the transposed share counted in rows',
          sub(BLOCKS, '    count = cols if transpose else rows\n    v = builder.value(',
              '    count = rows\n    v = builder.value(', 1)),

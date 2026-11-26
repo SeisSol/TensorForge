@@ -7,6 +7,8 @@
 #include <sycl/sycl.hpp>
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <type_traits>
 
@@ -51,6 +53,20 @@ TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r2x1c)
 TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r4x1c)
 TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r8x1c)
 #undef TENSORFORGE_BLOCK2D_READ
+
+/// Its writes: a block of 1 to 8 rows of 32-bit data, each work-item its
+/// column of 16 (`tensorforge::subGroupBlock2dStore`).  Declared as the reads
+/// are; unused, they are no reference.
+#define TENSORFORGE_BLOCK2D_WRITE(NAME)                                        \
+  SYCL_EXTERNAL void NAME(__attribute__((opencl_global)) void *base,           \
+                          int width, int height, int pitch,                    \
+                          tensorforgeInt2 coord,                               \
+                          __attribute__((opencl_private)) std::uint32_t *in);
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_1r16x1c)
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_2r16x1c)
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_4r16x1c)
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_8r16x1c)
+#undef TENSORFORGE_BLOCK2D_WRITE
 #endif
 
 namespace tensorforge {
@@ -83,6 +99,34 @@ inline sycl::vec<T, N> subGroupRun(const sycl::sub_group &group, const T *p) {
 /// What a work-item gets of a 2D block: `Count` elements, one as a number.
 template <typename T, int Count>
 using Block2dShare = std::conditional_t<Count == 1, T, sycl::vec<T, Count>>;
+
+namespace detail {
+/// Off the device, a 2D block message whose surface breaks a rule of
+/// `cl_intel_subgroup_2d_block_io` stops the program, naming the rule: the
+/// extension leaves such a message undefined, so the model has no value to
+/// give it, and one that went on would let a missing check pass by luck.
+[[noreturn]] inline void surfaceRuleBroken(const char *what) {
+  std::fprintf(stderr, "tensorforge: a 2D block message %s\n", what);
+  std::abort();
+}
+
+/// The extension's rules for a surface of `size`-byte elements: the base
+/// 64-byte aligned, the width from 64 bytes and a whole number of elements,
+/// at least one row, the pitch at least the width and a multiple of 16.
+inline void checkSurface(const void *base, int width, int height, int pitch,
+                         int size) {
+  if (reinterpret_cast<std::uintptr_t>(base) % 64 != 0)
+    surfaceRuleBroken("on a surface whose base is not 64-byte aligned");
+  if (width < 64 || width % size != 0)
+    surfaceRuleBroken("on a surface under 64 bytes wide or not a whole "
+                      "number of elements");
+  if (height < 1)
+    surfaceRuleBroken("on a surface of no rows");
+  if (pitch < width || pitch % 16 != 0)
+    surfaceRuleBroken("on a surface whose pitch is under its width or not "
+                      "a multiple of 16 bytes");
+}
+} // namespace detail
 
 /// A 2D block of `Rows` x `Cols` 32-bit elements of the surface at `base` --
 /// `width` bytes wide, `height` rows high, rows `pitch` bytes apart -- from
@@ -146,6 +190,7 @@ subGroupBlock2d(const sycl::sub_group &group, const T *base, int width,
                                                  at, out);
   }
 #else
+  detail::checkSurface(base, width, height, pitch, sizeof(T));
   const int lane = static_cast<int>(group.get_local_linear_id());
   const auto *bytes = reinterpret_cast<const unsigned char *>(base);
   for (int k = 0; k < Count; ++k) {
@@ -173,6 +218,145 @@ subGroupBlock2d(const sycl::sub_group &group, const T *base, int width,
     }
     return share;
   }
+}
+
+/// A 2D block of `Rows` x 16 32-bit elements written by the sub-group `group`
+/// -- 16 wide and full -- to the surface at `base`, `width` bytes wide,
+/// `height` rows high, rows `pitch` bytes apart, from column `x` and row `y`:
+/// work-item `l` hands in column `x + l`, its `Rows` elements in order
+/// (`pir.block_reads.store_block2d`).  Untransposed only, which is all the
+/// hardware writes.
+///
+/// Off the device the elements are written one at a time, and a block that
+/// does not lie wholly inside its surface stops the program: what the
+/// device does with the part outside the extension leaves unstated, and no
+/// writer here may rely on it.  `share` is the work-item's `Rows` elements
+/// in any vector that indexes them -- `sycl::vec` or OpenCL's own, the one
+/// the DPAS path holds its values in -- or a number where it is one.
+template <typename T, int Rows, typename Share>
+inline void subGroupBlock2dStore(const sycl::sub_group &group, T *base,
+                                 int width, int height, int pitch, int x, int y,
+                                 Share share) {
+  static_assert(sizeof(T) == 4, "a 2D block write of 32-bit data");
+  static_assert(Rows == 1 || Rows == 2 || Rows == 4 || Rows == 8,
+                "a block write of 1, 2, 4 or 8 rows");
+  std::uint32_t words[Rows];
+  if constexpr (Rows == 1) {
+    words[0] = sycl::bit_cast<std::uint32_t>(static_cast<T>(share));
+  } else {
+#pragma unroll
+    for (int k = 0; k < Rows; ++k) {
+      words[k] = sycl::bit_cast<std::uint32_t>(static_cast<T>(share[k]));
+    }
+  }
+#if defined(__SYCL_DEVICE_ONLY__)
+  (void)group;
+  auto *surface = (__attribute__((opencl_global)) void *)(base);
+  auto *in = (__attribute__((opencl_private)) std::uint32_t *)(&words[0]);
+  const tensorforgeInt2 at{x, y};
+  if constexpr (Rows == 1)
+    intel_sub_group_2d_block_write_32b_1r16x1c(surface, width, height, pitch,
+                                               at, in);
+  else if constexpr (Rows == 2)
+    intel_sub_group_2d_block_write_32b_2r16x1c(surface, width, height, pitch,
+                                               at, in);
+  else if constexpr (Rows == 4)
+    intel_sub_group_2d_block_write_32b_4r16x1c(surface, width, height, pitch,
+                                               at, in);
+  else
+    intel_sub_group_2d_block_write_32b_8r16x1c(surface, width, height, pitch,
+                                               at, in);
+#else
+  detail::checkSurface(base, width, height, pitch, sizeof(T));
+  const int lane = static_cast<int>(group.get_local_linear_id());
+  auto *bytes = reinterpret_cast<unsigned char *>(base);
+  for (int k = 0; k < Rows; ++k) {
+    const int col = x + lane;
+    const int row = y + k;
+    if (col < 0 || row < 0 || (col + 1) * static_cast<int>(sizeof(T)) > width ||
+        row >= height)
+      detail::surfaceRuleBroken("writing past its surface");
+    std::memcpy(bytes + static_cast<std::size_t>(row) * pitch +
+                    static_cast<std::size_t>(col) * sizeof(T),
+                &words[k], sizeof(T));
+  }
+#endif
+}
+
+namespace detail {
+/// Where an element's surface starts (`Options.sycl_element_blocks`): its
+/// columns are `Pitch` bytes apart, and the 2D block messages want the
+/// surface's base on a 64-byte boundary, which the element's own pointer
+/// need not be.  It need only be aligned to `grain`, the largest power of
+/// two dividing both the pitch and 64: then some `j` of the `period` pitches
+/// before it is on the boundary, and the surface starts there, its rows from
+/// `j` on the element's columns -- rows the messages read and write; the
+/// `j` before them are only addressed.  `j` is the element's offset from the
+/// boundary, in grains, times the inverse of `Pitch / grain` modulo
+/// `period`: an odd number, its own inverse modulo 2 and 4.
+template <int Pitch> struct ElementSurface {
+  static_assert(Pitch > 0 && Pitch % 16 == 0,
+                "a pitch of a whole number of 16 bytes");
+  static constexpr int grain = (Pitch & -Pitch) < 64 ? (Pitch & -Pitch) : 64;
+  static constexpr int period = 64 / grain;
+  static constexpr int inverse = (Pitch / grain) % period;
+
+  /// Whether an element at `address` has such a surface.
+  static bool fits(std::uintptr_t address) {
+    return (address & static_cast<std::uintptr_t>(grain - 1)) == 0;
+  }
+
+  /// The pitches its surface starts before it.
+  static int shift(std::uintptr_t address) {
+    return static_cast<int>((((address & 63) / grain) * inverse) &
+                            (period - 1));
+  }
+};
+} // namespace detail
+
+/// Whether the element at `element` -- its columns `Pitch` bytes apart --
+/// has a surface the 2D block messages can address
+/// (`Options.sycl_element_blocks`): its address aligned to the grain of
+/// `detail::ElementSurface`, 64 bytes for a pitch of whole cache lines, 32
+/// for SeisSol's padding to 32 on PVC.  The sub-group's answer, from the
+/// address of its first work-item, which holds the sub-group's element: a
+/// branch on it is one the compiler takes for the sub-group.
+template <int Pitch>
+inline bool elementBlocks(const sycl::sub_group &group, const void *element) {
+  const std::uintptr_t address = sycl::group_broadcast(
+      group, reinterpret_cast<std::uintptr_t>(element), 0);
+  return detail::ElementSurface<Pitch>::fits(address);
+}
+
+/// A 2D block of `Rows` rows of the element at `element`, read by the
+/// sub-group `group` (`Options.sycl_element_blocks`): the element's storage
+/// as a surface of its `Columns` columns, `Pitch` bytes each, every column a
+/// row -- work-item `l` gets element `x + l` of columns `y` to `y + Rows`.
+/// Only for an element `elementBlocks` answered for, and only for a block
+/// inside its columns: the surface is the storage and nothing past it.
+template <typename T, int Rows, int Pitch, int Columns>
+inline Block2dShare<T, Rows> elementBlock2d(const sycl::sub_group &group,
+                                            const T *element, int x, int y) {
+  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(element);
+  const int j = detail::ElementSurface<Pitch>::shift(address);
+  const T *base = reinterpret_cast<const T *>(
+      address - static_cast<std::uintptr_t>(j) * Pitch);
+  return subGroupBlock2d<T, Rows, 16, false>(group, base, Pitch, Columns + j,
+                                             Pitch, x, y + j);
+}
+
+/// The write of the same block: work-item `l` hands in element `x + l` of
+/// columns `y` to `y + Rows`, 1 to 8 of them, as `subGroupBlock2dStore`
+/// takes them.
+template <typename T, int Rows, int Pitch, int Columns, typename Share>
+inline void elementBlock2dStore(const sycl::sub_group &group, T *element, int x,
+                                int y, Share share) {
+  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(element);
+  const int j = detail::ElementSurface<Pitch>::shift(address);
+  T *base =
+      reinterpret_cast<T *>(address - static_cast<std::uintptr_t>(j) * Pitch);
+  subGroupBlock2dStore<T, Rows>(group, base, Pitch, Columns + j, Pitch, x,
+                                y + j, share);
 }
 
 /// `x` rounded to TF32: to nearest, ties away from zero, the low thirteen bits

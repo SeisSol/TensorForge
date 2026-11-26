@@ -200,6 +200,37 @@ class Lexic(ABC):
     None where there is no such read."""
     return None
 
+  def sub_group_block2d_store(self, elem: str, rows: int, cols: int,
+                              base: str, width: int, height: int, pitch: int,
+                              x: str, y: str, value: str):
+    """The write of such a block, `rows` x 16, as a statement: work-item
+    `l` hands in column `x + l` of it, its elements in `value`
+    (`pir.block_reads.store_block2d`).  None where there is no such
+    write."""
+    return None
+
+  def element_block2d(self, elem: str, rows: int, base: str, pitch: int,
+                      columns: int, x: str, y: str):
+    """A 2D block of `rows` rows read from one element's own storage --
+    its `columns` columns `pitch` bytes apart, a row each, from its pointer
+    `base` -- at column `x` and row `y`, as `(type, expression)`
+    (`Options.sycl_element_blocks`).  None where there is no such read."""
+    return None
+
+  def element_block2d_store(self, elem: str, rows: int, base: str,
+                            pitch: int, columns: int, x: str, y: str,
+                            value: str):
+    """The write of such a block, as a statement.  None where there is no
+    such write."""
+    return None
+
+  def element_blocks_check(self, pitch: int, base: str):
+    """Whether the element at `base`, its columns `pitch` bytes apart, has
+    a surface 2D block messages can address, as an expression of the
+    sub-group (`tensorforge::elementBlocks`).  None where there is no such
+    check."""
+    return None
+
   def block2d_load(self, elem: str, width: int, height: int,
                    transpose: bool, base: str, surface_width: int,
                    surface_height: int, pitch: int, x: str, y: str):

@@ -66,7 +66,7 @@ def test_the_shapes_a_lane_reads(rows, cols, transpose):
 @pytest.mark.parametrize('elem,rows,cols,change,why', [
     (F32, 8, 16, dict(store=True, transpose=True),
      'no transposed 2D block store'),
-    (F32, 8, 16, dict(store=True), 'no 2D block store is built'),
+    (F32, 16, 16, dict(store=True), 'a lane writes one column'),
     (F32, 16, 8, dict(transpose=True, table=True),
      'share no pitch'),
     (F32, 8, 16, dict(vnni=True), 'VNNI'),
@@ -92,7 +92,7 @@ def test_the_shapes_a_lane_reads(rows, cols, transpose):
     (F32, 8, 16, dict(pitch=128), 'at least the width'),
     (F32, 8, 16, dict(pitch=264), 'a multiple of 16'),
     (F32, 8, 16, dict(width=1 << 24, pitch=(1 << 24) + 16), 'at most 2^24'),
-], ids=['transposed-store', 'store', 'pointer-table', 'vnni', 'f16',
+], ids=['transposed-store', 'store-16-rows', 'pointer-table', 'vnni', 'f16',
         'f64-transposed', 'f64-transposed-8-rows', 'f64', 'lanes',
         'rows-3', 'cols-8', 'rows-64', 'transposed-rows-8',
         'transposed-cols-16', 'transposed-cols-3', 'align-unknown',
@@ -100,9 +100,10 @@ def test_the_shapes_a_lane_reads(rows, cols, transpose):
         'height-past-2^24', 'pitch-under-width', 'pitch-not-16',
         'pitch-past-2^24'])
 def test_each_limit_is_its_own_answer(elem, rows, cols, change, why):
-    """No transposed 2D store and no store built; elements reached through
-    a table have no pitch; VNNI, 16-bit and 64-bit data; a sub-group other
-    than 16; the shapes; and the surface rules of the 2D block messages."""
+    """No transposed 2D store, and a store of a lane's column of 1 to 8
+    rows; elements reached through a table have no pitch; VNNI, 16-bit and
+    64-bit data; a sub-group other than 16; the shapes; and the surface
+    rules of the 2D block messages."""
     answer = _refusal(elem, rows, cols, **change)
     assert answer is not None and why in answer, answer
 
@@ -382,3 +383,210 @@ def test_the_shim_parses_both_reads():
                   + body + '\n}\n')
         result = syntax.check_source(kernel, shim=syntax.shim_for(backend))
         assert result.ok, (backend, result.errors())
+
+
+# -- writes -------------------------------------------------------------------- #
+
+@pytest.mark.parametrize('rows', block_reads.BLOCK2D_STORE_ROWS)
+def test_the_shapes_a_lane_writes(rows):
+    """A lane's column of 16, 1 to 8 rows of it: what the block writes of
+    the extension take."""
+    assert _refusal(rows=rows, store=True) is None
+
+
+@pytest.mark.parametrize('rows,cols', [(16, 16), (32, 16), (3, 16), (8, 8)],
+                         ids=['rows-16', 'rows-32', 'rows-3', 'cols-8'])
+def test_a_write_is_a_lanes_column_of_up_to_8_rows(rows, cols):
+    answer = _refusal(rows=rows, cols=cols, store=True)
+    assert answer is not None and 'a lane writes one column' in answer, answer
+
+
+def _write(b, rows=8, x=0, y=3, element=False, **surface):
+    g = b.alloc(F32, (4096,), MemSpace.GLOBAL, extern='m1')
+    v = b.pack(ScalarType(F32, rows) if rows > 1 else ScalarType(F32),
+               *[b.const(float(k)) for k in range(rows)])
+    args = dict(SURFACE)
+    args.update(surface)
+    return block_reads.store_block2d(b, g, x, y, v, rows=rows, cols=16,
+                                     element=element, **args)
+
+
+def test_a_2d_block_write_is_a_call_that_writes_its_buffer():
+    """A call for its effect, not a store: it writes the buffer and says no
+    more, so no pass takes its corner for an element's index; and it stays
+    where the sub-group is."""
+    b = IRBuilder(fptype=F32)
+    s = _write(b)
+    assert s.op == Op.CALL and block_reads.is_block2d_store(s)
+    assert not block_reads.is_block2d(s) and not block_reads.is_block(s)
+    assert s.attr('shape') == (8, 16) and s.attr('pitch') == 256
+    assert s.attr('surface') == (256, 64) and s.attr('width') == 32
+    assert [(a.kind, a.space) for a in s.accesses] == [
+        (Effect.WRITE, MemSpace.GLOBAL)]
+    assert not s.pure and not s.movable and s.target == ()
+    assert s.args[1:3] == (0, 3) and s.attr('element') is None
+
+
+def test_a_write_takes_a_lanes_rows():
+    b = IRBuilder(fptype=F32)
+    g = b.alloc(F32, (4096,), MemSpace.GLOBAL, extern='m1')
+    v = b.pack(ScalarType(F32, 4), *[b.const(1.0)] * 4)
+    with pytest.raises(IRError, match='8 rows handed 4 elements'):
+        block_reads.store_block2d(b, g, 0, 0, v, rows=8, cols=16, **SURFACE)
+
+
+def test_a_write_holds_the_surface_rules():
+    b = IRBuilder(fptype=F32)
+    with pytest.raises(IRError, match='64-byte aligned'):
+        _write(b, align=16)
+    with pytest.raises(IRError, match='a multiple of 16'):
+        _write(IRBuilder(fptype=F32), pitch=264)
+
+
+def test_spmd_writes_the_block_with_the_sub_groups_write():
+    src, ctx = _spmd(lambda b: _write(b))
+    assert ctx.target.lexic.sub_group_block2d_store is not None
+    assert re.search(r'tensorforge::subGroupBlock2dStore<float, 8>\('
+                     r'item\.get_sub_group\(\), m1, 256, 64, 256, 0, 3, '
+                     r'\w+\);', src), src
+
+
+@pytest.mark.parametrize('lanes', [32, None], ids=['sub-group-32', 'unknown'])
+def test_spmd_writes_a_block_only_with_a_sub_group_of_16(lanes):
+    with pytest.raises(IRError, match='no sub-group of 16'):
+        _spmd(lambda b: _write(b), lanes=lanes)
+
+
+def test_esimd_does_not_spell_the_write():
+    with pytest.raises(IRError):
+        _esimd(lambda b: _write(b))
+
+
+# -- an element's own storage -------------------------------------------------- #
+
+ELEMENT = dict(width=224, height=9, pitch=224, align=None)
+
+
+def test_an_element_surface_needs_no_alignment_from_the_caller():
+    """Its base is the element's pointer, which the device helper moves to
+    the 64-byte boundary (`tensorforge::elementBlock2d`) behind the
+    element's check: the read and the write stand on that, and a pitch
+    that is no whole number of 16 bytes still has no such surface."""
+    b = IRBuilder(fptype=F32)
+    g = b.alloc(F32, (4096,), MemSpace.GLOBAL, extern='m1')
+    with pytest.raises(IRError, match='64-byte aligned'):
+        block_reads.load_block2d(b, g, 0, 0, rows=8, cols=16, **ELEMENT)
+    block_reads.load_block2d(b, g, 0, 0, rows=8, cols=16, element=True,
+                             **ELEMENT)
+    _write(b, element=True, **ELEMENT)
+    with pytest.raises(IRError, match='a multiple of 16'):
+        block_reads.load_block2d(b, g, 0, 0, rows=8, cols=16, element=True,
+                                 width=200, height=9, pitch=200)
+
+
+def test_spmd_reads_and_writes_an_element_through_its_helpers():
+    def build(b):
+        g = b.alloc(F32, (4096,), MemSpace.GLOBAL, extern='m1')
+        v = block_reads.load_block2d(b, g, 16, 0, rows=8, cols=16,
+                                     element=True, **ELEMENT)
+        w = block_reads.load_block2d(b, g, 16, 8, rows=1, cols=16,
+                                     element=True, **ELEMENT)
+        block_reads.store_block2d(b, g, 16, 0, v, rows=8, cols=16,
+                                  element=True, **ELEMENT)
+        block_reads.store_block2d(b, g, 16, 8, w, rows=1, cols=16,
+                                  element=True, **ELEMENT)
+    src, _ = _spmd(build)
+    assert re.search(r'sycl::vec<float, 8> \w+ = tensorforge::elementBlock2d'
+                     r'<float, 8, 224, 9>\(item\.get_sub_group\(\), m1, 16, '
+                     r'0\);', src), src
+    assert re.search(r'float \w+ = tensorforge::elementBlock2d<float, 1, 224, '
+                     r'9>\(item\.get_sub_group\(\), m1, 16, 8\);', src), src
+    assert re.search(r'tensorforge::elementBlock2dStore<float, 8, 224, 9>\('
+                     r'item\.get_sub_group\(\), m1, 16, 0, \w+\);', src), src
+    assert re.search(r'tensorforge::elementBlock2dStore<float, 1, 224, 9>\('
+                     r'item\.get_sub_group\(\), m1, 16, 8, \w+\);', src), src
+
+
+def test_the_device_header_declares_the_writes_the_shapes_take():
+    text = HEADER.read_text()
+    declared = set(re.findall(
+        r'TENSORFORGE_BLOCK2D_WRITE\((intel_sub_group_2d_block_write_\w+)\)',
+        text))
+    wanted = {f'intel_sub_group_2d_block_write_32b_{r}r16x1c'
+              for r in block_reads.BLOCK2D_STORE_ROWS}
+    assert declared == wanted
+    called = set(re.findall(
+        r'\b(intel_sub_group_2d_block_write_\w+)\(\s*surface', text))
+    assert called == wanted
+
+
+def _element_surface_source():
+    """`detail::ElementSurface` as the device header has it, alone."""
+    text = HEADER.read_text()
+    m = re.search(r'template <int Pitch> struct ElementSurface \{.*?\n\};',
+                  text, re.S)
+    assert m, 'no ElementSurface in sycl_spmd.h'
+    return m.group(0)
+
+
+def test_the_element_surface_starts_on_the_boundary(tmp_path):
+    """For every pitch of whole 16 bytes up to 1 kB, an element address is
+    admitted exactly where it is aligned to the largest power of two dividing
+    the pitch and 64, and then the surface `shift` pitches before it is on
+    the 64-byte boundary, fewer than 64 / that many of them.  The header's
+    own code, compiled on the host, against `std::gcd`."""
+    import subprocess
+    from harness import syntax
+    cxx = syntax.compiler()
+    if cxx is None:
+        pytest.skip('no host C++ compiler')
+    program = ('#include <cstdint>\n#include <cstdio>\n#include <numeric>\n'
+               '#include <utility>\n'
+               + _element_surface_source() + '\n'
+               'template <int P> int check() {\n'
+               '  using S = ElementSurface<P>;\n'
+               '  const std::uintptr_t g = std::gcd(P, 64);\n'
+               '  int bad = 0;\n'
+               '  for (std::uintptr_t a = 4096; a < 4096 + 256; a += 4) {\n'
+               '    if (S::fits(a) != (a % g == 0)) { ++bad; continue; }\n'
+               '    if (!S::fits(a)) continue;\n'
+               '    const int j = S::shift(a);\n'
+               '    bad += j < 0 || static_cast<std::uintptr_t>(j) >= 64 / g\n'
+               '           || (a - static_cast<std::uintptr_t>(j) * P) % 64 != 0;\n'
+               '  }\n'
+               '  return bad;\n}\n'
+               'template <int... K> int all(std::integer_sequence<int, K...>)'
+               ' {\n  return (check<16 * (K + 1)>() + ...);\n}\n'
+               'int main() {\n'
+               '  const int bad = all(std::make_integer_sequence<int, 64>{});\n'
+               '  std::printf("%d\\n", bad);\n  return bad != 0;\n}\n')
+    src = tmp_path / 'surface.cpp'
+    exe = tmp_path / 'surface'
+    src.write_text(program)
+    built = subprocess.run([cxx, '-std=c++17', '-O1', str(src), '-o',
+                            str(exe)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    ran = subprocess.run([str(exe)], capture_output=True, text=True)
+    assert ran.returncode == 0 and ran.stdout.strip() == '0', ran.stdout
+
+
+def test_the_shim_parses_the_writes_and_the_element_calls():
+    from harness import syntax
+    if syntax.compiler() is None:
+        pytest.skip('no host compiler')
+
+    def build(b):
+        _write(b)
+        g = b.alloc(F32, (4096,), MemSpace.GLOBAL, extern='m2')
+        v = block_reads.load_block2d(b, g, 0, 0, rows=8, cols=16,
+                                     element=True, **ELEMENT)
+        block_reads.store_block2d(b, g, 0, 0, v, rows=8, cols=16,
+                                  element=True, **ELEMENT)
+    src, _ = _spmd(build)
+    body = '\n'.join(l for l in src.splitlines()
+                     if not re.match(r'\s*float m\d+\[', l))
+    kernel = ('void k(sycl::nd_item<3> item, float *m1, float *m2) {\n'
+              + body + '\n}\n')
+    result = syntax.check_source(kernel, shim=syntax.shim_for('oneapi'))
+    assert result.ok, result.errors()
+    assert 'tensorforge::elementBlocks' not in src

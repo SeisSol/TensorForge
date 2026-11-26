@@ -37,14 +37,16 @@ its own: a `load` with `engine='block2d'` (`engines.TRANSFER_ENGINES`), the
 block's `shape` (rows, columns), the surface's `pitch`
 and extent (`surface`), and `transpose` / `vnni`.  It is one LSC 2D block
 message, which hands every lane of a sub-group of 16 one column of the
-block, or one row where it transposes; `load_block2d` builds one.  Nothing
-here produces one: it pays on a layout that puts sixteen equally strided
-elements on the lanes, and TensorForge lays out one alone -- the operator
-copies the SPMD lowering's DPAS reads a tile at a time where asked
-(`Options.sycl_dpas_block2d`, `MatmulOperands.A_block2d`), whose reads the
-matrix path builds.  `stacking` keeps the lanes on a matrix's rows, stacks
-at most two elements on its last axis, and reaches each through a pointer
-of its own.
+block, or one row where it transposes; `load_block2d` builds one, and
+`store_block2d` its write.  Nothing here produces one: it pays on a layout
+that puts sixteen equally strided elements on the lanes, and TensorForge
+lays out two -- the operator copies the SPMD lowering's DPAS reads a tile at
+a time where asked (`Options.sycl_dpas_block2d`, `MatmulOperands.A_block2d`),
+whose reads the matrix path builds, and an element's own storage, a lane
+slot of its rows at a time (`Options.sycl_element_blocks`), whose transfers
+build theirs.  `stacking` keeps the lanes on a matrix's rows, stacks at most
+two elements on its last axis, and reaches each through a pointer of its
+own.
 """
 
 from __future__ import annotations
@@ -821,6 +823,11 @@ BLOCK2D_SPMD_MAX = 16
 #: (`check_lsc_block_2d_restrictions` in DPC++'s `esimd/memory.hpp`).
 BLOCK2D_COLS = (1, 2, 4, 8)
 
+#: The rows of 32-bit data a lane writes of its column: what
+#: `intel_sub_group_2d_block_write_32b_{R}r16x1c` takes, which IGC 2.41.5
+#: and 2.42.6 have -- a block write is never transposed.
+BLOCK2D_STORE_ROWS = (1, 2, 4, 8)
+
 #: The surface a 2D block is read from, as `cl_intel_subgroup_2d_block_io`
 #: states its restrictions (Khronos registry): the base cache-line aligned,
 #: the width from 64 bytes to 2^24 and a whole number of elements, the
@@ -850,8 +857,10 @@ def block2d_refusal(elem: Datatype, rows: int, cols: int, *,
 
     * elements through a table share no pitch: reading them as one surface
       would need a check of the table at run time and a fallback where the
-      elements are not equally strided, which nothing writes yet;
-    * there is no transposed 2D block store, and no 2D store is built;
+      elements are not equally strided, which nothing writes yet -- a block
+      within one element's own storage (`element_surface`) needs none;
+    * there is no transposed 2D block store, and a store writes a lane's
+      column of 16, 1 to 8 rows of it (`BLOCK2D_STORE_ROWS`);
     * VNNI packs 8- and 16-bit data, and these are 32- or 64-bit;
     * a 64-bit block transposes at most 8 rows, half the 16 lanes -- IGC
       stops at "unsupported block configuration: width=8, height=16" -- and
@@ -861,10 +870,8 @@ def block2d_refusal(elem: Datatype, rows: int, cols: int, *,
       row of 16, 1 to 8 columns of it (`BLOCK2D_ROWS`, `BLOCK2D_COLS`);
     * the surface rules (`SURFACE_*`).
     """
-    if store:
-        if transpose:
-            return 'the hardware has no transposed 2D block store'
-        return 'no 2D block store is built: nothing writes one yet'
+    if store and transpose:
+        return 'the hardware has no transposed 2D block store'
     if table:
         return ('elements reached through a table, of pointers or of '
                 'indices, share no pitch: read as one surface they would '
@@ -886,6 +893,9 @@ def block2d_refusal(elem: Datatype, rows: int, cols: int, *,
         return (f'{BLOCK2D_LANES} columns of 64 bits are '
                 f'{8 * BLOCK2D_LANES} bytes, and a row of a 2D block reads '
                 f'at most 64')
+    if store and (cols != BLOCK2D_LANES or rows not in BLOCK2D_STORE_ROWS):
+        return (f'a lane writes one column of {BLOCK2D_LANES} and '
+                f'{BLOCK2D_STORE_ROWS} rows of it, not {rows} x {cols}')
     if not transpose and (cols != BLOCK2D_LANES or rows not in BLOCK2D_ROWS):
         return (f'untransposed, a lane reads one column of '
                 f'{BLOCK2D_LANES} and {BLOCK2D_ROWS} rows of it, not '
@@ -911,11 +921,24 @@ def block2d_refusal(elem: Datatype, rows: int, cols: int, *,
     return None
 
 
+def _element_surface(element: bool, align: Optional[int]) -> Optional[int]:
+    """The base alignment a block of an element's own storage stands on.
+
+    The element's pointer is the base (`Options.sycl_element_blocks`): the
+    device helper starts the surface the pitches before it that put it on
+    the 64-byte boundary (`tensorforge::elementBlock2d`), and the element's
+    check before the block body (`tensorforge::elementBlocks`) is what makes
+    that boundary reachable -- for a pitch of whole 16 bytes, which the
+    surface rules ask of every pitch.  So the surface's base is aligned by
+    construction, under the check; `align` is the caller's otherwise."""
+    return SURFACE_BASE_ALIGN if element else align
+
+
 def load_block2d(builder, base: Any, x: Any, y: Any, *, rows: int,
                  cols: int, width: int, height: int, pitch: int,
                  transpose: bool = False, vnni: bool = False,
                  align: Optional[int] = None, elements: bool = False,
-                 hint: str = 'blk') -> Value:
+                 element: bool = False, hint: str = 'blk') -> Value:
     """A 2D block of `rows` x `cols` elements read from the surface at
     `base` -- `width` bytes wide, `height` rows high, rows `pitch` bytes
     apart, in global memory -- at column `x` and row `y` (in elements and
@@ -937,26 +960,24 @@ def load_block2d(builder, base: Any, x: Any, y: Any, *, rows: int,
     says that the surface's rows are elements of the batch, `pitch` apart --
     the layout that stacks elements on the lanes, read transposed: then an
     operand that reaches its elements through a table, of pointers or of
-    indices, has no pitch to give (`block2d_refusal`).  Refused where
+    indices, has no pitch to give (`block2d_refusal`).  `element` says that
+    the surface is one element's own storage, `base` that element's pointer
+    (`Options.sycl_element_blocks`, `_element_surface`): its rows are the
+    element's columns, and the block one lane slot of them.  Refused where
     `block2d_refusal` says why, with that answer.  Built behind the passes,
-    as the windows and runs are, or in the body by the DPAS path's reads of
-    an operator surface (`MatmulOperands.A_block2d`), a buffer nothing in the
-    body writes.
+    as the windows and runs are, in the body by the DPAS path's reads of an
+    operator surface (`MatmulOperands.A_block2d`), a buffer nothing in the
+    body writes, or by a transfer of an element's operand into registers
+    (`GlbToRegLoader`), behind the element's check.
     """
-    if isinstance(base, Value) and isinstance(base.type, BufferType):
-        elem, space = base.type.elem, base.type.space
-    else:
-        elem = getattr(base, 'datatype', None) or builder._fptype
-        space = space_of(base)
-    if space is not MemSpace.GLOBAL:
-        raise IRError(f'a 2D block read of {base}: it reads global memory, '
-                      f'not {space.name.lower()}')
+    elem = _surface_elem(builder, base, 'read')
     kind = getattr(getattr(getattr(base, 'obj', None), 'addressing', None),
                    'kind', None)
     table = elements and kind is not None and kind.follows_pointer()
     why = block2d_refusal(elem, rows, cols, transpose=transpose, vnni=vnni,
                           width=width, height=height, pitch=pitch,
-                          align=align, table=table)
+                          align=_element_surface(element, align),
+                          table=table)
     if why is not None:
         raise IRError(f'a 2D block read of {rows} x {cols}: {why}')
     count = cols if transpose else rows
@@ -972,8 +993,69 @@ def load_block2d(builder, base: Any, x: Any, y: Any, *, rows: int,
         attrs=(('engine', 'block2d'), ('shape', (rows, cols)),
                ('pitch', pitch), ('surface', (width, height)),
                ('transpose', bool(transpose)), ('vnni', bool(vnni)),
-               ('width', count * elem.size()))))
+               ('width', count * elem.size()))
+        + ((('element', True),) if element else ())))
     return v
+
+
+def _surface_elem(builder, base: Any, what: str) -> Datatype:
+    """The element type of a surface in global memory, or the refusal."""
+    if isinstance(base, Value) and isinstance(base.type, BufferType):
+        elem, space = base.type.elem, base.type.space
+    else:
+        elem = getattr(base, 'datatype', None) or builder._fptype
+        space = space_of(base)
+    if space is not MemSpace.GLOBAL:
+        raise IRError(f'a 2D block {what} of {base}: it {what}s global '
+                      f'memory, not {space.name.lower()}')
+    return elem
+
+
+def store_block2d(builder, base: Any, x: Any, y: Any, value: Value, *,
+                  rows: int, cols: int, width: int, height: int, pitch: int,
+                  align: Optional[int] = None,
+                  element: bool = False) -> Stmt:
+    """A 2D block of `rows` x `cols` elements written by the sub-group to the
+    surface at `base` -- `width` bytes wide, `height` rows high, rows `pitch`
+    bytes apart, in global memory -- at column `x` and row `y`: lane `l`
+    hands in column `x + l` of the block, its `rows` elements in `value`, a
+    vector of them or a number where it is one.  One message for the
+    sub-group, as `load_block2d` reads one; `element` as there.
+
+    A call for its effect rather than a store: what it writes is a block of
+    a surface, not one element at an index, and every pass that reasons
+    about a store's address would take the corner for one.  As a call it
+    says what it touches -- the buffer, written -- and nothing more, which
+    is what the passes that order and remove accesses go by
+    (`IRBuilder.call_stmt`).  Not movable: a message of the whole sub-group
+    stays where the sub-group is converged.  The hardware writes the block
+    whole, so the caller writes only blocks whose every lane may be written:
+    nothing outside the surface (the extension leaves that unstated, and the
+    CPU model stops there) and nothing a guard would have held back."""
+    elem = _surface_elem(builder, base, 'write')
+    why = block2d_refusal(elem, rows, cols, store=True, width=width,
+                          height=height, pitch=pitch,
+                          align=_element_surface(element, align))
+    if why is not None:
+        raise IRError(f'a 2D block write of {rows} x {cols}: {why}')
+    length = getattr(getattr(value, 'type', None), 'length', None) or 1
+    if length != rows:
+        raise IRError(f'a 2D block write of {rows} rows handed {length} '
+                      f'elements a lane')
+    return builder.emit(Stmt(
+        op=Op.CALL, target=(), args=(base, x, y, value), pure=False,
+        movable=False, effect=Effect.WRITE,
+        accesses=(Access(Effect.WRITE, MemSpace.GLOBAL,
+                         builder.alias_root(base)),),
+        attrs=(('block2d_store', True), ('shape', (rows, cols)),
+               ('pitch', pitch), ('surface', (width, height)),
+               ('width', rows * elem.size()))
+        + ((('element', True),) if element else ())))
+
+
+def is_block2d_store(s: Stmt) -> bool:
+    """A 2D block write (`store_block2d`)."""
+    return s.op == Op.CALL and bool(s.attr('block2d_store'))
 
 
 def is_block2d(s: Stmt) -> bool:
@@ -993,10 +1075,12 @@ def block2d_geometry(s: Stmt) -> Tuple[int, int, int]:
 
 
 __all__ = ['BLOCK2D_COLS', 'BLOCK2D_LANES', 'BLOCK2D_ROWS', 'BLOCK2D_SPMD_MAX',
-           'RUN_BYTES', 'Run', 'SPMD_RUN_MAX', 'SURFACE_BASE_ALIGN',
-           'SURFACE_MAX', 'SURFACE_MIN_WIDTH', 'SURFACE_PITCH_ALIGN',
-           'VECTOR_ELEMS', 'WINDOW_MAX', 'Window', 'block2d_geometry',
-           'block2d_refusal', 'is_block2d', 'load_block2d', 'plan_spmd_runs',
+           'BLOCK2D_STORE_ROWS', 'RUN_BYTES', 'Run', 'SPMD_RUN_MAX',
+           'SURFACE_BASE_ALIGN', 'SURFACE_MAX', 'SURFACE_MIN_WIDTH',
+           'SURFACE_PITCH_ALIGN', 'VECTOR_ELEMS', 'WINDOW_MAX', 'Window',
+           'block2d_geometry', 'block2d_refusal', 'is_block2d',
+           'is_block2d_store', 'load_block2d', 'store_block2d',
+           'plan_spmd_runs',
            'allocations', 'block_reads', 'buffer_name', 'const_flat',
            'is_block', 'is_buffer', 'is_comment', 'is_part', 'messages',
            'plan_runs', 'plan_windows', 'space_of', 'vector_width']
