@@ -66,6 +66,24 @@ class TestTheDeclaration:
         assert tensorforge.get_routine_generator(None).DEVICE_LAYOUTS is True
 
 
+class TestTheRule:
+    """The device layout rule a build that opts into it lays its tensors out
+    by: what yateto's `ExportFactory.layoutRuleOf` reads off the class."""
+
+    def test_columns_of_16_bytes_and_elements_on_64(self):
+        assert YatetoFrontend.device_layout_rule(_Arch()) == {"columns": 16, "base": 64}
+
+    def test_stated_on_the_class_as_parameters(self):
+        assert "device_layout_rule" in YatetoFrontend.__dict__
+        assert (YatetoFrontend.LAYOUT_COLUMNS, YatetoFrontend.LAYOUT_BASE) == (16, 64)
+
+    def test_the_same_for_every_target_so_far(self):
+        class Other(_Arch):
+            name = "gfx942"
+            backend = "hip"
+        assert YatetoFrontend.device_layout_rule(Other()) == YatetoFrontend.device_layout_rule(_Arch())
+
+
 class TestADeviceLayout:
     def test_the_storage_stated_is_the_storage_read(self):
         _, cache = DescriptionReader(_Arch(), {}).read(_narrowed(_derivative(), "Q"))

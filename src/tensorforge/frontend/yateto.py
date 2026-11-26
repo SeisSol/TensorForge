@@ -955,6 +955,34 @@ class YatetoFrontend:
   #: the layouts are settled when it optimizes the kernels.
   DEVICE_LAYOUTS = True
 
+  #: The device layout rule's parameters, in bytes (`device_layout_rule`).
+  #:
+  #: Columns padded to 16 bytes: one 16-byte access, the widest a lane reads
+  #: in one instruction on every target.  Elements starting on 64 bytes: what
+  #: PVC's 2D block messages want of a base, and harmless elsewhere; NVIDIA
+  #: and AMD are to be measured, which is why these are parameters.
+  LAYOUT_COLUMNS = 16
+  LAYOUT_BASE = 64
+
+  @classmethod
+  def device_layout_rule(cls, arch):
+    """How a build that opts into it lays out its tensors for the kernels
+    built here: `{'columns': bytes, 'base': bytes}`.
+
+    yateto asks for it of what is registered (its
+    `ExportFactory.layoutRuleOf`), and a build that opts in hands it to its
+    architecture before it declares a tensor.  The columns of a tensor that
+    aligns are then padded to `columns` bytes and each of its elements
+    starts on `base` bytes, on the host and on the device alike.  A build
+    that does not opt in keeps the layouts it had: the rule is stated, not
+    imposed.
+
+    The same for every target so far (`arch` is asked nothing yet); the
+    measurements of the padding job decide whether NVIDIA and AMD want
+    other numbers.
+    """
+    return {'columns': cls.LAYOUT_COLUMNS, 'base': cls.LAYOUT_BASE}
+
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.
 
