@@ -394,6 +394,42 @@ def parse_matrix_groups(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_issue` takes.
+MATRIX_ISSUE = ('thread', 'elect')
+
+
+def parse_matrix_issue(text: str) -> str:
+  """`thread` or `elect` (`Options.matrix_issue`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_ISSUE:
+    raise ValueError(f'expected one of {MATRIX_ISSUE}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_slots` takes.
+MATRIX_SLOTS = ('round', 'trip')
+
+
+def parse_matrix_slots(text: str) -> str:
+  """`round` or `trip` (`Options.matrix_slots`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_SLOTS:
+    raise ValueError(f'expected one of {MATRIX_SLOTS}, got {text!r}')
+  return value
+
+
+#: What `Options.tile_tables` takes.
+TILE_TABLES = ('device', 'constant')
+
+
+def parse_tile_tables(text: str) -> str:
+  """`device` or `constant` (`Options.tile_tables`)."""
+  value = str(text).strip().lower()
+  if value not in TILE_TABLES:
+    raise ValueError(f'expected one of {TILE_TABLES}, got {text!r}')
+  return value
+
+
 #: What `Options.matrix_spans` takes.
 MATRIX_SPANS = ('kept', 'dense')
 
@@ -3154,15 +3190,20 @@ declare('matrix_input_chunks',
         parse=parse_matrix_input_chunks,
         doc='How the high-order tile stages I, the group operand its star '
             'step reads (`matrix_tile` `high`, `element_group.TileRows.'
-            'chunk`).  `auto`, the default: in chunks of `TILE_CHUNK` (32) '
-            'rows of K where I has more, each chunk of every element a slot '
-            'of a ring of its own (`TILE_CHUNK_SLOTS`), streamed in the order '
-            'the blocks of K read them and again a pass over N -- the input '
-            'ring a trip\'s star matrices alone; `whole`: I in the input '
-            'ring\'s slot with them, a trip at a time, as before; 8 to 128 '
-            'rows (a multiple of 8, a block of K\'s) forced, for tests and '
-            'sweeps.  The hand-written kernels stream I in chunks of 32 rows '
-            'through two slots at every order.')
+            'chunk`).  `auto`, the default: on tcgen05 in chunks of '
+            '`TILE_CHUNK` (32) rows of K where I has more, each chunk of every '
+            'element a slot of a ring of its own (`TILE_CHUNK_SLOTS`), '
+            'streamed in the order the blocks of K read them -- the input ring '
+            'a trip\'s star matrices alone; on wgmma I whole wherever the tile '
+            'fits it, in chunks where it does not (`element_group.tile_plan`): '
+            'a GH200 measured I whole faster at every order (Vista 1169572, ns '
+            'an element: o6 4.91 against the chunks\' 6.23, o8 11.60 against '
+            '11.79, o10 34.77 at seven elements a warpgroup against 44.40 at '
+            'fourteen on two, o12 73.01 against 76.57); `whole`: I in the '
+            'input ring\'s slot with them, a trip at a time; 8 to 128 rows (a '
+            'multiple of 8, a block of K\'s) forced, for tests and sweeps.  '
+            'The hand-written kernels stream I in chunks of 32 rows through '
+            'two slots at every order.')
 
 declare('matrix_bands',
         default=2,
@@ -3198,6 +3239,56 @@ declare('matrix_groups',
             'the generated file -- so that the code does not grow with the '
             'groups (the hand-written kernels\' group engine); `unrolled`: '
             'each group written out.')
+
+declare('matrix_issue',
+        default='thread',
+        env='TF_MATRIX_ISSUE',
+        parse=parse_matrix_issue,
+        doc='Which thread of the high-order tile\'s mma warp on tcgen05 '
+            'issues the trip\'s products (`matrix_tile` `high`, '
+            '`element_group.TileRows.issue`): `thread`, the default, the '
+            'warp\'s first lane, each wait, product and commit under its own '
+            'predicate -- which ptxas cannot tell holds in one lane, so that '
+            'it wraps every product in a loop over the lanes that might issue '
+            'it (ELECT, R2UR.BROADCAST of its operands, BRA.U.ANY); `elect`: '
+            'the lane `elect.sync` picks, the warp converged at the trip\'s '
+            'head, and the trip\'s waits, products and commits in one branch '
+            'that lane alone takes, as the hand-written kernels issue -- the '
+            'products back to back from uniform registers.  o8 for sm_100a in '
+            'the group loop: a block 248 instructions, 56 of them R2UR and 11 '
+            'ELECT, under the first lane; 104 and 12 R2UR elected, its nine '
+            'products ten instructions from the first to the last.  On wgmma, '
+            'whose products are the warpgroup\'s, declined.')
+
+declare('matrix_slots',
+        default='round',
+        env='TF_MATRIX_SLOTS',
+        parse=parse_matrix_slots,
+        doc='How the high-order tile on tcgen05 numbers the slots of B\'s '
+            'ring (`matrix_tile` `high`, `element_group.TileRows.slots`): '
+            '`round`, the default, B\'s chunks counted over the trips -- '
+            'chunk `i` of trip `t` the ring\'s round `t C + i`, its slot that '
+            'modulo the slots -- and the group loop\'s body once, each block\'s '
+            'slots and parities from its index; `trip`, B\'s ring numbered by '
+            'the trip as A\'s is -- block `j` takes slot `j % slots` of each '
+            'every trip, a slot\'s parity from the trip and its rounds a trip '
+            '-- and the group loop\'s body written out once a slot of the '
+            'rings\' depth, the slots numbers in it, the bodies past the last '
+            'block guarded.  On wgmma declined.')
+
+declare('tile_tables',
+        default='device',
+        env='TF_TILE_TABLES',
+        parse=parse_tile_tables,
+        doc='Where the high-order tile\'s group loop on tcgen05 reads its '
+            'blocks\' first column of D and N from (`matrix_tile` `high`, '
+            '`matrix_groups` `loop`, `element_group.TileRows.tables`): '
+            '`device`, the default, tables of the generated file in global '
+            'memory as every other, a load into a lane\'s registers each; '
+            '`constant`, the tables in constant memory, a uniform load each '
+            'that the products\' operands take from uniform registers: o8 '
+            'for sm_100a, `matrix_issue` `elect`, a block 93 instructions and '
+            '6 R2UR against 104 and 12.  On wgmma declined.')
 
 declare('matrix_consumers',
         default=2,

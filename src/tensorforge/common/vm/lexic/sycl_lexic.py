@@ -486,7 +486,8 @@ class SyclLexic(Lexic):
             f'global_space, sycl::access::decorated::no>({address})'
             f'.prefetch({elems});')
 
-  def module_constant(self, elem: str, name: str, values, align=None) -> str:
+  def module_constant(self, elem: str, name: str, values, align=None,
+                      space=None) -> str:
     """`Lexic.module_constant`, aligned where asked: an operator copy is
     read in vectors of eight floats a work-item (`intel_spmd`), and a
     `constexpr` array of floats is only as aligned as a float."""

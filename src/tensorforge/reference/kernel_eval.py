@@ -1542,6 +1542,9 @@ def _py(expr: str) -> str:
     e = re.sub(r'\btensorforge::fma\s*\(', 'FMA(', e)
     # The address of a warp's quarter of tensor memory's lanes (`cuda.h`).
     e = re.sub(r'\btensorforge::tmemWarpAddress\s*\(', 'TMEMADDR(', e)
+    # The lane `elect.sync` picks among its warp's (`cuda.h`,
+    # `Interp._elect`).
+    e = re.sub(r'\btensorforge::electOne\s*\(\s*\)', 'ELECT()', e)
     # The high-order tile's next tile, a claim's answer or the static
     # stride's (`cuda.h`, `Interp._tile_next`).
     e = re.sub(r'\btensorforge::tileNext\s*\(', 'TILENEXT(', e)
@@ -1758,6 +1761,7 @@ class Interp:
         self.env['BROADCAST'] = self._broadcast
         self.env['GATHER'] = self._gather
         self.env['WAVE_UNIFORM'] = self._wave_uniform
+        self.env['ELECT'] = self._elect
         self.env['REDUCE'] = self._reduce
         self.env['PICK'] = _pick
         self.env['BUFLOAD'] = _buffer_load
@@ -1896,6 +1900,30 @@ class Interp:
                         f'hold different values')
         run.wave_cache[(group, lanes, key)] = values[0]
         return values[0]
+
+    def _elect(self) -> bool:
+        """`tensorforge::electOne()`: whether this lane is the one
+        `elect.sync` picks among its warp's -- here the warp's lowest; the
+        kernels do not depend on which, the lane picked issuing and
+        committing all of a trip's products (`multi_element`).  The full
+        mask asks every lane of the warp to execute it together: a warp some
+        of whose lanes the run has not brought here is an `Abort`, as the
+        instruction is undefined then.  Once per statement and warp
+        (`Lockstep.wave_cache`).  A lane run on its own is its warp's one."""
+        if self.lockstep is None:
+            return True
+        run = self.lockstep
+        warp = self.lane // Races.WARP
+        picked = run.wave_cache.get(('elect', warp))
+        if picked is None:
+            lanes = [it.lane for it in run.current
+                     if it.lane // Races.WARP == warp]
+            if len(lanes) != Races.WARP:
+                raise Abort(f'elect.sync in {len(lanes)} lanes of warp '
+                            f'{warp}: its full mask asks for all '
+                            f'{Races.WARP}')
+            picked = run.wave_cache[('elect', warp)] = min(lanes)
+        return self.lane == picked
 
     def _broadcast(self, name: str, block: int, subblock: int, lane: int):
         """`tensorforge::broadcast<Block, Subblock, Lane>(name)` for this lane.

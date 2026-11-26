@@ -81,7 +81,8 @@ class Lexic(ABC):
     """
     return ''
 
-  def module_constant(self, elem: str, name: str, values, align=None) -> str:
+  def module_constant(self, elem: str, name: str, values, align=None,
+                      space=None) -> str:
     """Numbers the generator puts in the translation unit, at namespace
     scope, for the kernel to index at run time.
 
@@ -100,6 +101,10 @@ class Lexic(ABC):
     `values` are integers, or literals already spelled
     (`Datatype.literal`) where `elem` is not an integer type -- the weights
     of a gathered product (`MultilinearInstruction._ell_plan`).
+
+    `space` `constant` asks for CUDA's constant memory (`Options.
+    tile_tables`, which only tcgen05's tile asks): elsewhere none is asked
+    for, and the table is where it is as ever.
     """
     numbers = ', '.join(v if isinstance(v, str) else str(int(v))
                         for v in values)

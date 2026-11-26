@@ -1124,6 +1124,30 @@ __device__ __forceinline__ void tcgen05FenceAfter() {
 #endif
 }
 
+/// Whether this thread is the one `elect.sync` picks among its warp's (PTX
+/// ISA, "elect.sync", sm_90 and newer): true in that lane alone, every lane
+/// of the warp converged at the call -- the full mask.  ptxas knows that a
+/// branch on it is one thread's, and issues the tcgen05 products in it once
+/// each, from uniform registers, where a branch on a lane's own index has
+/// it loop over the lanes that might issue them (`Options.matrix_issue`).
+__device__ __forceinline__ bool electOne() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  uint32_t elected;
+  asm volatile("{\n"
+               ".reg .pred e;\n"
+               "elect.sync _|e, 0xffffffff;\n"
+               "selp.u32 %0, 1, 0, e;\n"
+               "}"
+               : "=r"(elected));
+  return elected != 0;
+#elif defined(__CUDA_ARCH__)
+  __trap();
+  return false;
+#else
+  return false;
+#endif
+}
+
 /// The products the thread `issue` picks issued since its last commit,
 /// tracked by the cursor's mbarrier, which they arrive at once complete (PTX
 /// ISA, "tcgen05.commit"): issued by that thread alone -- a commit tracks the
