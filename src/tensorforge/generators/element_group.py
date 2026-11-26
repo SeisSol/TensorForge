@@ -2003,6 +2003,14 @@ class TileRows:
     #: by the trip as A's ring is, block `j` slot `j % slots` every trip, the
     #: group loop's body written out a slot of the rings' depth at a time.
     slots: str = 'round'
+    #: tcgen05's: A's ring and B's (`two`), or one ring for both, B's of
+    #: A's slots, a wait and a commit a block (`one`; `Options.
+    #: matrix_handoffs`, `tile_handoffs`).
+    handoffs: str = 'two'
+    #: tcgen05's: how the mma warp waits for a slot (`Options.matrix_wait`):
+    #: `try_wait` again (`try`), with a suspend-time hint (`suspend`), or
+    #: `test_wait` in a spin (`test`).
+    wait: str = 'try'
 
     @property
     def granule(self) -> int:
@@ -2263,6 +2271,30 @@ def tile_slots(engine: str, context) -> str:
     the options ask on tcgen05, `round` on wgmma, whose passes walk B's
     chunks again."""
     return slots_asked(context) if engine == 'tcgen05' else 'round'
+
+
+def handoffs_asked(context) -> str:
+    """How the options ask the tile to hand a block's operands over
+    (`Options.matrix_handoffs`): `two` or `one`."""
+    return getattr(context.get_user_options(), 'matrix_handoffs', 'two')
+
+
+def tile_handoffs(engine: str, context) -> str:
+    """How the tile on `engine` hands a block's operands over
+    (`TileRows.handoffs`): as the options ask on tcgen05, `two` on wgmma,
+    whose warpgroups each fill their own A."""
+    return handoffs_asked(context) if engine == 'tcgen05' else 'two'
+
+
+def wait_asked(context) -> str:
+    """How the options ask the mma warp to wait (`Options.matrix_wait`)."""
+    return getattr(context.get_user_options(), 'matrix_wait', 'try')
+
+
+def tile_wait(engine: str, context) -> str:
+    """How the mma warp on `engine` waits (`TileRows.wait`): as the
+    options ask on tcgen05, `try` on wgmma."""
+    return wait_asked(context) if engine == 'tcgen05' else 'try'
 
 
 def tile_depth(section: GroupSection) -> int:
@@ -2700,7 +2732,9 @@ def _wgmma_tile_search(section: GroupSection, context, budget: int,
                                            - step.rows[0], context),
                         issue=tile_issue('wgmma', context),
                         tables=tile_tables('wgmma', groups, context),
-                        slots=tile_slots('wgmma', context))
+                        slots=tile_slots('wgmma', context),
+                        handoffs=tile_handoffs('wgmma', context),
+                        wait=tile_wait('wgmma', context))
         for operators in operator_slots_tried(context):
             for slots in PRODUCER_SLOTS + (1,):
                 lowered = tile_lowered(section, context, tile, slots,
@@ -2738,14 +2772,21 @@ def _tcgen05_tile_search(section: GroupSection, context, budget: int,
         bands = min(int(getattr(context.get_user_options(), 'matrix_bands',
                                 TILE_BANDS)), aslots)
         groups = tile_groups('tcgen05', context)
+        handoffs = tile_handoffs('tcgen05', context)
+        owned = bands * (aslots // bands)
         tile = TileRows('tcgen05', width, elements, 1, spans_asked(context),
                         groups, bands, dslots,
                         tile_schedule('tcgen05', context),
-                        bands * (aslots // bands), chunk=chunk, cslots=cslots,
+                        owned, chunk=chunk, cslots=cslots,
                         output=output, issue=tile_issue('tcgen05', context),
                         tables=tile_tables('tcgen05', groups, context),
-                        slots=tile_slots('tcgen05', context))
-        for operators in operator_slots_tried(context):
+                        slots=('trip' if handoffs == 'one'
+                               else tile_slots('tcgen05', context)),
+                        handoffs=handoffs, wait=tile_wait('tcgen05', context))
+        # One ring for A and B (`TileRows.handoffs` `one`): B's of A's
+        # slots, a block's slot of each alike.
+        for operators in ((owned,) if handoffs == 'one'
+                          else operator_slots_tried(context)):
             for ring in PRODUCER_SLOTS[1:] + (1,):
                 lowered = tile_lowered(section, context, tile, ring,
                                        operators)
@@ -2829,7 +2870,11 @@ def _depth_note(section: GroupSection) -> str:
 
 def _slots_note(tile: TileRows) -> str:
     """The kernel's word on how B's ring is numbered (`TileRows.slots`),
-    where it is by the trip."""
+    where it is by the trip, and on A's ring and B's as one
+    (`TileRows.handoffs`)."""
+    if tile.handoffs == 'one':
+        return (', A\'s ring and B\'s one, block j its slot j modulo the '
+                'slots every trip, a wait and a commit a block')
     if tile.slots != 'trip':
         return ''
     return ', block j its slot j modulo the slots every trip, as A\'s'
@@ -2837,10 +2882,17 @@ def _slots_note(tile: TileRows) -> str:
 
 def _issue_note(tile: TileRows) -> str:
     """The kernel's word on which thread of the mma warp issues
-    (`TileRows.issue`), where it is not the warp's first lane."""
-    if tile.issue != 'elect':
-        return ''
-    return ' -- the lane elect.sync picks, the trip in one branch of its own'
+    (`TileRows.issue`), where it is not the warp's first lane, and how it
+    waits (`TileRows.wait`), where it does not try again."""
+    out = ''
+    if tile.issue == 'elect':
+        out += (' -- the lane elect.sync picks, the trip in one branch of '
+                'its own')
+    if tile.wait == 'suspend':
+        out += ', waiting by try_wait with a suspend-time hint'
+    elif tile.wait == 'test':
+        out += ', waiting by test_wait in a spin'
+    return out
 
 
 def _issue_notes(section: GroupSection, context) -> List[str]:
@@ -2862,6 +2914,14 @@ def _issue_notes(section: GroupSection, context) -> List[str]:
     if slots != section.tile.slots:
         notes.append(f'matrix_slots={slots} declined: wgmma\'s passes walk '
                      f'B\'s chunks again')
+    handoffs = handoffs_asked(context)
+    if handoffs != section.tile.handoffs:
+        notes.append(f'matrix_handoffs={handoffs} declined: wgmma\'s '
+                     f'warpgroups each fill their own A')
+    wait = wait_asked(context)
+    if wait != section.tile.wait:
+        notes.append(f'matrix_wait={wait} declined: tcgen05\'s mma warp\'s '
+                     f'alone')
     return notes
 
 
@@ -5097,7 +5157,8 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'TILE_PRODUCER_WARPS', 'TileRows', 'rowless', 'tile_asked',
            'groups_asked', 'issue_asked', 'kept_span', 'spans_asked',
            'tile_chunks', 'tile_issue', 'tables_asked', 'tile_tables',
-           'slots_asked', 'tile_slots', 'tile_depth',
+           'slots_asked', 'tile_slots', 'tile_depth', 'handoffs_asked',
+           'tile_handoffs', 'wait_asked', 'tile_wait',
            'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_TCGEN05', 'TMEM_BUDGET',
            'tile_dslots', 'tile_groups', 'tile_output', 'TILE_UNROLLED_ROWS',
            'TILE_OUTPUT_KEEP',

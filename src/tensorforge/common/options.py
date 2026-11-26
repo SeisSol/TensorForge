@@ -418,6 +418,30 @@ def parse_matrix_slots(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_handoffs` takes.
+MATRIX_HANDOFFS = ('two', 'one')
+
+
+def parse_matrix_handoffs(text: str) -> str:
+  """`two` or `one` (`Options.matrix_handoffs`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_HANDOFFS:
+    raise ValueError(f'expected one of {MATRIX_HANDOFFS}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_wait` takes.
+MATRIX_WAITS = ('try', 'suspend', 'test')
+
+
+def parse_matrix_wait(text: str) -> str:
+  """`try`, `suspend` or `test` (`Options.matrix_wait`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_WAITS:
+    raise ValueError(f'expected one of {MATRIX_WAITS}, got {text!r}')
+  return value
+
+
 #: What `Options.tile_tables` takes.
 TILE_TABLES = ('device', 'constant')
 
@@ -3215,6 +3239,35 @@ declare('matrix_slots',
             '-- and the group loop\'s body written out once a slot of the '
             'rings\' depth, the slots numbers in it, the bodies past the last '
             'block guarded.  On wgmma declined.')
+
+declare('matrix_handoffs',
+        default='two',
+        env='TF_MATRIX_HANDOFFS',
+        parse=parse_matrix_handoffs,
+        doc='How the high-order tile on tcgen05 hands a block\'s operands to '
+            'its products (`matrix_tile` `high`, `element_group.TileRows.'
+            'handoffs`): `two`, the default, A\'s ring and B\'s, a pair of '
+            'mbarriers a slot each -- the issuing thread waits on both full '
+            'sides and commits onto both empty ones a block; `one`, one ring '
+            'for both, numbered by the trip (`matrix_slots` `trip`) and B\'s '
+            'of A\'s slots: a slot\'s full barrier the star band\'s 128 threads '
+            'and the operator warp\'s arrival with B\'s bytes, its empty one '
+            'the products\' one commit, which both producers wait for -- a '
+            'wait and a commit a block.  A hand-off cost the mmaser probe some '
+            '400 cycles a slot on a GB200.  On wgmma declined.')
+
+declare('matrix_wait',
+        default='try',
+        env='TF_MATRIX_WAIT',
+        parse=parse_matrix_wait,
+        doc='How the high-order tile\'s mma warp on tcgen05 waits for a slot '
+            '(`matrix_tile` `high`, `element_group.TileRows.wait`): `try`, the '
+            'default, `mbarrier.try_wait` again until the phase completes, as '
+            'every wait of TensorForge\'s; `suspend`, `try_wait` with a '
+            'suspend-time hint, as CUTLASS waits (0x989680 ns), the thread '
+            'suspended until the phase completes or the hint\'s time passes '
+            '(ptxas: NANOSLEEP.SYNCS); `test`, `mbarrier.test_wait` in a '
+            'spin, never suspended.  On wgmma declined.')
 
 declare('tile_tables',
         default='device',

@@ -2308,7 +2308,7 @@ class IRBuilder:
     def mbarrier_ring(self, name: str, slots: int, *, full: int,
                       empty: int, leader: str,
                       arena: Optional[str] = None,
-                      producer: Optional[str] = None,
+                      producer: Union[str, Tuple[str, ...], None] = None,
                       consumers: Sequence[str] = (), tx: int = 0,
                       scope: 'engines.SyncScope' = engines.SyncScope.BLOCK,
                       hold: int = 1) -> Optional[Ring]:
@@ -2326,10 +2326,11 @@ class IRBuilder:
 
         Its description (`engines.RingSpec`) names the roles that fill and
         drain it, `producer` and `consumers` -- none where it stays inside
-        one role -- the bytes a round's copies complete, `tx`, where they
-        are every round's, the `scope` its statements order, and how many
-        of their groups the consumers hold a slot for, `hold` -- where they
-        give it back (`Ring.hold`)."""
+        one role; `producer` a tuple of them where the ring carries two
+        operands, each its role's -- the bytes a round's copies complete,
+        `tx`, where they are every round's, the `scope` its statements
+        order, and how many of their groups the consumers hold a slot for,
+        `hold` -- where they give it back (`Ring.hold`)."""
         return self._ring(name, slots, full=full, empty=empty, leader=leader,
                           arena=arena, producer=producer, consumers=consumers,
                           tx=tx, scope=scope, kind=engines.SyncKind.MBARRIER,
@@ -2337,7 +2338,8 @@ class IRBuilder:
 
     def ring(self, name: str, slots: int, *, full: int, empty: int,
              leader: str, arena: Optional[str] = None,
-             producer: Optional[str] = None, consumers: Sequence[str] = (),
+             producer: Union[str, Tuple[str, ...], None] = None,
+             consumers: Sequence[str] = (),
              tx: int = 0, waiters: Tuple[int, int] = (0, 0),
              scope: 'engines.SyncScope' = engines.SyncScope.BLOCK,
              hold: int = 1) -> Optional[Ring]:
@@ -2354,7 +2356,8 @@ class IRBuilder:
                           hold=hold)
 
     def _ring(self, name: str, slots: int, *, full: int, empty: int,
-              leader: str, arena: Optional[str], producer: Optional[str],
+              leader: str, arena: Optional[str],
+              producer: Union[str, Tuple[str, ...], None],
               consumers: Sequence[str], tx: int,
               scope: 'engines.SyncScope', kind: 'engines.SyncKind',
               waiters: Tuple[int, int] = (0, 0),
@@ -2410,20 +2413,23 @@ class IRBuilder:
 
     def ring_wait(self, ring: Ring, side: str, slot: Operand,
                   parity: Operand, *, writes: Sequence[Any] = (),
-                  reads: Sequence[Any] = ()) -> Stmt:
+                  reads: Sequence[Any] = (),
+                  form: Optional[str] = None) -> Stmt:
         """Wait for the phase of parity `parity` of the `side` barrier of
         `ring`'s slot `slot` (`engines.ring_wait`): a consumer on the full
         side, behind which the slot's buffers `writes` hold what the
         producer's copies wrote -- declared written there, so that no read
         of them moves ahead; the producer on the empty side, ahead of its
         next copies into the slot's buffers `writes`, which no write moves
-        ahead of.  `reads` are buffers it orders reads of as well."""
+        ahead of.  `reads` are buffers it orders reads of as well.  `form`
+        how the thread waits where it is not `try_wait` again
+        (`engines.RING_WAIT_FORMS`)."""
         accesses = (tuple(Access(Effect.WRITE, self._space_of(x),
                                  self.alias_root(x)) for x in writes)
                     + tuple(Access(Effect.READ, self._space_of(x),
                                    self.alias_root(x)) for x in reads))
         return self.emit(engines.ring_wait(ring.object, side, slot, parity,
-                                           accesses))
+                                           accesses, form=form))
 
     def ring_prime(self, ring: Ring, issue: Operand) -> Optional[Stmt]:
         """The consumers' first release of every slot of `ring`, by the
@@ -2438,14 +2444,16 @@ class IRBuilder:
 
     def ring_acquire(self, ring: Ring, slot: Operand, parity: Operand, *,
                      writes: Sequence[Any] = (),
-                     reads: Sequence[Any] = ()) -> Stmt:
+                     reads: Sequence[Any] = (),
+                     form: Optional[str] = None) -> Stmt:
         """The producer's wait for its round of `ring`'s slot `slot`, on the
         slot's empty side: for the phase of the other parity than its
         consumers' round, `parity` -- its first round finds the slots free,
         the barriers' phase before their first (`ring_round`) -- ahead of its
         next copies into the slot's buffers `writes`."""
         return self.ring_wait(ring, 'empty', slot, self.op(
-            'sub', INDEX, 1, parity, hint='free'), writes=writes, reads=reads)
+            'sub', INDEX, 1, parity, hint='free'), writes=writes, reads=reads,
+            form=form)
 
     def ring_publish(self, ring: Ring, slot: Operand, issue: Operand, *,
                      tx: int = 0, tokens: Sequence[Value] = ()) -> Stmt:
@@ -2458,12 +2466,13 @@ class IRBuilder:
 
     def ring_take(self, ring: Ring, slot: Operand, parity: Operand, *,
                   writes: Sequence[Any] = (),
-                  reads: Sequence[Any] = ()) -> Stmt:
+                  reads: Sequence[Any] = (),
+                  form: Optional[str] = None) -> Stmt:
         """A consumer's wait for its round of `ring`'s slot `slot` on the
         slot's full side, the phase of parity `parity`: behind it the slot's
         buffers `writes` hold what the producer put there (`ring_wait`)."""
         return self.ring_wait(ring, 'full', slot, parity, writes=writes,
-                              reads=reads)
+                              reads=reads, form=form)
 
     def ring_release(self, ring: Ring, slot: Operand, issue: Operand, *,
                      engine: Optional[str] = None) -> Stmt:

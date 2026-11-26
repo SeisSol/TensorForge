@@ -218,9 +218,12 @@ _MB = r'&\s*(?P<bar>\w+)\s*\[(?P<bi>[^\]]*)\]'
 _MB_INIT = re.compile(
     rf'^tensorforge::(?:mbarrier|ldsRing)Init\s*\(\s*{_MB}\s*,'
     r'(?P<count>.+)\)$')
+#: A wait's forms all wait alike here (`engines.RING_WAIT_FORMS`): with a
+#: suspend-time hint (`mbarrierWaitSuspend`) and by test_wait
+#: (`mbarrierWaitTest`).
 _MB_WAIT = re.compile(
-    rf'^tensorforge::(?:mbarrier|ldsRing)Wait\s*\(\s*{_MB}\s*,'
-    r'(?P<parity>.+)\)$')
+    rf'^tensorforge::(?:mbarrier|ldsRing)Wait(?:Suspend|Test)?\s*\(\s*{_MB}'
+    r'\s*,(?P<parity>.+)\)$')
 _MB_ARRIVE = re.compile(
     rf'^tensorforge::(?:mbarrier|ldsRing)Arrive\s*\(\s*{_MB}\s*,'
     r'(?P<issue>.+)\)$')

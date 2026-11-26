@@ -1632,6 +1632,18 @@ def test_the_issue_options_parse():
         'round', 'trip']
     with pytest.raises(ValueError):
         parse_matrix_slots('block')
+    from tensorforge.common.options import (parse_matrix_handoffs,
+                                            parse_matrix_wait)
+    assert registry()['matrix_handoffs'].default == 'two'
+    assert registry()['matrix_wait'].default == 'try'
+    assert [parse_matrix_handoffs(t) for t in ('two', 'One')] == [
+        'two', 'one']
+    assert [parse_matrix_wait(t) for t in ('try', 'Suspend', 'test')] == [
+        'try', 'suspend', 'test']
+    for parse, text in ((parse_matrix_handoffs, 'three'),
+                        (parse_matrix_wait, 'spin')):
+        with pytest.raises(ValueError):
+            parse(text)
     assert [parse_matrix_issue(t) for t in ('thread', 'ELECT')] == [
         'thread', 'elect']
     assert [parse_tile_tables(t) for t in ('device', 'Constant')] == [
@@ -1732,6 +1744,152 @@ def test_the_ring_model_numbers_b_s_ring_by_the_trip():
                                                   numbering=numbering) == 0
         assert ring_model.operator_violations(
             4, blocks, numbering=('round', 'trip')) > 0
+
+
+@pytest.mark.parametrize('order,bands', [(4, 2), (8, 2), (8, 3), (12, 2)])
+def test_the_handoffs_the_options_ask_for(order, bands):
+    """`one` on tcgen05's tile: the rings numbered by the trip and B's of
+    A's slots -- three at three bands, two at o12 --, the group loop a slot
+    of them a body; `matrix_wait` as asked there; on wgmma, whose
+    warpgroups each fill their own A, `two` and `try`, declined in its
+    comment; as the options leave them, `two` and `try`."""
+    tile = _group(order, 'sm_100a').section.tile
+    assert (tile.handoffs, tile.wait) == ('two', 'try')
+    group = _group(order, 'sm_100a', matrix_handoffs='one',
+                   matrix_wait='suspend', matrix_bands=bands)
+    tile = group.section.tile
+    assert (tile.handoffs, tile.slots, tile.wait) == ('one', 'trip',
+                                                      'suspend')
+    assert group.section.ring_slots == tile.aslots
+    assert eg.tile_depth(group.section) == tile.aslots
+    asked = {'matrix_handoffs': 'one', 'matrix_wait': 'test'}
+    wgmma = _group(order, 'sm_90a', **asked)
+    assert (wgmma.section.tile.handoffs, wgmma.section.tile.wait) == (
+        'two', 'try')
+    notes = eg.tile_notes(wgmma, me._context(
+        'sm_90a', 's', multi_element='force', **{**HIGH, **asked}))
+    assert ('matrix_handoffs=one declined: wgmma\'s warpgroups each fill '
+            'their own A') in notes
+    assert 'matrix_wait=test declined: tcgen05\'s mma warp\'s alone' in notes
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_one_ring_for_a_and_b_text(groups):
+    """`one` at o8: no ring of A's own -- B's ring its slots, its full
+    barrier set up for the band's 128 threads and the operator warp's
+    arrival, its empty one for the products' one commit; the issuing
+    thread's one wait and one commit a block, onto that ring; the star
+    bands' waits and arrivals on it; the comment says so."""
+    src = _kernel(8, 'sm_100a', matrix_groups=groups,
+                  matrix_handoffs='one').get_kernel()
+    assert 'ta3_ring' not in src
+    assert re.search(r'mbarrierInit\(&bk3_ring\[r\], 129\)', src)
+    assert re.search(r'mbarrierInit\(&bk3_ring\[4 \+ r\], 1\)', src)
+    waits = re.findall(r'mbarrierWait\(&bk3_ring\[(?!4 \+)', src)
+    commits = re.findall(r'tcgen05CommitOn\(&bk3_ring\[', src)
+    if groups == 'loop':
+        # Four bodies a trip of the loop, a wait and a commit each.
+        assert (len(waits), len(commits)) == (4, 4)
+    else:
+        assert (len(waits), len(commits)) == (11, 11)
+    assert re.search(r'mbarrierArrive\(&bk3_ring\[', src)
+    assert ('A\'s ring and B\'s one, block j its slot j modulo the slots '
+            'every trip, a wait and a commit a block') in src
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_one_ring_hands_over_between_its_roles(groups):
+    """`one` at o6: B's ring the one ring -- its description naming the
+    star bands and the operator warp its producers, each acquiring and
+    publishing its slots, the operator warp's bulk copies into them, the
+    mma warp taking them and committing them back -- no ring of A's own,
+    and every pass's `verify` clean (`rings.refusal`: no act of the ring
+    out of its roles)."""
+    bodies = tro._bodies(order=6, arch='sm_100a', matrix_tile='high',
+                         matrix_groups=groups, matrix_handoffs='one')
+    found = []
+    for body in bodies:
+        found += [d for d in verify(body, strict=False)
+                  if "slot's" in d or 'role' in d or 'chain' in d]
+    assert not found, found[:3]
+    uses = tro._uses(bodies)
+    assert not [name for name in uses if name.startswith('ta')]
+    (ring,) = [u for name, u in uses.items() if name.startswith('bk')]
+    assert ring.spec.producers == ('star', 'operator')
+    assert ring.spec.consumers == ('mma',)
+    assert set(ring.roles('acquire')) == set(ring.roles('publish')) == {
+        'star', 'operator'}
+    assert ring.roles('copy') == ('operator',)
+    assert ring.roles('take') == ring.roles('release') == ('mma',)
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_one_ring_s_wait_makes_b_s_slot_visible(monkeypatch, groups):
+    """`one` at o8: the issuing thread's one wait a block, on B's ring,
+    declares B's slot written behind it (`IRBuilder.ring_take`'s `writes`)
+    as B's own wait does with two rings -- so that no read of B moves
+    ahead of it."""
+    from tensorforge.backend.pir.build import IRBuilder
+    take = IRBuilder.ring_take
+    taken = {}
+
+    def recorded(self, ring, slot, parity, *, writes=(), **kwargs):
+        taken.setdefault(ring.name, set()).add(
+            tuple(sorted(x.hint for x in writes)))
+        return take(self, ring, slot, parity, writes=writes, **kwargs)
+    monkeypatch.setattr(IRBuilder, 'ring_take', recorded)
+    seen = {}
+    for handoffs in ('two', 'one'):
+        taken.clear()
+        _kernel(8, 'sm_100a', matrix_groups=groups,
+                matrix_handoffs=handoffs).get_kernel()
+        seen[handoffs] = dict(taken)
+    assert 'ta3' in seen['two'] and 'ta3' not in seen['one']
+    (written,) = seen['two']['bk3']
+    assert written and seen['one']['bk3'] == {written}
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+@pytest.mark.parametrize('handoffs', ['two', 'one'])
+def test_the_wait_forms_text(groups, handoffs):
+    """`suspend` and `test` at o8, the mma warp's waits alone: A's slot's
+    and B's -- or the one ring's -- a block, the group loop one body a trip
+    of it by the rounds, four by the trip, and D's slot back; each other
+    wait of the kernel `try_wait` again; the comment says so."""
+    options = dict(matrix_groups=groups, matrix_handoffs=handoffs)
+    plain = _kernel(8, 'sm_100a', **options).get_kernel().count(
+        'mbarrierWait(')
+    bodies = {'loop': 1 if handoffs == 'two' else 4, 'unrolled': 11}[groups]
+    for form, name in (('suspend', 'mbarrierWaitSuspend'),
+                       ('test', 'mbarrierWaitTest')):
+        text = _kernel(8, 'sm_100a', matrix_wait=form,
+                       **options).get_kernel()
+        mma = text.count(f'tensorforge::{name}(')
+        assert mma == bodies * (2 if handoffs == 'two' else 1) + 1
+        assert text.count('mbarrierWait(') == plain - mma
+        assert ('waiting by try_wait with a suspend-time hint'
+                if form == 'suspend' else 'waiting by test_wait in a spin') \
+            in text
+
+
+def test_a_ring_s_wait_by_a_form_of_its_own():
+    """A ring's wait in a form of `engines.RING_WAIT_FORMS` carries it to
+    the lowering (`engines.ring_wait`), none by default; any other form
+    refused, as the options' parse refuses it."""
+    from tensorforge.backend.pir import engines
+    from tensorforge.backend.pir.build import IRBuilder
+    from tensorforge.backend.pir.core import IRError
+    from tensorforge.common.context import Context
+    b = IRBuilder(fptype=Datatype.F32, arena='shrMem', context=Context(
+        arch='sm_100a', backend='cuda', fp_type=Datatype.F32))
+    ring = b.mbarrier_ring('pc', 2, full=1, empty=1,
+                           leader='threadIdx.x == 0')
+    assert [b.ring_take(ring, 0, 0, form=form).attr('form')
+            for form in (None, 'suspend', 'test')] == [None, 'suspend',
+                                                       'test']
+    assert b.ring_acquire(ring, 0, 0, form='test').attr('form') == 'test'
+    with pytest.raises(IRError):
+        b.ring_take(ring, 0, 0, form='spin')
 
 
 def test_the_ring_model_shares_a_s_ring_and_b_s():
@@ -1890,6 +2048,25 @@ def test_the_slots_by_the_trip_on_the_oracle(order, groups, options):
     assert (trip == rounds).all()
 
 
+@pytest.mark.parametrize('order,groups,options', [
+    (4, 'loop', {}), (4, 'unrolled', {}), (6, 'loop', {}),
+    (6, 'unrolled', {'matrix_wait': 'test'}),
+    (6, 'loop', {'matrix_bands': 3, 'matrix_wait': 'suspend'}),
+    (6, 'loop', {'matrix_issue': 'elect', 'tile_tables': 'constant'})])
+def test_one_ring_for_a_and_b_on_the_oracle(order, groups, options):
+    """`one` over three trips, o4's two blocks and o6's five, the loop and
+    written out, three bands, the wait forms, and the elected lane's issue
+    with the tables in constant memory: against NumPy without a race --
+    the oracle's barriers count the band's arrivals and the operator
+    warp's with its bytes alike -- and bit for bit what two rings give."""
+    _, two = _on_the_oracle('sm_100a', order, 31, matrix_groups=groups,
+                            **{k: v for k, v in options.items()
+                               if k == 'matrix_bands'})
+    _, one = _on_the_oracle('sm_100a', order, 31, matrix_groups=groups,
+                            matrix_handoffs='one', **options)
+    assert (one == two).all()
+
+
 def test_the_slots_by_the_trip_over_o8_s_blocks_on_the_oracle():
     """`trip` at o8 with the elected lane's issue and the tables in
     constant memory: eleven blocks over two trips, the loop's last body
@@ -2031,6 +2208,68 @@ def test_the_slots_by_the_trip_build(tmp_path):
         assert code not in report, report[-2000:]
 
 
+#: The one ring's builds besides it (`test_one_ring_build`): the elected
+#: lane's issue, the tables in constant memory, the rings numbered by the
+#: trip.
+ONE_RING_BUILD = dict(matrix_issue='elect', tile_tables='constant',
+                      matrix_slots='trip')
+
+
+def _tile_ops(tmp_path, **options):
+    """o8 built for sm_100a as `options` ask, ptxas's report free of its
+    warnings: the SASS's instructions, and the group loop's iteration's --
+    from the first product's block to the back edge behind the last --
+    four bodies a trip of it, 36 UTCHMMA, none in a loop over the lanes."""
+    sass, report = _ptxas('sm_100a', tmp_path, **options)
+    for code in ('C7510', 'C7511', 'C7514', 'C7517', 'C7519'):
+        assert code not in report, report[-2000:]
+    ops = [m.group(1).strip() for m in re.finditer(
+        r'/\*[0-9a-f]{4,}\*/\s+([^;]*);', sass)]
+    mmas = [i for i, op in enumerate(ops) if 'UTCHMMA' in op]
+    assert len(mmas) == 4 * 9
+    span = ops[mmas[0]:mmas[-1] + 1]
+    assert not any('ELECT' in op or 'BRA.U.ANY' in op for op in span)
+    return ops, span
+
+
+def test_one_ring_build(tmp_path):
+    """o8 built for sm_100a with A's ring and B's as one (`ONE_RING_BUILD`):
+    a block one wait for its slot and one commit (SYNCS, UTCBAR), where two
+    rings take two of each; no thread parked in an mbarrier's wait
+    (NANOSLEEP.SYNCS), waiting by `try` (`test_the_wait_forms_build`)."""
+    counts = {}
+    for handoffs in ('two', 'one'):
+        ops, span = _tile_ops(tmp_path, **ONE_RING_BUILD,
+                              matrix_handoffs=handoffs)
+        counts[handoffs] = (sum('SYNCS.PHASECHK' in op for op in span),
+                            sum(op.startswith('UTCBAR') for op in span))
+        assert not any('NANOSLEEP.SYNCS' in op for op in ops)
+    # Between the first product and the last, three blocks' hand-offs.
+    assert counts == {'two': (6, 6), 'one': (3, 3)}
+
+
+@pytest.mark.parametrize('form', ['suspend', 'test'])
+def test_the_wait_forms_build(form, tmp_path):
+    """The one ring's o8 build (`test_one_ring_build`) with the mma warp
+    waiting as `matrix_wait` asks: `test` its three hand-offs between the
+    first product and the last a test of the phase (SYNCS.PHASECHK without
+    TRYWAIT) in a spin, no thread parked in an mbarrier's wait; `suspend` a
+    try_wait, behind which ptxas parks the thread (NANOSLEEP.SYNCS) for the
+    hint's 10 ms (0x989680 ns) where the phase is not complete.  (The
+    tensor memory's allocation retries behind a NANOSLEEP of its own.)"""
+    ops, span = _tile_ops(tmp_path, **ONE_RING_BUILD, matrix_handoffs='one',
+                          matrix_wait=form)
+    checks = [op for op in span if 'SYNCS.PHASECHK' in op]
+    sleeps = [op for op in ops if 'NANOSLEEP.SYNCS' in op]
+    assert len(checks) == 3
+    if form == 'test':
+        assert not any('TRYWAIT' in op for op in checks) and not sleeps
+    else:
+        assert all('TRYWAIT' in op for op in checks)
+        assert sleeps and all('NANOSLEEP.SYNCS 0x989680' in op
+                              for op in sleeps)
+
+
 #: The tile's variants on the GPU: as the options leave it, its blocks
 #: written out and in one loop, I whole in the input ring and in chunks
 #: (wgmma's as the options leave it is I whole where it fits, tcgen05's in
@@ -2039,7 +2278,8 @@ def test_the_slots_by_the_trip_build(tmp_path):
 #: bulk reductions a column and an element's box, the mma warp's issue by
 #: the lane elect.sync picks, and with it the group loop's tables in
 #: constant memory, and the rings numbered by the trip, alone and with
-#: both.
+#: both; A's ring and B's as one, alone and with both, and so with the mma
+#: warp waiting by try_wait with a suspend-time hint and by test_wait.
 GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                 'loop': {'matrix_groups': 'loop'},
                 'whole': {'matrix_input_chunks': 'whole'},
@@ -2052,7 +2292,18 @@ GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                              'tile_tables': 'constant'},
                 'trip': {'matrix_slots': 'trip'},
                 'trip-ec': {'matrix_slots': 'trip', 'matrix_issue': 'elect',
-                            'tile_tables': 'constant'}}
+                            'tile_tables': 'constant'},
+                'one': {'matrix_handoffs': 'one'},
+                **{name: {'matrix_handoffs': 'one', 'matrix_issue': 'elect',
+                          'tile_tables': 'constant', **wait}
+                   for name, wait in (('one-ec', {}),
+                                      ('one-ec-s', {'matrix_wait': 'suspend'}),
+                                      ('one-ec-t', {'matrix_wait': 'test'}))}}
+#: The variants of tcgen05's levers alone (`test_the_tile_computes_on_the_
+#: gpu`): wgmma's tile has no bands, adds D a cell or a row a reduction,
+#: and its products are the warpgroup's.
+TCGEN05_VARIANTS = ('b3', 'red', 'box', 'elect', 'constant', 'trip',
+                    'trip-ec', 'one', 'one-ec', 'one-ec-s', 'one-ec-t')
 
 
 @pytest.mark.parametrize('variant', sorted(GPU_VARIANTS))
@@ -2065,19 +2316,17 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
     (`test_multi_element._described`)."""
     if target.backend != 'cuda' or target.arch not in ('sm_90', 'sm_100'):
         pytest.skip('no GPU with wgmma or tcgen05')
-    if target.arch == 'sm_90' and variant in ('b3', 'red', 'box', 'elect',
-                                              'constant', 'trip', 'trip-ec'):
+    if target.arch == 'sm_90' and variant in TCGEN05_VARIANTS:
         pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands, adds D '
                     'a cell or a row a reduction, and its products are the '
                     'warpgroup\'s')
-    if order > 8 and variant not in ('', 'unrolled', 'loop', 'whole',
-                                     'chunks', 'elect', 'constant', 'trip',
-                                     'trip-ec'):
+    if order > 8 and variant in ('b3', 'red', 'bulk', 'box'):
         pytest.skip('o10 and o12: the tile as the options leave it, its '
                     'blocks written out and in one loop, I whole and in '
                     'chunks, and the mma warp\'s issue by elect.sync\'s '
-                    'lane, its loop\'s tables in constant memory too, and '
-                    'the rings numbered by the trip')
+                    'lane, its loop\'s tables in constant memory too, the '
+                    'rings numbered by the trip, and A\'s ring and B\'s as '
+                    'one')
     from harness.runner import run_case
     options = {**HIGH, **GPU_VARIANTS[variant]}
     special = dataclasses.replace(target, arch=target.arch + 'a')
@@ -2099,7 +2348,8 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
 
 
 @pytest.mark.parametrize('variant', ['', 'unrolled', 'red', 'bulk', 'box',
-                                     'elect', 'constant', 'trip', 'trip-ec'])
+                                     'elect', 'constant', 'trip', 'trip-ec',
+                                     'one', 'one-ec', 'one-ec-s', 'one-ec-t'])
 @pytest.mark.parametrize('order', [6, 8])
 def test_many_trips_of_the_tile_on_the_gpu(order, variant, target, cache_root,
                                            tensorforge_include):

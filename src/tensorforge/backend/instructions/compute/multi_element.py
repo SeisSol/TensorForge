@@ -742,17 +742,26 @@ class MultiElementOperators(AbstractInstruction):
             # role drains it (`_tcgen05_roles`).
             named = (dict(producer='operator', consumers=('mma',))
                      if section.roles else {})
+            full = 1
             if _rowless(section) and step.lowering == 'tcgen05':
                 # tcgen05's tile: the operator warp fills it, the mma warp's
                 # products commit each chunk's slot back (`_tile_tcgen05`).
                 named = dict(producer='operator', consumers=('mma',))
+                if section.tile.handoffs == 'one':
+                    # A's ring too (`TileRows.handoffs` `one`, `_Fold`): a
+                    # slot's full side the star band's 128 threads besides
+                    # the operator warp's arrival, its empty side the
+                    # products' one commit, which both producers wait for.
+                    full = 128 + 1
+                    named = dict(producer=('star', 'operator'),
+                                 consumers=('mma',))
             elif _rowless(section):
                 # The high-order tile's producer fills it, its consumer
                 # warpgroups drain it, a warp's arrival each (`_tile`).
                 consumers, roles = _tile_consumers(section)
                 named = dict(producer='producer', consumers=roles)
             ring = builder.mbarrier_ring(
-                f'bk{n}', slots, full=1, empty=consumers,
+                f'bk{n}', slots, full=full, empty=consumers,
                 leader='threadIdx.x == 0 && threadIdx.y == 0',
                 arena=GeneralLexicon.TOTAL_SHR_MEM,
                 hold=ring_hold(section, step), **named)
@@ -2316,17 +2325,20 @@ class _OperatorRing:
         with b.if_(issue):
             self.fill(trip, j, base, issue)
 
-    def take(self, trip, i, base, issue=None) -> list:
+    def take(self, trip, i, base, issue=None, wait=True, form=None) -> list:
         """Chunk `i`'s slot as its bytes land -- the wait of the thread
-        `issue` picks, or of every thread where it is None -- and its
-        pieces (`_Piece`) in the slot."""
+        `issue` picks, or of every thread where it is None; none where the
+        caller's wait was it (`wait` False) -- and its pieces (`_Piece`) in
+        the slot.  `form` how the thread waits (`engines.ring_wait`)."""
         b = trip.builder
         slot, parity, at = self.round(trip, i, base)
-        if issue is None:
-            b.ring_take(self.ring, slot, parity, writes=[self.storage])
-        else:
+        if wait and issue is None:
+            b.ring_take(self.ring, slot, parity, writes=[self.storage],
+                        form=form)
+        elif wait:
             with b.if_(issue):
-                b.ring_take(self.ring, slot, parity, writes=[self.storage])
+                b.ring_take(self.ring, slot, parity, writes=[self.storage],
+                            form=form)
         pieces, offset = [], 0
         for piece in self.chunks[i]:
             p, k0, rows = piece[:3]
@@ -2701,14 +2713,16 @@ def _star_block(trip, step, numbers, element, k0, rows, live,
     return out
 
 
-def _star_pieces(trip, step, ring, j, base, issue):
+def _star_pieces(trip, step, ring, j, base, issue, wait=True, form=None):
     """The pieces of B a block `j` of K of the folded star's step reads
     (`_Piece`): the prepared ring's chunk, waited for by the thread `issue`
-    picks (`_OperatorRing.take`); or each product's resident stage whole,
-    the block's steps of K at its rows."""
+    picks (`_OperatorRing.take`) -- but where the wait for A's slot is B's
+    too, one ring for both (`wait` False) -- or each product's resident
+    stage whole, the block's steps of K at its rows."""
     from tensorforge.generators.element_group import STAR_ROWS
     if ring is not None:
-        return [(piece, 0) for piece in ring.take(trip, j, base, issue)]
+        return [(piece, 0) for piece in ring.take(trip, j, base, issue,
+                                                  wait=wait, form=form)]
     section = trip.section
     out = []
     for p in step.products:
@@ -2813,7 +2827,17 @@ class _Fold:
             # write A the products have not read.
             bands = _fold_bands(trip)
             self.slots = bands * (self.slots // bands)
-        self.areas = _fold_ring(trip, step, self.slots, named)
+        #: Whether A's ring is B's too (`TileRows.handoffs` `one`): a
+        #: block's one wait for both and one commit.
+        self.shared = (section.tile is not None
+                       and section.tile.handoffs == 'one')
+        if self.shared:
+            if self.ring is None or self.ring.slots != self.slots:
+                raise InternalError(f'{step.dest.alias}: one ring for A and '
+                                    f'B without B\'s ring of A\'s slots')
+            self.areas = self.ring.ring
+        else:
+            self.areas = _fold_ring(trip, step, self.slots, named)
 
     def rows(self, trip, M):
         """What a thread of the bands holds for its row of A: its band,
@@ -2995,10 +3019,15 @@ class _Fold:
         from tensorforge.backend.pir.engines import FenceKind
         from tensorforge.generators.element_group import STAR_ROWS
         b, step, tmem, ring = self.builder, self.step, self.tmem, self.ring
+        form = _wait_form(trip)
         with b.if_(issue):
-            b.ring_take(self.areas, slot, parity)
+            # One ring for A and B (`shared`): the one wait for both.
+            b.ring_take(self.areas, slot, parity,
+                        writes=[ring.storage] if self.shared else (),
+                        form=form)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
-        for piece, k0 in _star_pieces(trip, step, ring, j, base, issue):
+        for piece, k0 in _star_pieces(trip, step, ring, j, base, issue,
+                                      wait=not self.shared, form=form):
             p = step.products.index(piece.product)
             rows = min(STAR_ROWS, piece.stage.depth - j * STAR_ROWS)
             plan = _plan(piece.stage)
@@ -3922,6 +3951,16 @@ def _tcgen05_roles(trip, step, split, stage) -> None:
         b.barrier(Participants.ROLE)
 
 
+def _wait_form(trip) -> Optional[str]:
+    """How the high-order tile's mma warp waits for a slot (`TileRows.
+    wait`): a form of `engines.RING_WAIT_FORMS`, or None to `try_wait`
+    again -- as everywhere outside the tile."""
+    tile = trip.section.tile
+    if tile is None or tile.wait == 'try':
+        return None
+    return tile.wait
+
+
 def _tcgen05_groups(trip, step, fold, ring, base, trips, issue,
                     d_base=None) -> None:
     """The mma role's blocks as one loop -- tcgen05's group engine
@@ -3989,12 +4028,18 @@ def _tcgen05_group(trip, step, fold, ring, base, trips, issue, d_base, los,
     else:
         j = _index(b, 'add', j0, offset, 'g')
         slot, parity, at = fold.round_at(trips, j0, offset)
+    # One ring for A and B (`_Fold.shared`): its full side's wait, for both,
+    # makes B's slot visible too.
+    form = _wait_form(trip)
     with b.if_(issue):
-        b.ring_take(fold.areas, slot, parity)
+        b.ring_take(fold.areas, slot, parity,
+                    writes=[ring.storage] if fold.shared else (), form=form)
         b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
     bslot, bparity, start = ring.round(trip, j0, base, offset)
-    with b.if_(issue):
-        b.ring_take(ring.ring, bslot, bparity, writes=[ring.storage])
+    if not fold.shared:
+        with b.if_(issue):
+            b.ring_take(ring.ring, bslot, bparity, writes=[ring.storage],
+                        form=form)
     lo = b.rawexpr(f'{los}[{{0}}]', j, type_=INDEX, pure=True,
                    movable=True, hint='gl')
     if d_base is not None:
@@ -4047,6 +4092,9 @@ def _tcgen05_group(trip, step, fold, ring, base, trips, issue, d_base, los,
                       widths=widths)
             first = False
     b.ring_release(fold.areas, slot, issue, engine='tcgen05')
+    if fold.shared:
+        # The one commit gives B's slot back with A's.
+        return
     if hold > 1:
         with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):
             if offset is None:
@@ -6121,7 +6169,8 @@ class MultiElementSection(AbstractInstruction):
             with branch:
                 with b.if_(issue):
                     # D's slot back from the epilogue's last round of it.
-                    b.ring_acquire(dring, dslot, dparity)
+                    b.ring_acquire(dring, dslot, dparity,
+                                   form=_wait_form(trip))
                     b.fence(FenceKind.THREAD_SYNC, engine='tcgen05',
                             side='after')
                 if tile.groups == 'loop':
@@ -6134,9 +6183,12 @@ class MultiElementSection(AbstractInstruction):
                         start = fold.issue(trip, j, jslot, jparity, at, issue,
                                            base, n, start, release=False,
                                            d_base=dbase)
-                        if j >= hold - 1:
+                        if j >= hold - 1 and not fold.shared:
                             operator.release(trip, j - hold + 1, base, issue)
-                for j in range(max(0, fold.blocks - hold + 1), fold.blocks):
+                # One ring for A and B: the products' one commit a block
+                # gave B's slots back with A's.
+                for j in (range(max(0, fold.blocks - hold + 1), fold.blocks)
+                          if not fold.shared else ()):
                     operator.release(trip, j, base, issue)
                 b.commit_group('tcgen05', object=dring, issue=issue,
                                slot=dslot, side='full')
