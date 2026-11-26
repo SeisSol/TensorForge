@@ -938,6 +938,23 @@ class YatetoFrontend:
   #: it read as they always did.  Anything else is refused.
   READABLE_VERSIONS = (7, 8)
 
+  #: The kernels built here read their operands as the device holds them.
+  #:
+  #: yateto gives a tensor a host layout and a device layout, the host's
+  #: unless one is set (`Tensor.deviceLayout`), and generates a device kernel
+  #: against the device layouts only for an exporter that says so
+  #: (`ExportGenerator.DEVICE_LAYOUTS`).  Every other kernel reads the host
+  #: layouts: those for the host, and those for the device that yateto's own
+  #: generators build.  Saying so takes nothing to read: a description states
+  #: the layouts its kernel is generated against -- `storage`, `alignment`,
+  #: `binding` -- and this side reads those as it always has, which is why it
+  #: comes with no interface version.  What it takes on is that the caller
+  #: holds the device data that way.
+  #:
+  #: On the class, because yateto asks before any kernel is handed over:
+  #: the layouts are settled when it optimizes the kernels.
+  DEVICE_LAYOUTS = True
+
   def __init__(self, arch, attrs=None):
     """The routine exporter yateto instantiates, once per kernel.
 
