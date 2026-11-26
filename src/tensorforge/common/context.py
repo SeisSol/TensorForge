@@ -49,6 +49,11 @@ class Context:
       # their helpers are in the same header.
       self.target.lexic.element_blocks = (
           getattr(self._options, 'sycl_element_blocks', False) is True)
+    if hasattr(self.target.lexic, 'element_cache'):
+      # Through IGC's cache-opts forms, L1-uncached
+      # (`Options.sycl_element_streaming`): LSC cache option 2.
+      self.target.lexic.element_cache = (
+          2 if getattr(self._options, 'sycl_element_streaming', False) else 0)
     #: The permutation each staged window is built with, by the window's
     #: symbol, where `pir.banks.propose` chose one from a body built without
     #: (`Options.swizzle` `decide`; `AbstractShrMemWrite._swizzle`).  Kept

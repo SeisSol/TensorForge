@@ -69,6 +69,10 @@ class SyclLexic(Lexic):
     #: (`Options.sycl_element_blocks`, `tensorforge::elementBlock2d`), which
     #: the context sets.
     self.element_blocks = False
+    #: The LSC cache option the element blocks go through IGC's cache-opts
+    #: forms with (`Options.sycl_element_streaming`), 0 for the extension's
+    #: own messages; the context sets it.
+    self.element_cache = 0
     #: Whether a kernel may call DPAS from the SPMD lowering
     #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
     #: as it sets the split above: the call is declared in the header that
@@ -602,16 +606,25 @@ class SyclLexic(Lexic):
     if self._explicit_simd or self._sub_groups is None:
       return None
     kind = elem if rows == 1 else f'sycl::vec<{elem}, {rows}>'
+    cache = f', {self.element_cache}' if self.element_cache else ''
     return (kind,
-            f'tensorforge::elementBlock2d<{elem}, {rows}, {pitch}, {columns}>('
-            f'item.get_sub_group(), {base}, {x}, {y})')
+            f'tensorforge::elementBlock2d<{elem}, {rows}, {pitch}, {columns}'
+            f'{cache}>(item.get_sub_group(), {base}, {x}, {y})')
 
   def element_block2d_store(self, elem, rows, base, pitch, columns, x, y,
                             value):
     if self._explicit_simd or self._sub_groups is None:
       return None
+    cache = f', {self.element_cache}' if self.element_cache else ''
     return (f'tensorforge::elementBlock2dStore<{elem}, {rows}, {pitch}, '
-            f'{columns}>(item.get_sub_group(), {base}, {x}, {y}, {value});')
+            f'{columns}{cache}>(item.get_sub_group(), {base}, {x}, {y}, '
+            f'{value});')
+
+  def element_prefetch2d(self, nbytes, base):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    return (f'tensorforge::elementPrefetch2d<{nbytes}>('
+            f'item.get_sub_group(), {base});')
 
   def element_blocks_check(self, pitch, base):
     if self._explicit_simd or self._sub_groups is None:

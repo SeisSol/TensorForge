@@ -2006,6 +2006,21 @@ class Emitter:
             # once for the whole body, so this is not a silent drop.
             if self._prefetch_lex is None:
                 return
+            if s.attr('block2d'):
+                # An element's storage by 2D block prefetches
+                # (`Options.sycl_element_prefetch`, `pir.prefetch`).
+                lex = self._lexic()
+                spell = (getattr(lex, 'element_prefetch2d', None)
+                         if lex is not None else None)
+                nbytes = (int(s.attr('elems', 1))
+                          * self.elem_size(s.prefetch_base))
+                text = (spell(nbytes, self.base_name(s.prefetch_base))
+                        if spell is not None else None)
+                if text is None:
+                    raise IRError(f'{s.prefetch_base}: a 2D block prefetch, '
+                                  f'which this target does not spell')
+                w(text)
+                return
             addr = self.address(s.prefetch_base, s.prefetch_index)
             text = self._prefetch_lex.prefetch(
                 f'&{self.base_name(s.prefetch_base)}[{addr}]',

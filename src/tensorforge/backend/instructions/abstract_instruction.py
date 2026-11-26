@@ -863,6 +863,16 @@ class AbstractInstruction(ABC):
                            trip_reads=options.trip_reads,
                            trip_shards=trips, carry=entry_carry)
     if options.enable_prefetch or options.prefetch_data:
+      from .memory import element_blocks
+      # The next element's operands by 2D block prefetches where the element
+      # blocks are on: through IGC's prefetch forms, refused, naming the
+      # reason, where the ocloc on PATH does not resolve them.
+      surfaces = bool(getattr(options, 'sycl_element_prefetch', False)
+                      and options.prefetch_data
+                      and element_blocks.asked(context)
+                      and element_blocks.target_refusal(context) is None)
+      if surfaces:
+        element_blocks.cacheopts_refusal(context, 'sycl_element_prefetch')
       prefetch = pir.Prefetch(builder.scratch,
                               pointers=options.enable_prefetch,
                               data=options.prefetch_data,
@@ -871,7 +881,10 @@ class AbstractInstruction(ABC):
                               report=hints,
                               # The lanes of a multiplication take turns
                               # at the data hints (`prefetch.prefetch_hints`).
-                              spread=int(lanes or 1))
+                              spread=int(lanes or 1),
+                              # The next element's surfaces by 2D block
+                              # prefetches (`Options.sycl_element_prefetch`).
+                              surfaces=surfaces)
     if shards is not None:
       spec = dict(shards)
       kept = spec.pop('report', kept)

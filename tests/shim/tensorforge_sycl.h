@@ -324,19 +324,24 @@ inline void subGroupBlock2dStore(const sycl::sub_group &, T *, int, int, int,
 
 // `tensorforge_device/sycl_spmd.h`: an element's own storage as a 2D surface
 // (`Options.sycl_element_blocks`): the check of its address, a block read and
-// a block write.  The signatures; the arithmetic is the header's.
+// a block write, with the cache option of `Options.sycl_element_streaming`,
+// and the 2D block prefetch of `Options.sycl_element_prefetch`.  The
+// signatures; the arithmetic is the header's.
 template <int Pitch>
 inline bool elementBlocks(const sycl::sub_group &, const void *) {
   return true;
 }
-template <typename T, int Rows, int Pitch, int Columns>
+template <typename T, int Rows, int Pitch, int Columns, int Cache = 0>
 inline std::conditional_t<Rows == 1, T, sycl::vec<T, Rows>>
 elementBlock2d(const sycl::sub_group &, const T *, int, int) {
   return {};
 }
-template <typename T, int Rows, int Pitch, int Columns, typename Share>
+template <typename T, int Rows, int Pitch, int Columns, int Cache = 0,
+          typename Share>
 inline void elementBlock2dStore(const sycl::sub_group &, T *, int, int, Share) {
 }
+template <int Bytes>
+inline void elementPrefetch2d(const sycl::sub_group &, const void *) {}
 
 // `tensorforge_device/sycl_spmd.h`: DPAS from the SPMD lowering
 // (`Options.sycl_dpas`).  The signatures, which is what parsing can check:

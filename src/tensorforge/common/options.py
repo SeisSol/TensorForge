@@ -1560,6 +1560,41 @@ declare('sycl_element_blocks',
             'where `element_base_align` promises the alignment.  `auto`: off, '
             'until measured.  Off by default.')
 
+declare('sycl_element_streaming',
+        default=False,
+        env='TF_SYCL_ELEMENT_STREAMING',
+        parse=parse_bool,
+        doc='Under `sycl_element_blocks`, the element blocks L1-uncached: reads '
+            'L3-cached, writes written back at L3 (LSC cache options 2), so '
+            'that the operator tiles the element\'s products read keep L1 -- '
+            'through IGC\'s cache-opts forms of the 2D block messages '
+            '(`__builtin_IB_subgroup_block_{read,write}_flat_cacheopts_u32_*`), '
+            'which the extension\'s builtins have no cache option for and an '
+            'annotated pointer does not reach.  IGC-internal names that IGC '
+            '2.41.5 and 2.42.6 resolve: refused, naming the reason, where the '
+            '`ocloc` on PATH does not (`toolchain.intel_block2d_cacheopts`), '
+            'never a quiet return to the plain messages.  The per-lane '
+            'transfers are as they are.  Off by default.')
+
+declare('sycl_element_prefetch',
+        default=False,
+        env='TF_SYCL_ELEMENT_PREFETCH',
+        parse=parse_bool,
+        doc='Under `sycl_element_blocks` and `prefetch_data`, the next '
+            'element\'s operands that have an element surface hinted by 2D '
+            'block prefetches over their storage, where `prefetch_data` asks '
+            'for a line a lane: rows of 256 bytes from the 64-byte line the '
+            'element starts in, up to 32 rows a message, and what is left of '
+            'the last row by pieces of 64 and 32 bytes -- the widths a 2D '
+            'block prefetch takes -- L1 uncached and L3 cached (`tensorforge::'
+            'elementPrefetch2d`).  Every element is hinted, aligned or not.  '
+            'SeisSol\'s I with columns of 64 and 128 floats: two messages '
+            'against nine and fifteen; of 56 and 120 (its PVC layout): one or '
+            'seven against six, two or five against fifteen, by where the '
+            'element starts.  Through IGC\'s prefetch forms, refused as '
+            '`sycl_element_streaming` is where the `ocloc` on PATH does not '
+            'resolve them.  Off by default.')
+
 declare('element_base_align',
         default=0,
         env='TF_ELEMENT_BASE_ALIGN',

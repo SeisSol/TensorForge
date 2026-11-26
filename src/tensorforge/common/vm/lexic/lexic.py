@@ -224,6 +224,12 @@ class Lexic(ABC):
     such write."""
     return None
 
+  def element_prefetch2d(self, nbytes: int, base: str):
+    """The `nbytes` of the element at `base` hinted to the cache by 2D
+    block prefetches, as a statement (`tensorforge::elementPrefetch2d`).
+    None where there is no such hint."""
+    return None
+
   def element_blocks_check(self, pitch: int, base: str):
     """Whether the element at `base`, its columns `pitch` bytes apart, has
     a surface 2D block messages can address, as an expression of the

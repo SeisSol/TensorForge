@@ -4,7 +4,9 @@
 """`Options.sycl_element_blocks`: an element's operands in global memory read
 and written by 2D block messages of the sub-group over the element's own
 storage (`memory.element_blocks`, `BatchLoop._emit_versions`,
-`GlbToRegLoader._block_loops`, `StoreRegToGlb._block_loops`).
+`GlbToRegLoader._block_loops`, `StoreRegToGlb._block_loops`) -- L1-uncached
+under `Options.sycl_element_streaming` -- and the next element's operands
+hinted by 2D block prefetches under `Options.sycl_element_prefetch`.
 
 What a wrong answer would come from: a block where today's transfer moves
 fewer lanes -- a guard's ragged slot, a slot past the operand's columns -- or
@@ -31,12 +33,19 @@ from tensorforge.frontend.yateto import DescriptionReader
 from tensorforge.generators.generator import Generator
 
 
+#: The IGC probe of the cache-opts forms, as the module has it before the
+#: fixture below stands in for it.
+PROBE = toolchain.intel_block2d_cacheopts
+
+
 @pytest.fixture(autouse=True)
 def _no_ocloc(monkeypatch):
     """Every build as on a machine with no `ocloc` to ask, as in
     `test_sycl_dpas`: what is written does not depend on the test machine's
     IGC."""
     monkeypatch.setattr(toolchain, 'intel_dpas_tf32', lambda *a, **k: None)
+    monkeypatch.setattr(toolchain, 'intel_block2d_cacheopts',
+                        lambda *a, **k: None)
 
 
 def _kernel(name='gpu_volume', order=6, precision='s', backend='oneapi',
@@ -321,3 +330,100 @@ def test_the_header_comes_with_element_blocks():
     assert 'tensorforge_device/sycl_spmd.h' in ctx.target.headers()
     lex.element_blocks = False
     assert 'tensorforge_device/sycl_spmd.h' not in ctx.target.headers()
+
+
+# -- streaming and the 2D prefetch ------------------------------------------- #
+
+STREAMED = re.compile(r'tensorforge::elementBlock2d(Store)?<float, \d, \d+, '
+                      r'\d+, (\d)>\(item\.get_sub_group\(\), glb_m\d+, ')
+PREFETCH2D = re.compile(r'tensorforge::elementPrefetch2d<(\d+)>\('
+                        r'item\.get_sub_group\(\), pf_(glb_m\d+)\);')
+STREAM = dict(sycl_element_streaming=True, **ON)
+AHEAD = dict(sycl_element_prefetch=True, prefetch_data=True, **ON)
+
+
+def test_streaming_puts_the_cache_option_on_every_block():
+    """Each block read and write of the element through IGC's cache-opts
+    form, L1 uncached (2); the per-lane transfers and the fallback as they
+    were."""
+    kernel = _kernel(sycl_dpas=True, **STREAM)
+    plain = _kernel(sycl_dpas=True, **ON)
+    blocks = STREAMED.findall(kernel)
+    assert blocks and {c for _, c in blocks} == {'2'}
+    assert {w for w, _ in blocks} == {'', 'Store'}
+    assert not READ.search(kernel) and not WRITE.search(kernel)
+    assert len(blocks) == len(READ.findall(plain)) + len(WRITE.findall(plain))
+    assert ([o for _, o in _bodies(kernel)]
+            == [o for _, o in _bodies(plain)])
+
+
+def test_streaming_without_blocks_changes_nothing(monkeypatch):
+    """Nothing to stream where no block is read: the kernel it always got,
+    and no IGC asked."""
+    def asked(*args, **kwargs):
+        raise AssertionError('a build without blocks asked for the IGC')
+    monkeypatch.setattr(toolchain, 'intel_block2d_cacheopts', asked)
+    plain = _norm(_kernel(sycl_dpas=True))
+    assert _norm(_kernel(sycl_dpas=True, sycl_element_streaming=True)) == plain
+    assert _norm(_kernel(sycl_dpas=True, sycl_element_prefetch=True,
+                         prefetch_data=True)) == _norm(
+        _kernel(sycl_dpas=True, prefetch_data=True))
+
+
+@pytest.mark.parametrize('options,option', [
+    (STREAM, 'sycl_element_streaming'), (AHEAD, 'sycl_element_prefetch'),
+], ids=['streaming', 'prefetch'])
+def test_an_igc_without_the_forms_is_named_at_generation(monkeypatch, options,
+                                                         option):
+    """Never a quiet return to the messages without the cache option: the
+    option and the reason."""
+    from tensorforge.common.exceptions import GenerationError
+    monkeypatch.setattr(toolchain, 'intel_block2d_cacheopts',
+                        lambda *a, **k: False)
+    with pytest.raises(GenerationError, match=option + '.*cache-opts'):
+        _kernel(sycl_dpas=True, **options)
+    monkeypatch.setattr(toolchain, 'intel_block2d_cacheopts',
+                        lambda *a, **k: True)
+    assert _kernel(sycl_dpas=True, **options)
+
+
+@pytest.mark.parametrize('order,nbytes', [(6, 2304), (8, 4608)])
+def test_the_next_elements_i_and_q_by_2d_prefetches(order, nbytes):
+    """The operands with an element surface, I and Q, by one 2D prefetch of
+    their storage each; the star matrices keep a hint a lane."""
+    kernel = _kernel(order=order, sycl_dpas=True, **AHEAD)
+    assert sorted(PREFETCH2D.findall(kernel)) == [
+        (str(nbytes), 'glb_m0'), (str(nbytes), 'glb_m2')]
+    lanes = _kernel(order=order, sycl_dpas=True, prefetch_data=True, **ON)
+    assert not PREFETCH2D.search(lanes)
+    assert '&pf_glb_m0[' in lanes and '&pf_glb_m0[' not in kernel
+    assert '&pf_glb_m1[' in kernel
+
+
+def test_the_probe_reads_the_binary(tmp_path):
+    """The forms resolved: a yes.  Left undefined, or a failed build: a no.
+    No `ocloc` at all: no answer."""
+    from test_sycl_dpas import _ocloc
+    probe = PROBE
+    patch = ('__INTEL_PATCH_CROSS_THREAD_OFFSET_OFF_R0', False)
+    dirs = {}
+    for name in ('old', 'new', 'failed'):
+        dirs[name] = tmp_path / name
+        dirs[name].mkdir()
+    undefined = (toolchain.BLOCK2D_CACHEOPTS_BUILTINS[2], False)
+    assert probe(ocloc=_ocloc(dirs['old'], [('probe', True), undefined,
+                                            patch])) is False
+    assert probe(ocloc=_ocloc(dirs['new'], [('probe', True), patch])) is True
+    assert probe(ocloc=_ocloc(dirs['failed'], [('probe', True), patch],
+                              status=1)) is False
+    assert probe(ocloc=str(tmp_path / 'nowhere')) is None
+
+
+def test_the_streamed_and_prefetching_kernels_parse():
+    from harness import syntax
+    if syntax.compiler() is None:
+        pytest.skip('no host C++ compiler')
+    for options in (STREAM, AHEAD):
+        result = syntax.check_source(_kernel(sycl_dpas=True, **options),
+                                     shim=syntax.SYCL_SHIM)
+        assert result.ok, (options, result.errors())

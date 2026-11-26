@@ -36,7 +36,7 @@ What is decided here, and nowhere else:
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterable, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from tensorforge.common.basic_types import Datatype
 
@@ -87,6 +87,24 @@ def target_refusal(context) -> Optional[str]:
   if context.fp_type is not Datatype.F32:
     return 'not single precision'
   return None
+
+
+def cacheopts_refusal(context, option: str) -> None:
+  """Refuse `option` -- `sycl_element_streaming` or `sycl_element_prefetch`,
+  which go through IGC's own cache-opts and prefetch forms of the 2D block
+  messages -- where the `ocloc` on PATH does not resolve them
+  (`toolchain.intel_block2d_cacheopts`), naming the reason: never a quiet
+  return to messages without the cache option asked for.  Where there is no
+  `ocloc` to ask, the build is the caller's to make."""
+  from tensorforge import toolchain
+  from tensorforge.common.exceptions import GenerationError
+  device = getattr(context.target.hw, 'model', None) or 'pvc'
+  if toolchain.intel_block2d_cacheopts(device) is False:
+    raise GenerationError(
+        f'{option}: the IGC behind the ocloc on PATH does not resolve its '
+        f'cache-opts and prefetch forms of the 2D block messages '
+        f'({", ".join(toolchain.BLOCK2D_CACHEOPTS_BUILTINS)}); IGC 2.41.5 '
+        f'and 2.42.6 do.  Turn {option} off or put such an ocloc on PATH.')
 
 
 def surface_refusal(symbol) -> Optional[str]:

@@ -1203,6 +1203,12 @@ class BatchLoop(AbstractInstruction):
                 surfaces[symbol.name] = surface
         if not chosen:
             return None
+        if getattr(self._context.get_user_options(),
+                   'sycl_element_streaming', False):
+            # Through IGC's cache-opts forms: refused, naming the reason,
+            # where the ocloc on PATH does not resolve them.
+            element_blocks.cacheopts_refusal(self._context,
+                                             'sycl_element_streaming')
         checked = {n: s for n, s in surfaces.items()
                    if element_blocks.needs_check(self._context, s)}
         by_instr = {id(i): sym.name for i, sym, _, _ in seen}

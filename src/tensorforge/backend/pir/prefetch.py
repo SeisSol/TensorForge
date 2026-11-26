@@ -61,7 +61,8 @@ def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
                    pointers: bool = False, data: bool = False,
                    level: str = 'l2', line_bytes: int = 128,
                    report: Optional[List[str]] = None,
-                   spread: int = 1) -> Tuple[Stmt, ...]:
+                   spread: int = 1,
+                   surfaces: bool = False) -> Tuple[Stmt, ...]:
     """`body` with the hints for the next element in each batch loop.
 
     A batch loop is a `for` that names its successor index (`next`).
@@ -70,6 +71,9 @@ def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     span one hint covers.  `report` collects a line per hint: `+` and what it
     asks for, `-` and why a pointer or a loop has none.  `spread` is the
     lanes the data hints go round (SPMD), 1 where every lane asks for all.
+    `surfaces`: an operand whose binding asks for it (`prefetch2d`,
+    `Options.sycl_element_prefetch`) is hinted by 2D block prefetches over
+    its storage instead (`tensorforge::elementPrefetch2d`).
     """
     if not (pointers or data):
         return body
@@ -82,7 +86,8 @@ def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
         try:
             loop = _Hints(ElementLoop(s, scratch, report), pointers=pointers,
                           data=data, level=level,
-                          line_bytes=line_bytes, spread=spread).run()
+                          line_bytes=line_bytes, spread=spread,
+                          surfaces=surfaces).run()
         except Refusal as why:
             if report is not None:
                 report.append(f'- loop: {why}')
@@ -93,10 +98,27 @@ def prefetch_hints(body: Tuple[Stmt, ...], scratch: Callable[[], object], *,
     return tuple(out) if changed else body
 
 
+def _versioned(scope: Sequence[Stmt]) -> List[Stmt]:
+    """`scope` with an element body built twice (`BatchLoop._emit_versions`,
+    `Options.sycl_element_blocks`) read by its second version, today's
+    transfers: the two read the same operands through the same bindings,
+    which stand ahead of both, and the hints ask for those."""
+    out: List[Stmt] = []
+    for s in scope:
+        if (s.op is Op.IF and s.attr('guard') == 'element_blocks'
+                and len(s.regions) == 2):
+            out.extend(s.regions[1].body)
+        else:
+            out.append(s)
+    return out
+
+
 class _Hints:
     def __init__(self, l: ElementLoop, *, pointers: bool, data: bool,
-                 level: str, line_bytes: int, spread: int = 1):
+                 level: str, line_bytes: int, spread: int = 1,
+                 surfaces: bool = False):
         self.l = l
+        self.surfaces = surfaces
         self.pointers = pointers
         self.data = data
         self.level = level
@@ -150,7 +172,7 @@ class _Hints:
         clone.given(self.l.element, self.l.next)
         done: set = set()
         order, written = self._written()
-        for t in transfers(self.l.scope):
+        for t in transfers(_versioned(self.l.scope)):
             at = order.get(id(t.stmts[0]))
             if at is not None and any(
                     written.get(_buffer(a.base), at) < at
@@ -176,9 +198,13 @@ class _Hints:
             done.update(id(s) for s in new)
             heads += clone.stmts(new, named=True)
             ahead = clone.mapping[binding.target[0].id]
-            tails += self._spans(ahead)
+            if self.surfaces and binding.attr('prefetch2d'):
+                tails += self._blocks(ahead)
+                self._note(f'+ {binding.attr("extern")} [2d]')
+            else:
+                tails += self._spans(ahead)
+                self._note(f'+ {binding.attr("extern")} [data]')
             owns = owns or own
-            self._note(f'+ {binding.attr("extern")} [data]')
         return heads, tails, owns
 
     def _written(self) -> Tuple[dict, dict]:
@@ -222,6 +248,24 @@ class _Hints:
             # rounds it, one that names a line ignores it.
             b.prefetch(ahead, start, level=self.level,
                        elems=min(per, extent - start))
+        return list(b.finish())
+
+    def _blocks(self, ahead: Value) -> List[Stmt]:
+        """All that `ahead` reaches hinted by 2D block prefetches of the
+        sub-group (`tensorforge::elementPrefetch2d`): one prefetch of the
+        whole extent, `block2d`, which the emitter spells so.  A read, as
+        every hint is (`IRBuilder.prefetch`)."""
+        from .core import Access, Effect
+        extent = 1
+        for size in ahead.type.shape:
+            extent *= int(size)
+        b = self.l.scratch()
+        b.emit(Stmt(op=Op.PREFETCH, target=(), args=(ahead, 0), pure=False,
+                    movable=True, effect=Effect.READ,
+                    accesses=(Access(Effect.READ, MemSpace.GLOBAL,
+                                     b.alias_root(ahead)),),
+                    attrs=(('level', self.level), ('elems', extent),
+                           ('block2d', True))))
         return list(b.finish())
 
     # -- the loop ------------------------------------------------------------- #

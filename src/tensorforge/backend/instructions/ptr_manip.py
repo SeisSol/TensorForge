@@ -751,7 +751,10 @@ class GetElementPtr(AbstractInstruction):
           # index list and not an array of pointers, so a hint for the
           # successor's entry of the array (`pir.prefetch`) has none to ask
           # for.
-          + ((('indexed', True),) if self._indexed() else ()),
+          + ((('indexed', True),) if self._indexed() else ())
+          # Where the next element's hint for it is by 2D block prefetches
+          # (`Options.sycl_element_prefetch`).
+          + self._prefetch2d_attr(),
           # Only where nothing is written through it.  `restrict` promises
           # that what this pointer reaches is reached through no other in
           # scope, and a pass may clone this computation for the next element
@@ -771,6 +774,21 @@ class GetElementPtr(AbstractInstruction):
         self._dest.set_pir_buffer(writer, value)
     else:
       writer(f'{lhs} = {self._as_text(rhs)};')
+
+  def _prefetch2d_attr(self) -> tuple:
+    """`(('prefetch2d', True),)` where the next element's hint for what the
+    binding reaches is by 2D block prefetches over its storage
+    (`Options.sycl_element_prefetch`, `pir.prefetch`): an operand the
+    element blocks take, one with an element surface; else nothing."""
+    from .memory import element_blocks
+    opts = self._context.get_user_options()
+    if (not getattr(opts, 'sycl_element_prefetch', False)
+        or not element_blocks.asked(self._context)
+        or element_blocks.target_refusal(self._context) is not None):
+      return ()
+    if element_blocks.surface(self._dest) is None:
+      return ()
+    return (('prefetch2d', True),)
 
   def _extent(self) -> int:
     """How many elements the reads through this binding reach: one batch
