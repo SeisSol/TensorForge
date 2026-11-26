@@ -7834,6 +7834,39 @@ GROUPS = {
          sub(ME_SECTION, '        once = issuers() if issue is None else None\n',
              '        once = issuers()\n', 1)),
     ]),
+    # The oracle's pool regions (`kernel_eval.Lockstep`, `Interp._ticket`;
+    # `cuda.h`'s `warpsApart`, `ticketTake`): each warp of a region a
+    # coroutine of its own, its tickets a fetch-add a warp in the order a
+    # schedule seeds.
+    'poolregion': ('tests/test_pool_oracle.py -n 2', [
+        ("a pool region's warps run together",
+         sub(ORACLE, '                if any(c is _APART for c in conds):\n',
+             '                if False:\n', 1)),
+        ("a pool region some lanes do not enter let through",
+         sub(ORACLE, '                    if not all(c is _APART for c in conds) or \\\n',
+             '                    if False and \\\n', 1)),
+        ("a ticket taken by every lane",
+         sub(ORACLE, "        key = ('ticket', warp)\n",
+             "        key = ('ticket', self.lane)\n", 1)),
+        ("a ticket taken of a part of the warp",
+         sub(ORACLE, '            if len(lanes) < Races.WARP:\n'
+                     "                raise Abort(f'ticketTake in {len(lanes)} lanes of warp '\n",
+             '            if False:\n'
+             "                raise Abort(f'ticketTake in {len(lanes)} lanes of warp '\n", 1)),
+        ("a ticket's read of the counter untracked",
+         sub(ORACLE, '            value = int(counter[0])\n'
+                     '            counter.mem.data[(counter.base, counter.off)] = value + 1\n'
+                     '            taken = run.wave_cache[key] = value\n',
+             '            value = int(counter.mem.peek(counter.base, counter.off))\n'
+             '            counter.mem.data[(counter.base, counter.off)] = value + 1\n'
+             '            taken = run.wave_cache[key] = value\n', 1)),
+        ("the schedule unread",
+         sub(ORACLE, '            if apart and self.schedule is not None:\n',
+             '            if False:\n', 1)),
+        ("a warp's turn going on past its tickets",
+         sub(ORACLE, '                if COROUTINE_ARMS and _TICKET_CALL.search(node[1]):\n',
+             '                if False:\n', 1)),
+    ]),
     # `auto`'s input issue (`element_group.tile_input_issue`, J5): the elected
     # lane on tcgen05, each element's lane on wgmma.
     'hiinputsauto': (' '.join(f'tests/test_hiorder_tile.py::{t}' for t in (

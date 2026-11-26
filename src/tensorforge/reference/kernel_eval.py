@@ -1548,6 +1548,10 @@ def _py(expr: str) -> str:
     # The lane `elect.sync` picks among its warp's (`cuda.h`,
     # `Interp._elect`).
     e = re.sub(r'\btensorforge::electOne\s*\(\s*\)', 'ELECT()', e)
+    # A warp's next ticket of a counter in shared memory (`cuda.h`,
+    # `Interp._ticket`), and the mark of a pool region (`_Apart`).
+    e = re.sub(r'\btensorforge::ticketTake\s*\(', 'TICKET(', e)
+    e = re.sub(r'\btensorforge::warpsApart\s*\(\s*\)', 'APART()', e)
     # The high-order tile's next tile, a claim's answer or the static
     # stride's (`cuda.h`, `Interp._tile_next`).
     e = re.sub(r'\btensorforge::tileNext\s*\(', 'TILENEXT(', e)
@@ -1765,6 +1769,8 @@ class Interp:
         self.env['GATHER'] = self._gather
         self.env['WAVE_UNIFORM'] = self._wave_uniform
         self.env['ELECT'] = self._elect
+        self.env['TICKET'] = self._ticket
+        self.env['APART'] = lambda: _APART
         self.env['REDUCE'] = self._reduce
         self.env['PICK'] = _pick
         self.env['BUFLOAD'] = _buffer_load
@@ -1927,6 +1933,39 @@ class Interp:
                             f'{Races.WARP}')
             picked = run.wave_cache[('elect', warp)] = min(lanes)
         return self.lane == picked
+
+    def _ticket(self, counter) -> int:
+        """`tensorforge::ticketTake(counter)`: the warp's next ticket of a
+        counter in shared memory -- one fetch-add for the warp, its value
+        every lane's -- the full mask asking every lane of the warp to take
+        part: a warp some of whose lanes the run has not brought here is an
+        `Abort`, as the shuffle is undefined then.  Once per statement and
+        warp (`Lockstep.wave_cache`).  The read of the counter is the race
+        tracker's (`Races`): what initialized it must be ordered before; the
+        increment is an atomic one, which no other warp's races.  The order
+        the warps reach the counter is the run's: the warps of a pool region
+        (`tensorforge::warpsApart`) take turns as `Lockstep.schedule` says."""
+        if not isinstance(counter, Ptr):
+            raise Abort(f'a ticket of {counter!r}, which is no counter in '
+                        f'memory')
+        if self.lockstep is None:
+            value = int(counter[0])
+            counter.mem.data[(counter.base, counter.off)] = value + 1
+            return value
+        run = self.lockstep
+        warp = self.lane // Races.WARP
+        key = ('ticket', warp)
+        taken = run.wave_cache.get(key)
+        if taken is None:
+            lanes = [it.lane for it in run.current
+                     if it.lane // Races.WARP == warp]
+            if len(lanes) < Races.WARP:
+                raise Abort(f'ticketTake in {len(lanes)} lanes of warp '
+                            f'{warp}: its shuffle asks for all {Races.WARP}')
+            value = int(counter[0])
+            counter.mem.data[(counter.base, counter.off)] = value + 1
+            taken = run.wave_cache[key] = value
+        return taken
 
     def _broadcast(self, name: str, block: int, subblock: int, lane: int):
         """`tensorforge::broadcast<Block, Subblock, Lane>(name)` for this lane.
@@ -3873,6 +3912,25 @@ def _base_env(src: str, mem: Slot, tid: int, lanes: int = 256,
 #: statement ahead of it in that order.
 COROUTINE_ARMS = True
 
+class _Apart:
+    """What `tensorforge::warpsApart()` is here (`cuda.h`): true, as on the
+    device, and the mark of a pool region -- an `if` on it runs each warp of
+    its lanes as a coroutine of its own (`Lockstep._exec`), however the
+    kernel spells the condition, in place or through a variable."""
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __repr__(self) -> str:
+        return 'warpsApart()'
+
+
+_APART = _Apart()
+
+#: A statement that takes a warp's ticket (`cuda.h`'s `ticketTake`): where a
+#: warp's turn in a pool region ends (`Lockstep._exec`).
+_TICKET_CALL = re.compile(r'\btensorforge::ticketTake\s*\(')
+
 
 class Lockstep:
     """Drives a set of lanes through one body together.
@@ -3887,11 +3945,20 @@ class Lockstep:
 
     `groups` are the lanes that read across each other, each a
     multiplication of the block; all of them together unless given.
+
+    `schedule` seeds the order the warps of a pool region take their turns
+    in (`tensorforge::warpsApart`, `_arms`): each round of them shuffled by
+    it, so that runs of several seeds see the warps reach the region's
+    tickets and waits in orders of their own -- in the warps' own order
+    where it is None.  Nothing outside a pool region depends on it.
     """
 
     def __init__(self, interps: List['Interp'],
-                 groups: Optional[List[List['Interp']]] = None):
+                 groups: Optional[List[List['Interp']]] = None,
+                 schedule: Optional[int] = None):
+        import random
         self.interps = interps
+        self.schedule = None if schedule is None else random.Random(schedule)
         for group in groups if groups is not None else [interps]:
             for it in group:
                 it.peers = group
@@ -3999,24 +4066,34 @@ class Lockstep:
         arm of the run waits (`_arms`), the hang it would be: the waiting
         lanes take their wait, which refuses it."""
         for stmt, waiting in self._exec(block, lanes):
+            if not waiting:
+                # A turn's end behind a ticket (`_exec`) outside any pool
+                # region: nobody else's turn to take.
+                continue
             self.current, self.wave_cache = waiting, {}
             for it in waiting:
                 it.assign(stmt)
             raise Abort(f'every arm of the run waits, at {stmt!r}')
 
-    def _arms(self, arms):
+    def _arms(self, arms, apart: bool = False):
         """The arms of an `if`, `(block, lanes)` each, as coroutines: each
         runs until it finishes or its next statement is a ring wait that
         cannot return yet, then the next; a round in which none went any
         further hands the wait of the first still waiting up -- to the arms
         of an enclosing `if`, which may complete its phase, or to `run`.
         Where none waits, the arms run whole one after the other, as they
-        always did."""
+        always did.  `apart`: the warps of a pool region, each an arm
+        (`tensorforge::warpsApart`), a round of them in the order the
+        schedule shuffles (`schedule`), and a warp's turn ending at its next
+        ticket too (`_exec`)."""
         running = [self._exec(block, lanes) for block, lanes in arms]
         waits = {}
         while running:
             before = self.steps
-            for arm in list(running):
+            order = list(running)
+            if apart and self.schedule is not None:
+                self.schedule.shuffle(order)
+            for arm in order:
                 try:
                     waits[id(arm)] = next(arm)
                 except StopIteration:
@@ -4047,11 +4124,32 @@ class Lockstep:
                 self.steps += 1
                 if self.tracker is not None:
                     self._tracked(node[1], lanes)
-                    continue
-                for it in lanes:
-                    it.assign(node[1])
+                else:
+                    for it in lanes:
+                        it.assign(node[1])
+                if COROUTINE_ARMS and _TICKET_CALL.search(node[1]):
+                    # A warp's turn ends behind the ticket it took (`_arms`,
+                    # `apart`): the others take theirs before it goes on.
+                    # Nobody waits here.
+                    yield node[1], []
+                    self.current, self.wave_cache = lanes, {}
             elif kind == 'if':
-                taken = [it for it in lanes if it.ev(node[1])]
+                conds = [it.ev(node[1]) for it in lanes]
+                if any(c is _APART for c in conds):
+                    # A pool region (`cuda.h`'s `warpsApart`, true on the
+                    # device): each warp of it a coroutine of its own, its
+                    # own tickets and waits.
+                    if not all(c is _APART for c in conds) or \
+                            node[3] is not None:
+                        raise Abort(f'a pool region some lanes do not enter, '
+                                    f'or with an else: {node[1]!r}')
+                    warps = sorted({it.lane // Races.WARP for it in lanes})
+                    yield from self._arms(
+                        [(node[2], [it for it in lanes
+                                    if it.lane // Races.WARP == w])
+                         for w in warps], apart=True)
+                    continue
+                taken = [it for it, c in zip(lanes, conds) if c]
                 other = [it for it in lanes if it not in taken]
                 arms = [(node[2], taken)]
                 if node[3] is not None:
@@ -4141,7 +4239,8 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                   elements: int = 1, block: bool = False,
                   launches: Union[Sequence[int], Dict[int, Sequence[int]]] = (),
                   grid: int = 1,
-                  scalars: Optional[Dict[str, object]] = None) -> Dict:
+                  scalars: Optional[Dict[str, object]] = None,
+                  schedule: Optional[int] = None) -> Dict:
     """Run one kernel body for `lanes` lanes together; return the memory.
 
     The difference from calling `evaluate` per lane is that the lanes share
@@ -4167,6 +4266,10 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
     other on the one memory: a block's traversal of the batch is then its
     share of it, as the launch hands it out.  Blocks take no part in each
     other's work, so in turn is as good an order as any.
+
+    `schedule` seeds the order the warps of a pool region take their turns
+    in (`Lockstep`): a run per seed sees their tickets and waits in orders
+    of their own; None, the warps' own order.
 
     `scalars` are kernel parameters passed by value, by name -- an operand's
     stride or slot bound at run time (`m3_stride`), its extra offset.  A
@@ -4222,7 +4325,7 @@ def evaluate_wave(src: str, lanes: int, seed: int = 0,
                     group.append(interp)
                 groups.append(group)
             interps = [it for group in groups for it in group]
-            Lockstep(interps, groups).run(parse(body))
+            Lockstep(interps, groups, schedule=schedule).run(parse(body))
             if getattr(mem, 'tmem_columns', None) is not None:
                 # PTX ISA, "tcgen05.alloc": what a block allocated, it frees
                 # before it exits.
