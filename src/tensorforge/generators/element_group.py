@@ -2552,6 +2552,13 @@ TILE_BANDS = 2
 #: `box` at o8's 120.
 TILE_BOX_ROWS = 64
 
+#: The rows of D an element from which `auto`'s bulk reductions are a
+#: column's again (`tile_output`): a GB200 measured `bulk` the faster at
+#: o10's 220 rows in three jobs (ns an element, against the box: J3b 13.31
+#: and 13.49, J4a 13.24 and 13.49, J4b 13.23 and 13.52); between o8's 120
+#: and them.
+TILE_BULK_ROWS = 168
+
 #: The share of the elements a reduction a cell takes that `auto`'s bulk
 #: reductions on tcgen05's tile must keep (`tile_plan`): a GB200 measured
 #: them faster at o10's twelve elements than a reduction a cell at
@@ -2740,8 +2747,8 @@ def tile_plan(section: GroupSection, context, budget: int) -> Tuple[
         # round alone: a GB200 measured I whole 29 % faster at o6 (35 rows,
         # the last chunk's 3) and alike at o8 (its last 20; J4b), 6 % at
         # o10 asked for a reduction a cell (its last 5; J3b) -- and where
-        # whole keeps the elements and the epilogue's form: not o10's box
-        # (whole leaving the staged D no room).
+        # whole keeps the elements and the epilogue's form: not o10's bulk
+        # reductions (whole leaving the staged D no room).
         whole = _tcgen05_tile_choice(section, context, budget, width, per,
                                      (dslots, aslots), (0, 0), output)
         if (whole[0] is not None
@@ -3422,8 +3429,9 @@ def tile_output(engine: str, rows: int, context) -> str:
     (`TileRows.output`): as the options ask (`Options.matrix_output`), and
     for `auto` on tcgen05 by bulk reductions -- a column's (`bulk`) where
     an element's `rows` of D are fewer than `TILE_BOX_ROWS`, the element's
-    box's (`box`) from there on; wgmma's a row of D a bulk reduction where
-    `bulk` is asked (`multi_element._wgmma_bulk`), a cell at a time else."""
+    box's (`box`) from there on, a column's again from `TILE_BULK_ROWS`;
+    wgmma's a row of D a bulk reduction where `bulk` is asked
+    (`multi_element._wgmma_bulk`), a cell at a time else."""
     if engine != 'tcgen05':
         # wgmma's a row of D a bulk reduction where asked, its box declined
         # and `auto` a reduction a cell until a GH200 measures them.
@@ -3431,7 +3439,7 @@ def tile_output(engine: str, rows: int, context) -> str:
     asked = output_asked(context)
     if asked != 'auto':
         return asked
-    return 'bulk' if rows < TILE_BOX_ROWS else 'box'
+    return 'box' if TILE_BOX_ROWS <= rows < TILE_BULK_ROWS else 'bulk'
 
 
 def output_refusal(section: GroupSection, step: Step, context) -> Optional[str]:
@@ -5258,7 +5266,8 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'slots_asked', 'tile_slots', 'tile_depth', 'handoffs_asked',
            'tile_handoffs', 'wait_asked', 'tile_wait', 'input_issue_asked',
            'tile_input_issue', 'input_ahead_asked', 'tile_input_ahead',
-           'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_TCGEN05', 'TMEM_BUDGET',
+           'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_BULK_ROWS', 'TILE_TCGEN05',
+           'TMEM_BUDGET',
            'tile_dslots', 'tile_groups', 'tile_output', 'TILE_UNROLLED_ROWS',
            'TILE_OUTPUT_KEEP',
            'SCHEDULE_BYTES', 'schedule_asked', 'tile_schedule', 'tile_tmem',

@@ -265,7 +265,9 @@ def test_the_tile_s_defaults_on_tcgen05():
     and a reduction a cell's 4.67, o8 the box's 6.61 against 7.00 and 7.20
     -- so `matrix_bands` 2 and `matrix_output` `auto`: bulk where an
     element's rows of D are fewer than `TILE_BOX_ROWS`, box from there on,
-    a reduction a cell where the bulk reductions' staged D would take the
+    bulk again from `TILE_BULK_ROWS` -- o10's bulk 13.31, 13.24 and 13.23
+    against the box's 13.49, 13.49 and 13.52 (J3b, J4a, J4b) -- a
+    reduction a cell where the bulk reductions' staged D would take the
     group more than a quarter of its elements (o12) and on wgmma -- o10's
     box at twelve elements 13.33 against red's 17.11 at fourteen.  `auto`
     is `red` everywhere else: a kernel without the tile is the kernel it
@@ -275,17 +277,17 @@ def test_the_tile_s_defaults_on_tcgen05():
     assert registry()['matrix_output'].default == 'auto'
     assert parse_matrix_output('Auto') == 'auto'
     context = me._context('sm_100a', 's', multi_element='force', **HIGH)
-    assert eg.TILE_BOX_ROWS == 64
+    assert (eg.TILE_BOX_ROWS, eg.TILE_BULK_ROWS) == (64, 168)
     assert [eg.tile_output('tcgen05', rows, context)
-            for rows in (20, 56, 63, 64, 120, 220)] == [
-        'bulk', 'bulk', 'bulk', 'box', 'box', 'box']
+            for rows in (20, 56, 63, 64, 120, 167, 168, 220, 364)] == [
+        'bulk', 'bulk', 'bulk', 'box', 'box', 'box', 'bulk', 'bulk', 'bulk']
     assert eg.tile_output('wgmma', 120, context) == 'red'
     for asked in ('red', 'bulk', 'box'):
         asked_context = me._context('sm_100a', 's', multi_element='force',
                                     **{**HIGH, 'matrix_output': asked})
         assert eg.tile_output('tcgen05', 120, asked_context) == asked
     assert [_group(o, 'sm_100a').section.tile.output
-            for o in (4, 6, 8, 10, 12)] == ['bulk', 'bulk', 'box', 'box',
+            for o in (4, 6, 8, 10, 12)] == ['bulk', 'bulk', 'box', 'bulk',
                                              'red']
     # Where they keep three quarters of a reduction a cell's elements:
     # o10's twelve of fourteen, which a GB200 measured faster; not o12's
@@ -1160,7 +1162,7 @@ def test_tcgen05_takes_i_whole_where_its_last_chunk_is_short(monkeypatch):
                 for o, g in ((o, _group(o, 'sm_100a')) for o in orders)}
     assert plans(4, 6, 7, 8, 10, 12) == {
         4: (0, 14, 'bulk'), 6: (0, 14, 'bulk'), 7: (32, 14, 'box'),
-        8: (32, 14, 'box'), 10: (32, 12, 'box'), 12: (32, 14, 'red')}
+        8: (32, 14, 'box'), 10: (32, 12, 'bulk'), 12: (32, 14, 'red')}
     whole = _group(10, 'sm_100a', matrix_input_chunks='whole')
     assert (whole.elements, whole.section.tile.output) == (14, 'red')
     red = _group(10, 'sm_100a', matrix_output='red')
@@ -2325,12 +2327,13 @@ def test_the_build_reads_back(arch, engine, products, options, tmp_path):
     use), C7511, C7514, C7517 or C7519 (for an arrive in a divergent path:
     the group loop's dispatch on a width ptxas cannot tell is the warp's
     alike) in its report.  tcgen05's o8 as the options leave it adds D by
-    one bulk reduction an element (`tile_output`), a column's where asked;
-    wgmma's a round of a warp's rows a reduction where asked; no reduction
-    a cell."""
+    one bulk reduction an element (`tile_output`), o10 by a column's (past
+    `TILE_BULK_ROWS`), as where asked; wgmma's a round of a warp's rows a
+    reduction where asked; no reduction a cell."""
     sass, report = _ptxas(arch, tmp_path, **options)
-    output = options.get('matrix_output', 'box' if arch == 'sm_100a'
-                         and options.get('order', 8) == 8 else 'red')
+    auto = ({8: 'box', 10: 'bulk'}.get(options.get('order', 8), 'red')
+            if arch == 'sm_100a' else 'red')
+    output = options.get('matrix_output', auto)
     if output in ('bulk', 'box'):
         # D by bulk reductions -- tcgen05's one a thread, wgmma's a round of
         # a warp's rows -- no reduction a cell.
