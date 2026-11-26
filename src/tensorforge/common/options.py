@@ -418,6 +418,66 @@ def parse_matrix_slots(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_input_issue` takes.
+MATRIX_INPUT_ISSUES = ('auto', 'lane', 'elect')
+
+
+def parse_matrix_input_issue(text: str) -> str:
+  """`auto`, `lane` or `elect` (`Options.matrix_input_issue`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_INPUT_ISSUES:
+    raise ValueError(f'expected one of {MATRIX_INPUT_ISSUES}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_input_ahead` takes.
+MATRIX_INPUT_AHEADS = ('off', 'l2')
+
+
+def parse_matrix_input_ahead(text: str) -> str:
+  """`off` or `l2` (`Options.matrix_input_ahead`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_INPUT_AHEADS:
+    raise ValueError(f'expected one of {MATRIX_INPUT_AHEADS}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_pool` takes.
+MATRIX_POOLS = ('off', 'on')
+
+
+def parse_matrix_pool(text: str) -> str:
+  """`off` or `on` (`Options.matrix_pool`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_POOLS:
+    raise ValueError(f'expected one of {MATRIX_POOLS}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_handoffs` takes.
+MATRIX_HANDOFFS = ('two', 'one')
+
+
+def parse_matrix_handoffs(text: str) -> str:
+  """`two` or `one` (`Options.matrix_handoffs`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_HANDOFFS:
+    raise ValueError(f'expected one of {MATRIX_HANDOFFS}, got {text!r}')
+  return value
+
+
+#: What `Options.matrix_wait` takes.
+MATRIX_WAITS = ('try', 'suspend', 'test')
+
+
+def parse_matrix_wait(text: str) -> str:
+  """`try`, `suspend` or `test` (`Options.matrix_wait`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_WAITS:
+    raise ValueError(f'expected one of {MATRIX_WAITS}, got {text!r}')
+  return value
+
+
 #: What `Options.tile_tables` takes.
 TILE_TABLES = ('device', 'constant')
 
@@ -3156,14 +3216,16 @@ declare('matrix_output',
         doc='How a matrix step of the multi-element layout adds its D into '
             'the element\'s output (`generators.element_group`).  `auto`, the '
             'default: `red`, but on the high-order tile on tcgen05 '
-            '(`matrix_tile` `high`) bulk reductions -- `bulk` where an '
-            'element\'s rows of D are fewer than 64, `box` from there on '
-            '(`element_group.tile_output`), where they keep three quarters '
-            'of the elements a reduction a cell takes -- as a GB200 measured '
-            'the tile with two star bands: at o6 bulk 3.06 ns an element, box '
-            '3.45 and red 4.67; at o8 box 6.61, bulk 7.00 and red 7.20; at '
-            'o10 box 13.33 and bulk 13.28 at twelve elements against red '
-            '17.11 at fourteen; o12, five elements against fourteen, red.  '
+            '(`matrix_tile` `high`) bulk reductions -- `box` where an '
+            'element\'s rows of D are 64 to 167, `bulk` where they are fewer '
+            'or more (`element_group.tile_output`), where they keep three '
+            'quarters of the elements a reduction a cell takes -- as a GB200 '
+            'measured the tile with two star bands: at o6 bulk 3.06 ns an '
+            'element, box 3.45 and red 4.67; at o8 box 6.61, bulk 7.00 and red '
+            '7.20; at o10 bulk 13.28 and box 13.33 at twelve elements against '
+            'red 17.11 at fourteen, and bulk ahead of the box in three jobs '
+            'more (13.31, 13.24 and 13.23 against 13.49, 13.49 and 13.52); '
+            'o12, five elements against fourteen, red.  '
             '`red`: a '
             'reduction a cell (`red.global.add`) through the pointer of the '
             'row\'s element, from the accumulators -- or, on tcgen05, from a '
@@ -3274,9 +3336,17 @@ declare('matrix_input_chunks',
             'step reads (`matrix_tile` `high`, `element_group.TileRows.'
             'chunk`).  `auto`, the default: on tcgen05 in chunks of '
             '`TILE_CHUNK` (32) rows of K where I has more, each chunk of every '
-            'element a slot of a ring of its own (`TILE_CHUNK_SLOTS`), '
-            'streamed in the order the blocks of K read them -- the input ring '
-            'a trip\'s star matrices alone; on wgmma I whole wherever the tile '
+            'element a slot of a ring of its own (`TILE_CHUNK_SLOTS`), streamed '
+            'in the order the blocks of K read them -- the input ring a trip\'s '
+            'star matrices alone -- but whole where the last chunk would take '
+            'less than a block of K and whole keeps the elements and the '
+            'epilogue\'s form of I in chunks: o6 (35 rows, the last chunk\'s '
+            '3), which a GB200 measured faster whole, 3.05 ns an element against '
+            '4.30, where o8 (its last 20) is alike, 6.60 against 6.52 (J4b, '
+            'Horizon 107380), and o10 asked for a reduction a cell (its last '
+            '5), 16.10 against 17.04 (J3b) -- not o10\'s bulk reductions, '
+            'whose I whole leaves no room for the staged D; on wgmma I whole '
+            'wherever the tile '
             'fits it, in chunks where it does not (`element_group.tile_plan`): '
             'a GH200 measured I whole faster at every order (Vista 1169572, ns '
             'an element: o6 4.91 against the chunks\' 6.23, o8 11.60 against '
@@ -3357,6 +3427,95 @@ declare('matrix_slots',
             '-- and the group loop\'s body written out once a slot of the '
             'rings\' depth, the slots numbers in it, the bodies past the last '
             'block guarded.  On wgmma declined.')
+
+declare('matrix_input_issue',
+        default='auto',
+        env='TF_MATRIX_INPUT_ISSUE',
+        parse=parse_matrix_input_issue,
+        doc='Which lane of the high-order tile\'s input warp issues the bulk '
+            'copies of I (`matrix_tile` `high`, `element_group.TileRows.'
+            'inputs`): `auto`, the default, the elected lane on tcgen05, which '
+            'a GB200 measured faster at every order (J5, Horizon 107520, ns an '
+            'element, I in chunks: o6 3.14 against each element\'s lane\'s '
+            '4.29, o8 5.97 against 6.53, o10 12.15 against 13.49, o12 32.62 '
+            'against 32.95; I whole at o6 2.37 against 3.05), each element\'s '
+            'lane on wgmma, which no GH200 has measured '
+            '(`element_group.tile_input_issue`); `lane`, each element\'s lane '
+            'its own, '
+            'under its predicate -- the copy\'s addresses that lane\'s, which '
+            'UBLKCP takes from uniform registers, so that ptxas wraps every '
+            'copy in a loop over the lanes that might issue it (ELECT, '
+            'R2UR.BROADCAST, BRA.U.ANY: 378 copies a trip at o8 with I in '
+            'chunks, the input warp busy for nearly all of its samples and '
+            'the star bands waiting a third of theirs for I\'s chunks, J4a\'s '
+            'ncu); `elect`, the lane `elect.sync` picks, every element\'s '
+            'copies under its predicate, the elements\' pointers loaded by '
+            'each lane alike.  On both engines: wgmma\'s producer copies I '
+            'the same way.')
+
+declare('matrix_input_ahead',
+        default='off',
+        env='TF_MATRIX_INPUT_AHEAD',
+        parse=parse_matrix_input_ahead,
+        doc='Whether the high-order tile\'s input warp (tcgen05) or producer '
+            '(wgmma) reaches for the next trip\'s I a trip ahead (`matrix_tile` '
+            '`high`, `element_group.TileRows.ahead`): `off`, the default, each '
+            'trip\'s element pointers loaded and its I copied in that trip; '
+            '`l2`, besides, each element\'s lane loading the next trip\'s '
+            'element\'s pointer at the trip\'s head and asking L2 for its '
+            'columns of I at the trip\'s end (`prefetch.global.L2`), so that '
+            'the next trip\'s pointer loads and bulk copies find their lines '
+            'nearer.  Declined where the tiles go by claims (`tile_schedule`), '
+            'whose next tile no stride says.')
+
+declare('matrix_pool',
+        default='off',
+        env='TF_MATRIX_POOL',
+        parse=parse_matrix_pool,
+        doc='Whether the high-order tile on tcgen05 mixes A in a pool '
+            '(`matrix_tile` `high`, `element_group.TileRows.pool`): `off`, '
+            'the default, the star bands a block each in turn '
+            '(`matrix_bands`), the epilogue warpgroup waiting for D; `on`, '
+            'the bands\' warps and the epilogue\'s mixers alike, each '
+            'taking the trip\'s blocks by tickets of its quarter of tensor '
+            'memory\'s lanes and filling that quarter of the block\'s A, the '
+            'mixers meeting when the trip\'s tickets run out and the '
+            'epilogue draining D behind them (`multi_element._Pool`).  '
+            'Declined on wgmma, where the tiles go by claims '
+            '(`tile_schedule`), with the group\'s blocks written out '
+            '(`matrix_groups` `unrolled`), with one ring for A and B '
+            '(`matrix_handoffs` `one`), and where A\'s ring has fewer slots '
+            'than a quarter has mixers, whose waits would pass on the '
+            'parity of a phase two short (tests/pool_model.py).')
+
+declare('matrix_handoffs',
+        default='two',
+        env='TF_MATRIX_HANDOFFS',
+        parse=parse_matrix_handoffs,
+        doc='How the high-order tile on tcgen05 hands a block\'s operands to '
+            'its products (`matrix_tile` `high`, `element_group.TileRows.'
+            'handoffs`): `two`, the default, A\'s ring and B\'s, a pair of '
+            'mbarriers a slot each -- the issuing thread waits on both full '
+            'sides and commits onto both empty ones a block; `one`, one ring '
+            'for both, numbered by the trip (`matrix_slots` `trip`) and B\'s '
+            'of A\'s slots: a slot\'s full barrier the star band\'s 128 threads '
+            'and the operator warp\'s arrival with B\'s bytes, its empty one '
+            'the products\' one commit, which both producers wait for -- a '
+            'wait and a commit a block.  A hand-off cost the mmaser probe some '
+            '400 cycles a slot on a GB200.  On wgmma declined.')
+
+declare('matrix_wait',
+        default='try',
+        env='TF_MATRIX_WAIT',
+        parse=parse_matrix_wait,
+        doc='How the high-order tile\'s mma warp on tcgen05 waits for a slot '
+            '(`matrix_tile` `high`, `element_group.TileRows.wait`): `try`, the '
+            'default, `mbarrier.try_wait` again until the phase completes, as '
+            'every wait of TensorForge\'s; `suspend`, `try_wait` with a '
+            'suspend-time hint, as CUTLASS waits (0x989680 ns), the thread '
+            'suspended until the phase completes or the hint\'s time passes '
+            '(ptxas: NANOSLEEP.SYNCS); `test`, `mbarrier.test_wait` in a '
+            'spin, never suspended.  On wgmma declined.')
 
 declare('tile_tables',
         default='device',

@@ -185,6 +185,11 @@ def _tile_consumers(section) -> tuple:
     behind the warp's barrier, and their roles."""
     from tensorforge.generators.element_group import WARPGROUP_WARPS
     if section.tile.engine == 'tcgen05':
+        if section.tile.pool == 'on':
+            # The pool's mixers (`_Pool`): the star bands' warps and the
+            # epilogue's, a warp's arrival each.
+            return (WARPGROUP_WARPS * (section.tile.bands + 1),
+                    ('star', 'epilogue'))
         # The input ring's: tcgen05's star bands, a warp's arrival each.
         return WARPGROUP_WARPS * section.tile.bands, ('star',)
     tiles = section.tile.tiles
@@ -249,6 +254,43 @@ def _group_pointer(trip, context, tensor, element):
     pointer = _element_pointer(b, context, trip.symbols[id(tensor)], source,
                                trip.section.dtype, writes=True)
     return pointer, held
+
+
+def _input_issue(builder, section, first_warp):
+    """The lane that issues the tile's bulk copies of I where the options
+    ask for the elected one (`TileRows.inputs` `elect`): the lane
+    `elect.sync` picks in the producer's first warp -- every lane of the
+    warp here -- or None, each element's lane its own copies."""
+    tile = section.tile
+    if tile is None or tile.inputs != 'elect':
+        return None
+    picked = builder.rawexpr('tensorforge::electOne()', type_=BOOL,
+                             hint='ie', uniform=Uniformity.LANE,
+                             crosslane=True)
+    return builder.op('and', BOOL, first_warp, picked, hint='ie')
+
+
+def _input_issuers(builder, context, symbol, section, group, active_of,
+                   source, lane, per_element, mine, issue, elements):
+    """Who issues an input's bulk copies, and from where: `(pointer,
+    base, predicate)`, a lane an element under `mine` -- its own element's
+    pointer, its slot at `lane` elements -- or, `issue` the elected lane
+    (`_input_issue`), the group's `elements` by it, each element's pointer
+    loaded by each lane alike and its slot a number."""
+    from tensorforge.backend.pir.core import SIZE
+    if issue is None:
+        pointer = _element_pointer(builder, context, symbol, source,
+                                   section.dtype)
+        return [(pointer, builder.op('mul', INDEX, lane, per_element,
+                                     hint='b'), mine)]
+    out = []
+    for e in range(elements):
+        element = builder.op('add', SIZE, group, e, hint='e')
+        chosen = builder.op('select', SIZE, active_of(builder, element),
+                            element, group, hint='e')
+        out.append((_element_pointer(builder, context, symbol, chosen,
+                                     section.dtype), e * per_element, issue))
+    return out
 
 
 def _element_pointer(builder, context, symbol, element, dtype,
@@ -742,17 +784,26 @@ class MultiElementOperators(AbstractInstruction):
             # role drains it (`_tcgen05_roles`).
             named = (dict(producer='operator', consumers=('mma',))
                      if section.roles else {})
+            full = 1
             if _rowless(section) and step.lowering == 'tcgen05':
                 # tcgen05's tile: the operator warp fills it, the mma warp's
                 # products commit each chunk's slot back (`_tile_tcgen05`).
                 named = dict(producer='operator', consumers=('mma',))
+                if section.tile.handoffs == 'one':
+                    # A's ring too (`TileRows.handoffs` `one`, `_Fold`): a
+                    # slot's full side the star band's 128 threads besides
+                    # the operator warp's arrival, its empty side the
+                    # products' one commit, which both producers wait for.
+                    full = 128 + 1
+                    named = dict(producer=('star', 'operator'),
+                                 consumers=('mma',))
             elif _rowless(section):
                 # The high-order tile's producer fills it, its consumer
                 # warpgroups drain it, a warp's arrival each (`_tile`).
                 consumers, roles = _tile_consumers(section)
                 named = dict(producer='producer', consumers=roles)
             ring = builder.mbarrier_ring(
-                f'bk{n}', slots, full=1, empty=consumers,
+                f'bk{n}', slots, full=full, empty=consumers,
                 leader='threadIdx.x == 0 && threadIdx.y == 0',
                 arena=GeneralLexicon.TOTAL_SHR_MEM,
                 hold=ring_hold(section, step), **named)
@@ -2316,17 +2367,20 @@ class _OperatorRing:
         with b.if_(issue):
             self.fill(trip, j, base, issue)
 
-    def take(self, trip, i, base, issue=None) -> list:
+    def take(self, trip, i, base, issue=None, wait=True, form=None) -> list:
         """Chunk `i`'s slot as its bytes land -- the wait of the thread
-        `issue` picks, or of every thread where it is None -- and its
-        pieces (`_Piece`) in the slot."""
+        `issue` picks, or of every thread where it is None; none where the
+        caller's wait was it (`wait` False) -- and its pieces (`_Piece`) in
+        the slot.  `form` how the thread waits (`engines.ring_wait`)."""
         b = trip.builder
         slot, parity, at = self.round(trip, i, base)
-        if issue is None:
-            b.ring_take(self.ring, slot, parity, writes=[self.storage])
-        else:
+        if wait and issue is None:
+            b.ring_take(self.ring, slot, parity, writes=[self.storage],
+                        form=form)
+        elif wait:
             with b.if_(issue):
-                b.ring_take(self.ring, slot, parity, writes=[self.storage])
+                b.ring_take(self.ring, slot, parity, writes=[self.storage],
+                            form=form)
         pieces, offset = [], 0
         for piece in self.chunks[i]:
             p, k0, rows = piece[:3]
@@ -2701,14 +2755,16 @@ def _star_block(trip, step, numbers, element, k0, rows, live,
     return out
 
 
-def _star_pieces(trip, step, ring, j, base, issue):
+def _star_pieces(trip, step, ring, j, base, issue, wait=True, form=None):
     """The pieces of B a block `j` of K of the folded star's step reads
     (`_Piece`): the prepared ring's chunk, waited for by the thread `issue`
-    picks (`_OperatorRing.take`); or each product's resident stage whole,
-    the block's steps of K at its rows."""
+    picks (`_OperatorRing.take`) -- but where the wait for A's slot is B's
+    too, one ring for both (`wait` False) -- or each product's resident
+    stage whole, the block's steps of K at its rows."""
     from tensorforge.generators.element_group import STAR_ROWS
     if ring is not None:
-        return [(piece, 0) for piece in ring.take(trip, j, base, issue)]
+        return [(piece, 0) for piece in ring.take(trip, j, base, issue,
+                                                  wait=wait, form=form)]
     section = trip.section
     out = []
     for p in step.products:
@@ -2811,9 +2867,24 @@ class _Fold:
             # filled last and the next band's not read yet -- and a wait on
             # the phase's parity cannot tell the two apart: the band would
             # write A the products have not read.
-            bands = _fold_bands(trip)
-            self.slots = bands * (self.slots // bands)
-        self.areas = _fold_ring(trip, step, self.slots, named)
+            tile = getattr(section, 'tile', None)
+            if tile is None or tile.pool != 'on':
+                # In the pool no slot is a band's: A's slots at least a
+                # quarter's mixers, which no wait's parity confuses
+                # (`element_group.pool_refusal`, tests/pool_model.py).
+                bands = _fold_bands(trip)
+                self.slots = bands * (self.slots // bands)
+        #: Whether A's ring is B's too (`TileRows.handoffs` `one`): a
+        #: block's one wait for both and one commit.
+        self.shared = (section.tile is not None
+                       and section.tile.handoffs == 'one')
+        if self.shared:
+            if self.ring is None or self.ring.slots != self.slots:
+                raise InternalError(f'{step.dest.alias}: one ring for A and '
+                                    f'B without B\'s ring of A\'s slots')
+            self.areas = self.ring.ring
+        else:
+            self.areas = _fold_ring(trip, step, self.slots, named)
 
     def rows(self, trip, M):
         """What a thread of the bands holds for its row of A: its band,
@@ -2995,10 +3066,15 @@ class _Fold:
         from tensorforge.backend.pir.engines import FenceKind
         from tensorforge.generators.element_group import STAR_ROWS
         b, step, tmem, ring = self.builder, self.step, self.tmem, self.ring
+        form = _wait_form(trip)
         with b.if_(issue):
-            b.ring_take(self.areas, slot, parity)
+            # One ring for A and B (`shared`): the one wait for both.
+            b.ring_take(self.areas, slot, parity,
+                        writes=[ring.storage] if self.shared else (),
+                        form=form)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
-        for piece, k0 in _star_pieces(trip, step, ring, j, base, issue):
+        for piece, k0 in _star_pieces(trip, step, ring, j, base, issue,
+                                      wait=not self.shared, form=form):
             p = step.products.index(piece.product)
             rows = min(STAR_ROWS, piece.stage.depth - j * STAR_ROWS)
             plan = _plan(piece.stage)
@@ -3052,6 +3128,128 @@ class _Fold:
 
 #: The widest N one tcgen05.mma takes (PTX ISA, "tcgen05.mma": N to 256).
 TCGEN05_N_MAX = 256
+
+
+class _Pool:
+    """The high-order tile's mixer pool on tcgen05 (`TileRows.pool`): the
+    star bands' warps and the epilogue's, each in its quarter of tensor
+    memory's lanes (its warp modulo four), mixing a trip's blocks of A by
+    tickets of its quarter's counter of the trip's parity (`cuda.h`'s
+    `ticketTake`) -- a ticket below the trip's blocks a block, whose quarter
+    of A the warp fills as a band does (`_Fold._fill_one`); a ticket past
+    them the warp's last of the trip.  Each walks I's chunks in order,
+    taking and giving back every one as a band does, and gives the trip's
+    input slot back behind its last ticket.  Then every mixer arrives at the
+    mixers' trip barrier -- an mbarrier its warps' elected arrivals complete
+    -- and waits for the trip's phase; behind it the first band warp's first
+    lane resets the counters of the trip's parity for the trip two on, which
+    the barrier's next phase orders ahead of every draw of that trip.  No
+    wait on the barrier aliases: a warp's next arrival needs the phase it
+    waits for (tests/pool_model.py)."""
+
+    def __init__(self, trip, fold, M):
+        from tensorforge.generators.element_group import WARPGROUP_WARPS
+        b = trip.builder
+        tile = trip.section.tile
+        self.trip, self.fold, self.M = trip, fold, M
+        self.mixers = WARPGROUP_WARPS * (tile.bands + 1)
+        leader = 'threadIdx.x == 0 && threadIdx.y == 0'
+        # A counter a quarter and a trip's parity.
+        self.counters = b.ticket_counters(
+            'tk', 2 * WARPGROUP_WARPS, leader,
+            arena=GeneralLexicon.TOTAL_SHR_MEM)
+        # The mixers' trip barrier: a ring of one slot whose full side every
+        # mixer warp arrives at and waits on -- no role of it the other's
+        # producer (`RingSpec.producer` None).
+        self.meet = b.mbarrier_ring('tp', 1, full=self.mixers, empty=1,
+                                    leader=leader,
+                                    arena=GeneralLexicon.TOTAL_SHR_MEM)
+        if self.counters is None or self.meet is None:
+            raise InternalError('the pool in a body without an arena for '
+                                'its counters and its barrier')
+
+    def _draw(self, index):
+        """The warp's next ticket of its counter `index`."""
+        return self.trip.builder.rawexpr(
+            'tensorforge::ticketTake(&{0}[{1}])', self.counters, index,
+            type_=INDEX, hint='tk', uniform=Uniformity.MULT, crosslane=True)
+
+    def _items(self, tk, index, held, trips, every, end, chunk) -> None:
+        """The warp's tickets below `end`, each a block it fills, the one
+        past them left in `tk`."""
+        b = self.trip.builder
+        with b.while_(tk, hint='t', uniform=Uniformity.MULT) as loop:
+            t = loop.induction
+            loop.exit_when(b.op('ge', BOOL, t, end, hint='past'))
+            self.fold._fill_one(self.trip, held, trips, every, t, chunk)
+            nxt = self._draw(index)
+            b.assign(tk, nxt)
+            loop.yield_(nxt)
+
+    def mix(self, ring, slot, parity, windows, trips, lane0,
+            resets: bool) -> None:
+        """A mixer's trip (the star bands' warps and the epilogue's alike):
+        the trip's input slot as it lands, its tickets' blocks of A, the
+        input slot back, the mixers' barrier -- and, where `resets`, the
+        counters of the trip's parity reset behind it."""
+        from tensorforge.generators.element_group import STAR_ROWS
+        trip, fold = self.trip, self.fold
+        b = trip.builder
+        b.ring_take(ring, slot, parity, writes=windows)
+        held = fold.rows(trip, self.M)
+        chunks = trip.chunks
+        if chunks is not None:
+            # As the bands': the star matrices in registers now, the input
+            # slot back at once.
+            b.barrier(Participants.WAVE)
+            b.ring_release(ring, slot, lane0)
+        every = b.const(True, BOOL)
+        odd = b.op('rem', INDEX, trips, 2, hint='tko')
+        index = b.op('add', INDEX, b.op('mul', INDEX, b.op(
+            'rem', INDEX, trip.slot, 4, hint='q'), 2, hint='tk'), odd,
+            hint='tk')
+        apart = b.rawexpr('tensorforge::warpsApart()', type_=BOOL,
+                          hint='apart', uniform=Uniformity.MULT)
+        with b.if_(apart):
+            tk = b.declare(INDEX, hint='tk', uniform=Uniformity.MULT)
+            b.assign(tk, self._draw(index))
+            if chunks is None:
+                self._items(tk, index, held, trips, every, fold.blocks,
+                            None)
+            else:
+                # I's chunks in order, every one taken and given back --
+                # those no ticket of the warp's falls in too, so that each
+                # round's arrivals are every mixer's.
+                per = chunks.rows // STAR_ROWS
+                cbase = chunks.base(trip)
+                with b.for_(0, -(-fold.blocks // per), unroll=1, hint='h',
+                            uniform=Uniformity.MULT) as outer:
+                    h = outer.induction
+                    cslot, cparity, cat = chunks.round(trip, h, cbase)
+                    chunks.take(trip, cslot, cparity)
+                    end = b.op('min', INDEX, b.op('mul', INDEX, b.op(
+                        'add', INDEX, h, 1, hint='he'), per, hint='he'),
+                        fold.blocks, hint='he')
+                    self._items(tk, index, held, trips, every, end,
+                                (cat, chunks.row(b, h)))
+                    chunks.release(trip, cslot)
+        if chunks is None:
+            # Every ticket of the warp's mixed: the input slot back.
+            b.barrier(Participants.WAVE)
+            b.ring_release(ring, slot, lane0)
+        # The mixers' barrier: a warp's arrival, then the trip's phase.
+        mslot, mparity = b.ring_round(self.meet, trips, hint='tp')
+        b.ring_publish(self.meet, mslot, lane0)
+        b.ring_take(self.meet, mslot, mparity, writes=[self.counters])
+        if resets:
+            # Behind it the trip's counters reset for the trip two on.
+            first = b.op('and', BOOL, b.op('eq', BOOL, trip.slot, 0,
+                                           hint='reset'), lane0,
+                         hint='reset')
+            with b.if_(first):
+                for q in range(4):
+                    b.store(self.counters, b.const(0, INDEX), b.op(
+                        'add', INDEX, odd, 2 * q, hint='tk'))
 
 
 def _fold_bands(trip) -> int:
@@ -3922,6 +4120,16 @@ def _tcgen05_roles(trip, step, split, stage) -> None:
         b.barrier(Participants.ROLE)
 
 
+def _wait_form(trip) -> Optional[str]:
+    """How the high-order tile's mma warp waits for a slot (`TileRows.
+    wait`): a form of `engines.RING_WAIT_FORMS`, or None to `try_wait`
+    again -- as everywhere outside the tile."""
+    tile = trip.section.tile
+    if tile is None or tile.wait == 'try':
+        return None
+    return tile.wait
+
+
 def _tcgen05_groups(trip, step, fold, ring, base, trips, issue,
                     d_base=None) -> None:
     """The mma role's blocks as one loop -- tcgen05's group engine
@@ -3989,12 +4197,18 @@ def _tcgen05_group(trip, step, fold, ring, base, trips, issue, d_base, los,
     else:
         j = _index(b, 'add', j0, offset, 'g')
         slot, parity, at = fold.round_at(trips, j0, offset)
+    # One ring for A and B (`_Fold.shared`): its full side's wait, for both,
+    # makes B's slot visible too.
+    form = _wait_form(trip)
     with b.if_(issue):
-        b.ring_take(fold.areas, slot, parity)
+        b.ring_take(fold.areas, slot, parity,
+                    writes=[ring.storage] if fold.shared else (), form=form)
         b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
     bslot, bparity, start = ring.round(trip, j0, base, offset)
-    with b.if_(issue):
-        b.ring_take(ring.ring, bslot, bparity, writes=[ring.storage])
+    if not fold.shared:
+        with b.if_(issue):
+            b.ring_take(ring.ring, bslot, bparity, writes=[ring.storage],
+                        form=form)
     lo = b.rawexpr(f'{los}[{{0}}]', j, type_=INDEX, pure=True,
                    movable=True, hint='gl')
     if d_base is not None:
@@ -4047,6 +4261,9 @@ def _tcgen05_group(trip, step, fold, ring, base, trips, issue, d_base, los,
                       widths=widths)
             first = False
     b.ring_release(fold.areas, slot, issue, engine='tcgen05')
+    if fold.shared:
+        # The one commit gives B's slot back with A's.
+        return
     if hold > 1:
         with b.if_(b.op('ge', BOOL, j, hold - 1, hint='gr')):
             if offset is None:
@@ -5941,10 +6158,12 @@ class MultiElementSection(AbstractInstruction):
             # whose B the second fills.
             arms = b.if_else(b.op('eq', BOOL, warp, first, hint='pin'), ())
             with arms.then():
+                ahead = self._reach_ahead(trip, bound, first)
                 self._produce(trip, ring, slot, parity, bound[GROUP_KEY],
                               bound[MASK_KEY], warp=first)
                 self._produce_chunks(trip, bound[GROUP_KEY], bound[MASK_KEY],
                                      first)
+                self._prefetch_ahead(trip, ahead)
             with arms.otherwise():
                 issue = b.op('and', BOOL, b.op('eq', BOOL, warp, first + 1,
                                                hint='pop'),
@@ -6010,9 +6229,13 @@ class MultiElementSection(AbstractInstruction):
         _, n16, _ = matrix_shape('tcgen05', 100)
         n = _round_up(step.rows[1] - step.rows[0], n16)
         M = elements * (step.cols[1] - step.cols[0])
-        # A's ring in tensor memory, from the star bands to the mma warp.
-        fold = _Fold(trip, step, M, producer='star',
+        pool = tile.pool == 'on'
+        # A's ring in tensor memory, from the star bands -- in the pool the
+        # bands' and the epilogue's mixers (`_Pool`) -- to the mma warp.
+        fold = _Fold(trip, step, M,
+                     producer=('star', 'epilogue') if pool else 'star',
                      consumers=('mma',))
+        mixing = _Pool(trip, fold, M) if pool else None
         # D's ring in tensor memory: a slot a trip, full where the trip's
         # products complete (their commit), empty where every epilogue
         # warp is done reading it.
@@ -6036,42 +6259,57 @@ class MultiElementSection(AbstractInstruction):
         lane0 = b.op('eq', BOOL, trip.lane, 0, hint='first')
         roles = b.split_roles(_tile_roles(self._context, self._group))
         with roles.role('star'):
-            b.ring_take(ring, slot, parity, writes=windows)
-            held = fold.rows(trip, M)
-            if trip.chunks is not None:
-                # I streams in chunks through a ring of its own: the input
-                # slot holds the trip's star matrices alone, in registers
-                # now -- back at once, the next trip's staged under this one.
-                b.barrier(Participants.WAVE)
-                b.ring_release(ring, slot, lane0)
-            every = b.const(True, BOOL)
-            if tile.groups == 'loop':
-                fold.fill_loop(trip, held, trips, every)
+            if pool:
+                # The bands' warps mix by tickets (`_Pool`), the counters'
+                # reset theirs behind the mixers' barrier.
+                mixing.mix(ring, slot, parity, windows, trips, lane0,
+                           resets=True)
             else:
-                # I in chunks (`_InputChunks`): every band takes a chunk's
-                # slot at its first block and gives it back behind its last.
-                chunks = trip.chunks
-                per = chunks.rows // STAR_ROWS if chunks is not None else 0
-                cbase = chunks.base(trip) if chunks is not None else None
-                for j in range(fold.blocks):
-                    chunk = None
-                    if chunks is not None:
-                        cslot, cparity, cat = chunks.round(trip, j // per,
-                                                           cbase)
-                        if j % per == 0:
-                            chunks.take(trip, cslot, cparity)
-                        chunk = (cat, chunks.row(b, j // per))
-                    jslot, jparity, at = fold.round(trips, j)
-                    fold.fill(trip, held, j, jslot, jparity, at, every,
-                              chunk)
-                    if chunks is not None and (j % per == per - 1
-                                               or j + 1 == fold.blocks):
-                        chunks.release(trip, cslot)
-            if trip.chunks is None:
-                # Every block of A computed: the input slot back.
-                b.barrier(Participants.WAVE)
-                b.ring_release(ring, slot, lane0)
+                b.ring_take(ring, slot, parity, writes=windows)
+                held = fold.rows(trip, M)
+                if trip.chunks is not None:
+                    # I streams in chunks through a ring of its own: the
+                    # input slot holds the trip's star matrices alone, in
+                    # registers now -- back at once, the next trip's staged
+                    # under this one.
+                    b.barrier(Participants.WAVE)
+                    b.ring_release(ring, slot, lane0)
+                every = b.const(True, BOOL)
+                if tile.groups == 'loop':
+                    fold.fill_loop(trip, held, trips, every)
+                else:
+                    # I in chunks (`_InputChunks`): every band takes a
+                    # chunk's slot at its first block and gives it back
+                    # behind its last.
+                    chunks = trip.chunks
+                    per = (chunks.rows // STAR_ROWS if chunks is not None
+                           else 0)
+                    cbase = (chunks.base(trip) if chunks is not None
+                             else None)
+                    for j in range(fold.blocks):
+                        chunk = None
+                        if chunks is not None:
+                            cslot, cparity, cat = chunks.round(trip, j // per,
+                                                               cbase)
+                            if j % per == 0:
+                                chunks.take(trip, cslot, cparity)
+                            chunk = (cat, chunks.row(b, j // per))
+                        jslot, jparity, at = fold.round(trips, j)
+                        fold.fill(trip, held, j, jslot, jparity, at, every,
+                                  chunk)
+                        if chunks is not None and (j % per == per - 1
+                                                   or j + 1 == fold.blocks):
+                            chunks.release(trip, cslot)
+                if trip.chunks is None:
+                    # Every block of A computed: the input slot back.
+                    b.barrier(Participants.WAVE)
+                    b.ring_release(ring, slot, lane0)
         with roles.role('epilogue'):
+            if pool:
+                # The epilogue's warps mix too (`_Pool`), and drain the
+                # trip's D behind the mixers' barrier, as without the pool.
+                mixing.mix(ring, slot, parity, windows, trips, lane0,
+                           resets=False)
             b.ring_take(dring, dslot, dparity)
             b.fence(FenceKind.THREAD_SYNC, engine='tcgen05', side='after')
 
@@ -6093,10 +6331,12 @@ class MultiElementSection(AbstractInstruction):
             scheduled = bound.get(SCHEDULE_KEY)
             if scheduled is not None:
                 scheduled[0].claim(b, lane0)
+            ahead = self._reach_ahead(trip, bound, warps['input'])
             self._produce(trip, ring, slot, parity, bound[GROUP_KEY],
                           bound[MASK_KEY], warp=warps['input'])
             self._produce_chunks(trip, bound[GROUP_KEY], bound[MASK_KEY],
                                  warps['input'])
+            self._prefetch_ahead(trip, ahead)
             if scheduled is not None:
                 scheduled[0].publish(b, trips, scheduled[1], lane0)
         with roles.role('operator'):
@@ -6122,7 +6362,8 @@ class MultiElementSection(AbstractInstruction):
             with branch:
                 with b.if_(issue):
                     # D's slot back from the epilogue's last round of it.
-                    b.ring_acquire(dring, dslot, dparity)
+                    b.ring_acquire(dring, dslot, dparity,
+                                   form=_wait_form(trip))
                     b.fence(FenceKind.THREAD_SYNC, engine='tcgen05',
                             side='after')
                 if tile.groups == 'loop':
@@ -6135,9 +6376,12 @@ class MultiElementSection(AbstractInstruction):
                         start = fold.issue(trip, j, jslot, jparity, at, issue,
                                            base, n, start, release=False,
                                            d_base=dbase)
-                        if j >= hold - 1:
+                        if j >= hold - 1 and not fold.shared:
                             operator.release(trip, j - hold + 1, base, issue)
-                for j in range(max(0, fold.blocks - hold + 1), fold.blocks):
+                # One ring for A and B: the products' one commit a block
+                # gave B's slots back with A's.
+                for j in (range(max(0, fold.blocks - hold + 1), fold.blocks)
+                          if not fold.shared else ()):
                     operator.release(trip, j, base, issue)
                 b.commit_group('tcgen05', object=dring, issue=issue,
                                slot=dslot, side='full')
@@ -6214,6 +6458,7 @@ class MultiElementSection(AbstractInstruction):
         # do nothing else.
         first_warp = b.op('eq', BOOL, b.thread_id('y'),
                           elements if warp is None else warp, hint='pw')
+        issue = _input_issue(b, section, first_warp)
         mine = b.op('and', BOOL, first_warp,
                     b.op('lt', BOOL, lane, elements, hint='mine'),
                     hint='mine')
@@ -6230,30 +6475,32 @@ class MultiElementSection(AbstractInstruction):
             if not bulk_input(buffer):
                 rest.append((buffer, symbol, window))
                 continue
-            pointer = _element_pointer(b, self._context, symbol, source,
-                                       section.dtype)
-            base = b.op('mul', INDEX, lane, buffer.per_element, hint='b')
             width = buffer.cols[1] - buffer.cols[0]
             rows = bulk_rows(buffer)
-            for c in range(width):
-                tokens.append(b.copy_bulk(
-                    window, pointer, barrier=RingSlot(ring, slot),
-                    dst_index=(_index(b, 'add', base, c * buffer.pitch,
-                                      'd'),),
-                    src_index=(_address(b, buffer.tensor, buffer.rows[0],
-                                        buffer.cols[0] + c),),
-                    elems=rows, predicate=mine))
+            for pointer, base, predicate in _input_issuers(
+                    b, self._context, symbol, section, group, active_of,
+                    source, lane, buffer.per_element, mine, issue,
+                    elements):
+                for c in range(width):
+                    tokens.append(b.copy_bulk(
+                        window, pointer, barrier=RingSlot(ring, slot),
+                        dst_index=(_index(b, 'add', base, c * buffer.pitch,
+                                          'd'),),
+                        src_index=(_address(b, buffer.tensor,
+                                            buffer.rows[0],
+                                            buffer.cols[0] + c),),
+                        elems=rows, predicate=predicate))
             nbytes += elements * width * rows * section.dtype.size()
         if rest:
             with b.if_(first_warp):
                 self._produce_copies(trip, rest, group, active_of)
         # The lanes' copies, each lane's waited for, ahead of the first
-        # lane's arrival, which hands them over with the bulk copies' bytes.
+        # lane's arrival, which hands them over with the bulk copies' bytes
+        # -- the elected lane's, where it issued them.
         b.barrier(Participants.WAVE)
-        b.ring_publish(ring, slot, b.op('and', BOOL, first_warp,
-                                        b.op('eq', BOOL, lane, 0),
-                                        hint='first'),
-                       tx=nbytes, tokens=tokens)
+        b.ring_publish(ring, slot, issue if issue is not None else b.op(
+            'and', BOOL, first_warp, b.op('eq', BOOL, lane, 0),
+            hint='first'), tx=nbytes, tokens=tokens)
 
     def _produce_chunks(self, trip, group, active_of, warp) -> None:
         """The trip's chunks of I (`_InputChunks`), by the producer's warp
@@ -6279,17 +6526,23 @@ class MultiElementSection(AbstractInstruction):
         (symbol,) = [sym for buf, sym in zip(section.inputs, self._inputs)
                      if buf.tensor is buffer.tensor]
         first_warp = b.op('eq', BOOL, b.thread_id('y'), warp, hint='pw')
+        issue = _input_issue(b, section, first_warp)
         mine = b.op('and', BOOL, first_warp,
                     b.op('lt', BOOL, lane, elements, hint='mine'),
                     hint='mine')
         element = b.op('add', SIZE, group, lane, hint='e')
         source = b.op('select', SIZE, active_of(b, element), element, group,
                       hint='e')
-        pointer = _element_pointer(b, self._context, symbol, source,
-                                   section.dtype)
-        base = b.op('mul', INDEX, lane, chunks.per_element, hint='b')
-        first = b.op('and', BOOL, first_warp, b.op('eq', BOOL, lane, 0),
-                     hint='first')
+        def issuers():
+            return _input_issuers(b, self._context, symbol, section, group,
+                                  active_of, source, lane,
+                                  chunks.per_element, mine, issue, elements)
+        # Each lane its own element's pointer, loaded once a trip; the
+        # elected lane every element's, loaded again each round -- held over
+        # the rounds' waits, the group's pointers spilled (576 B at o8).
+        once = issuers() if issue is None else None
+        first = issue if issue is not None else b.op(
+            'and', BOOL, first_warp, b.op('eq', BOOL, lane, 0), hint='first')
         cbase = chunks.base(trip)
         cuts = input_chunks(buffer, chunks.rows)
         for i, h in enumerate(chunks.order):
@@ -6298,17 +6551,77 @@ class MultiElementSection(AbstractInstruction):
             slot, parity, at = chunks.round(trip, i, cbase)
             b.ring_acquire(chunks.ring, slot, parity,
                            writes=[chunks.storage])
-            start = b.op('add', INDEX, at, base, hint='ib')
-            tokens = [b.copy_bulk(
-                chunks.storage, pointer, barrier=RingSlot(chunks.ring, slot),
-                dst_index=(_index(b, 'add', start, c * chunks.rows, 'd'),),
-                src_index=(_address(b, buffer.tensor, lo,
-                                    buffer.cols[0] + c),),
-                elems=rows, predicate=mine) for c in range(chunks.width)]
+            tokens = []
+            for pointer, base, predicate in (once if once is not None
+                                             else issuers()):
+                start = _index(b, 'add', at, base, 'ib')
+                tokens += [b.copy_bulk(
+                    chunks.storage, pointer,
+                    barrier=RingSlot(chunks.ring, slot),
+                    dst_index=(_index(b, 'add', start, c * chunks.rows,
+                                      'd'),),
+                    src_index=(_address(b, buffer.tensor, lo,
+                                        buffer.cols[0] + c),),
+                    elems=rows, predicate=predicate)
+                    for c in range(chunks.width)]
             b.barrier(Participants.WAVE)
             b.ring_publish(chunks.ring, slot, first,
                            tx=elements * chunks.width * rows
                            * section.dtype.size(), tokens=tokens)
+
+    def _reach_ahead(self, trip, bound, warp):
+        """Where the tile reaches for the next trip's I a trip ahead
+        (`TileRows.ahead` `l2`), at the trip's head: the next trip's
+        element pointers of I -- I's chunked buffer, or the inputs its bulk
+        copies take -- each element's lane its own in the producer's warp
+        `warp`, the next trip's group the loop's (`batch_loop.AHEAD_KEY`):
+        `(pointer, buffer, mine)` an input, for `_prefetch_ahead`; or
+        None."""
+        from tensorforge.backend.instructions.batch_loop import (AHEAD_KEY,
+                                                                 MASK_KEY)
+        from tensorforge.backend.pir.core import SIZE
+        from tensorforge.generators.element_group import bulk_input
+        section = self._group.section
+        tile = section.tile
+        if tile is None or tile.ahead != 'l2':
+            return None
+        b = trip.builder
+        group = bound[AHEAD_KEY](b)
+        if group is None:
+            return None
+        elements = self._group.elements
+        lane = trip.lane
+        chunked = trip.chunks.buffer if trip.chunks is not None else None
+        buffers = ([chunked] if chunked is not None else
+                   [buf for buf in section.inputs if bulk_input(buf)])
+        first_warp = b.op('eq', BOOL, b.thread_id('y'), warp, hint='pw')
+        mine = b.op('and', BOOL, first_warp,
+                    b.op('lt', BOOL, lane, elements, hint='mine'),
+                    hint='mine')
+        element = b.op('add', SIZE, group, lane, hint='en')
+        source = b.op('select', SIZE, bound[MASK_KEY](b, element), element,
+                      group, hint='en')
+        out = []
+        for buffer, symbol in zip(section.inputs, self._inputs):
+            if not any(buffer.tensor is buf.tensor for buf in buffers):
+                continue
+            out.append((_element_pointer(b, self._context, symbol, source,
+                                         section.dtype), buffer, mine))
+        return out
+
+    def _prefetch_ahead(self, trip, ahead) -> None:
+        """The next trip's I asked of L2 at the trip's end (`_reach_ahead`'s
+        pointers, loaded at its head): each element's lane its element's
+        columns, a hint a line of each."""
+        if not ahead:
+            return
+        b = trip.builder
+        line = max(1, 128 // self._group.section.dtype.size())
+        for pointer, buffer, mine in ahead:
+            for c in range(buffer.cols[0], buffer.cols[1]):
+                for r in range(buffer.rows[0], buffer.rows[1], line):
+                    b.prefetch(pointer, _address(b, buffer.tensor, r, c),
+                               level='l2', predicate=mine)
 
     def _produce_copies(self, trip, buffers, group, active_of) -> None:
         """The inputs no bulk copy takes, by the producer's first warp, each

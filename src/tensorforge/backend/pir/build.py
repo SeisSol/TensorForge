@@ -2319,7 +2319,7 @@ class IRBuilder:
     def mbarrier_ring(self, name: str, slots: int, *, full: int,
                       empty: int, leader: str,
                       arena: Optional[str] = None,
-                      producer: Optional[str] = None,
+                      producer: Union[str, Tuple[str, ...], None] = None,
                       consumers: Sequence[str] = (), tx: int = 0,
                       scope: 'engines.SyncScope' = engines.SyncScope.BLOCK,
                       hold: int = 1) -> Optional[Ring]:
@@ -2337,10 +2337,11 @@ class IRBuilder:
 
         Its description (`engines.RingSpec`) names the roles that fill and
         drain it, `producer` and `consumers` -- none where it stays inside
-        one role -- the bytes a round's copies complete, `tx`, where they
-        are every round's, the `scope` its statements order, and how many
-        of their groups the consumers hold a slot for, `hold` -- where they
-        give it back (`Ring.hold`)."""
+        one role; `producer` a tuple of them where the ring carries two
+        operands, each its role's -- the bytes a round's copies complete,
+        `tx`, where they are every round's, the `scope` its statements
+        order, and how many of their groups the consumers hold a slot for,
+        `hold` -- where they give it back (`Ring.hold`)."""
         return self._ring(name, slots, full=full, empty=empty, leader=leader,
                           arena=arena, producer=producer, consumers=consumers,
                           tx=tx, scope=scope, kind=engines.SyncKind.MBARRIER,
@@ -2348,7 +2349,8 @@ class IRBuilder:
 
     def ring(self, name: str, slots: int, *, full: int, empty: int,
              leader: str, arena: Optional[str] = None,
-             producer: Optional[str] = None, consumers: Sequence[str] = (),
+             producer: Union[str, Tuple[str, ...], None] = None,
+             consumers: Sequence[str] = (),
              tx: int = 0, waiters: Tuple[int, int] = (0, 0),
              scope: 'engines.SyncScope' = engines.SyncScope.BLOCK,
              hold: int = 1) -> Optional[Ring]:
@@ -2365,7 +2367,8 @@ class IRBuilder:
                           hold=hold)
 
     def _ring(self, name: str, slots: int, *, full: int, empty: int,
-              leader: str, arena: Optional[str], producer: Optional[str],
+              leader: str, arena: Optional[str],
+              producer: Union[str, Tuple[str, ...], None],
               consumers: Sequence[str], tx: int,
               scope: 'engines.SyncScope', kind: 'engines.SyncKind',
               waiters: Tuple[int, int] = (0, 0),
@@ -2405,6 +2408,36 @@ class IRBuilder:
         self.on_rollback(undo)
         return Ring(name, obj, int(slots), int(full), int(empty))
 
+    def ticket_counters(self, name: str, count: int, leader: str,
+                        arena: Optional[str] = None) -> Optional[Value]:
+        """`count` ticket counters in shared memory, a word each, which
+        warps draw tickets of (`cuda.h`'s `ticketTake`): zeroed by the
+        thread `leader` picks in the setup, behind the block's barrier -- as
+        a ring's barriers are set up (`mbarrier_ring`) -- and handed: what
+        orders their draws and their resets is the code's rings, no barrier
+        of the block's (`barriers.handed_buffers`).  None in a body without
+        an arena."""
+        if self._arena is None:
+            return None
+        start = len(self._prologue)
+        b = self.scratch()
+        counters = b.alloc(Datatype.I32, (int(count),), MemSpace.SHARED,
+                           hint=name, lifetime='body', arena=arena,
+                           handed=True)
+        lead = b.rawexpr(leader, type_=BOOL, hint='lead',
+                         uniform=Uniformity.LANE)
+        with b.if_(lead):
+            for k in range(int(count)):
+                b.store(counters, b.const(0, INDEX), k)
+        b.barrier(Participants.BLOCK)
+        self._prologue += list(b.finish())
+
+        def undo():
+            # As `_ring`'s: the setup goes with a discarded attempt.
+            del self._prologue[start:]
+        self.on_rollback(undo)
+        return counters
+
     def ring_round(self, ring: Ring, trip: Operand,
                    hint: str = 'r') -> Tuple[Operand, Operand]:
         """The slot of `ring` the trip `trip` (0, 1, ... in a role's own
@@ -2421,20 +2454,23 @@ class IRBuilder:
 
     def ring_wait(self, ring: Ring, side: str, slot: Operand,
                   parity: Operand, *, writes: Sequence[Any] = (),
-                  reads: Sequence[Any] = ()) -> Stmt:
+                  reads: Sequence[Any] = (),
+                  form: Optional[str] = None) -> Stmt:
         """Wait for the phase of parity `parity` of the `side` barrier of
         `ring`'s slot `slot` (`engines.ring_wait`): a consumer on the full
         side, behind which the slot's buffers `writes` hold what the
         producer's copies wrote -- declared written there, so that no read
         of them moves ahead; the producer on the empty side, ahead of its
         next copies into the slot's buffers `writes`, which no write moves
-        ahead of.  `reads` are buffers it orders reads of as well."""
+        ahead of.  `reads` are buffers it orders reads of as well.  `form`
+        how the thread waits where it is not `try_wait` again
+        (`engines.RING_WAIT_FORMS`)."""
         accesses = (tuple(Access(Effect.WRITE, self._space_of(x),
                                  self.alias_root(x)) for x in writes)
                     + tuple(Access(Effect.READ, self._space_of(x),
                                    self.alias_root(x)) for x in reads))
         return self.emit(engines.ring_wait(ring.object, side, slot, parity,
-                                           accesses))
+                                           accesses, form=form))
 
     def ring_prime(self, ring: Ring, issue: Operand) -> Optional[Stmt]:
         """The consumers' first release of every slot of `ring`, by the
@@ -2449,14 +2485,16 @@ class IRBuilder:
 
     def ring_acquire(self, ring: Ring, slot: Operand, parity: Operand, *,
                      writes: Sequence[Any] = (),
-                     reads: Sequence[Any] = ()) -> Stmt:
+                     reads: Sequence[Any] = (),
+                     form: Optional[str] = None) -> Stmt:
         """The producer's wait for its round of `ring`'s slot `slot`, on the
         slot's empty side: for the phase of the other parity than its
         consumers' round, `parity` -- its first round finds the slots free,
         the barriers' phase before their first (`ring_round`) -- ahead of its
         next copies into the slot's buffers `writes`."""
         return self.ring_wait(ring, 'empty', slot, self.op(
-            'sub', INDEX, 1, parity, hint='free'), writes=writes, reads=reads)
+            'sub', INDEX, 1, parity, hint='free'), writes=writes, reads=reads,
+            form=form)
 
     def ring_publish(self, ring: Ring, slot: Operand, issue: Operand, *,
                      tx: int = 0, tokens: Sequence[Value] = ()) -> Stmt:
@@ -2469,12 +2507,13 @@ class IRBuilder:
 
     def ring_take(self, ring: Ring, slot: Operand, parity: Operand, *,
                   writes: Sequence[Any] = (),
-                  reads: Sequence[Any] = ()) -> Stmt:
+                  reads: Sequence[Any] = (),
+                  form: Optional[str] = None) -> Stmt:
         """A consumer's wait for its round of `ring`'s slot `slot` on the
         slot's full side, the phase of parity `parity`: behind it the slot's
         buffers `writes` hold what the producer put there (`ring_wait`)."""
         return self.ring_wait(ring, 'full', slot, parity, writes=writes,
-                              reads=reads)
+                              reads=reads, form=form)
 
     def ring_release(self, ring: Ring, slot: Operand, issue: Operand, *,
                      engine: Optional[str] = None) -> Stmt:

@@ -106,7 +106,7 @@ import string
 from dataclasses import dataclass
 from enum import Enum
 from typing import (Any, Callable, Dict, Iterator, List, Mapping, NamedTuple,
-                    Optional, Sequence, Tuple)
+                    Optional, Sequence, Tuple, Union)
 
 from tensorforge.common.basic_types import RUNTIME, Addressing, Datatype
 
@@ -328,9 +328,11 @@ class RingSpec:
 
     `producer` and `consumers` name the roles of the block that fill and
     drain it (`pir.roles`), where the ring hands slots from one role to
-    others; None and none where the ring stays inside one role, its own
-    threads filling and draining it -- the block's first thread and the
-    others, the bands of a role and its issuing thread.  `tx` is the bytes
+    others -- `producer` a tuple of them where one ring carries two
+    operands, each its role's (`producers`); None and none where the ring
+    stays inside one role, its own threads filling and draining it -- the
+    block's first thread and the others, the bands of a role and its
+    issuing thread.  `tx` is the bytes
     a round's copies complete on a slot's full side where every round's
     are alike, 0 where each arrival says (`ring_arrive`).  `kind` is what
     each barrier is on the device -- an mbarrier on NVIDIA, an LDS arrive
@@ -359,7 +361,7 @@ class RingSpec:
     slots: int
     full: int
     empty: int
-    producer: Optional[str] = None
+    producer: Union[str, Tuple[str, ...], None] = None
     consumers: Tuple[str, ...] = ()
     tx: int = 0
     kind: SyncKind = SyncKind.MBARRIER
@@ -387,8 +389,9 @@ class RingSpec:
                           f'{self.hold} of their groups; 1 to its '
                           f'{self.slots} slots')
         consumers = tuple(self.consumers)
-        if self.producer is not None and self.producer in consumers:
-            raise IRError(f'the role {self.producer} fills a ring it drains')
+        for producer in self.producers:
+            if producer in consumers:
+                raise IRError(f'the role {producer} fills a ring it drains')
         object.__setattr__(self, 'consumers', consumers)
         waiters = tuple(int(w) for w in self.waiters)
         if len(waiters) != 2 or min(waiters) < 0:
@@ -398,6 +401,17 @@ class RingSpec:
                                             or not all(waiters)):
             raise IRError('a ring of named barriers names its first id and '
                           'the threads that wait on each side')
+
+    @property
+    def producers(self) -> Tuple[str, ...]:
+        """The roles that fill the ring: `producer`, or each of them where
+        it names several -- one ring for two operands, each its producer's
+        (`compute.multi_element`, `Options.matrix_handoffs` `one`)."""
+        if self.producer is None:
+            return ()
+        if isinstance(self.producer, str):
+            return (self.producer,)
+        return tuple(self.producer)
 
     def role_refusal(self, role: Optional[str], side: str,
                      waits: bool) -> Optional[str]:
@@ -410,9 +424,10 @@ class RingSpec:
         if self.producer is None:
             return None
         producer = (side == 'empty') == waits
-        if producer and role != self.producer:
+        if producer and role not in self.producers:
             return (f'{"a wait on" if waits else "an arrival at"} a slot\'s '
-                    f'{side} side is the producer\'s ({self.producer}), not '
+                    f'{side} side is the producer\'s '
+                    f'({", ".join(self.producers)}), not '
                     f'{role or "the block"}\'s')
         if not producer and role not in self.consumers:
             return (f'{"a wait on" if waits else "an arrival at"} a slot\'s '
@@ -2184,7 +2199,10 @@ def _wait_ring(s: Stmt, env: Spelling) -> Lowered:
     if obj.kind is SyncKind.NAMED:
         return _named_ring(s, env, waits=True)
     _spelled_mbarrier(s, env, object_value(s))
-    return Lowered((f'tensorforge::mbarrierWait({_ring_barrier(s, env)}, '
+    # How the thread waits (`RING_WAIT_FORMS`): `try_wait` again unless the
+    # statement says otherwise.
+    wait = RING_WAIT_FORMS.get(s.attr('form'), 'mbarrierWait')
+    return Lowered((f'tensorforge::{wait}({_ring_barrier(s, env)}, '
                     f'{env.name(s.args[1])});',))
 
 
@@ -4127,7 +4145,8 @@ REGISTRY: Dict[str, OpSpec] = {spec.name: spec for spec in (
     # A wait, counted as the waits are (`sync`); on an mbarrier the wait for
     # the copies whose tokens it names, an access of what they wrote as
     # their `wait` is (`effect_of`).
-    OpSpec(Op.WAIT_PHASE, operands=(_OBJECT, _SCOPE),
+    OpSpec(Op.WAIT_PHASE, operands=(_OBJECT, _SCOPE,
+                                    Slot('form', (str,), False)),
            results=(), effect=_SYNC, movable=False,
            completes=Completion.SYNC, retires=Completion.BARRIER,
            settles=True, units=1, pipe='sync',
@@ -4603,18 +4622,32 @@ def ring_init(ring: Value, storage: Value, *, full: int, empty: int,
 RING_SIDES = ('full', 'empty')
 
 
+#: How a thread waits for a ring's phase, where it does not `try_wait`
+#: again (`Options.matrix_wait`, `cuda.h`): `suspend`, `try_wait` with a
+#: suspend-time hint (`mbarrierWaitSuspend`); `test`, `test_wait` in a spin
+#: (`mbarrierWaitTest`).
+RING_WAIT_FORMS = {'suspend': 'mbarrierWaitSuspend', 'test': 'mbarrierWaitTest'}
+
+
 def ring_wait(ring: Value, side: str, slot: Operand, parity: Operand,
-              accesses: Tuple[Access, ...] = ()) -> Stmt:
+              accesses: Tuple[Access, ...] = (),
+              form: Optional[str] = None) -> Stmt:
     """Wait for the phase of parity `parity` of the `side` barrier of the
     ring's slot `slot`: a consumer for the producer's bytes, the producer
     for the consumers to be done with the slot.  `accesses` are what it
     makes visible -- the slot's buffers, written by the copies the full
-    barrier counted -- or orders the producer's next copies behind."""
+    barrier counted -- or orders the producer's next copies behind.
+    `form` one of `RING_WAIT_FORMS`, or None: `try_wait` again."""
     if side not in RING_SIDES:
         raise IRError(f'a ring has no {side!r} side')
-    return _stmt(Op.WAIT_PHASE, (('object', ring), ('side', side),
-                                 ('scope', _ring_scope(ring))),
-                 args=(slot, parity), accesses=tuple(accesses))
+    attrs = (('object', ring), ('side', side), ('scope', _ring_scope(ring)))
+    if form is not None:
+        if form not in RING_WAIT_FORMS:
+            raise IRError(f'a ring\'s wait by {form!r}: one of '
+                          f'{sorted(RING_WAIT_FORMS)}, or none')
+        attrs += (('form', form),)
+    return _stmt(Op.WAIT_PHASE, attrs, args=(slot, parity),
+                 accesses=tuple(accesses))
 
 
 def ring_arrive(ring: Value, side: str, slot: Operand, issue: Operand, *,

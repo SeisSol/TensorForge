@@ -766,6 +766,51 @@ __device__ __forceinline__ void mbarrierWait(void *barrier, uint32_t parity) {
 #endif
 }
 
+/// `mbarrierWait` with a suspend-time hint: the thread may be suspended
+/// until the phase completes or the hint's time passes -- ptxas parks it in
+/// NANOSLEEP.SYNCS -- as CUTLASS waits (`Options.matrix_wait` `suspend`; PTX
+/// ISA, "mbarrier.try_wait", `suspendTimeHint`, in nanoseconds).
+__device__ __forceinline__ void mbarrierWaitSuspend(void *barrier,
+                                                    uint32_t parity) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  uint32_t done = 0;
+  do {
+    asm volatile("{\n"
+                 ".reg .pred p;\n"
+                 "mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2, %3;\n"
+                 "selp.u32 %0, 1, 0, p;\n"
+                 "}"
+                 : "=r"(done)
+                 : "r"(bulk_shared_address(barrier)), "r"(parity),
+                   "r"(0x989680u)
+                 : "memory");
+  } while (!done);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
+/// `mbarrierWait` by `mbarrier.test_wait`, which never suspends the thread:
+/// a spin on the phase (`Options.matrix_wait` `test`).
+__device__ __forceinline__ void mbarrierWaitTest(void *barrier,
+                                                 uint32_t parity) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  uint32_t done = 0;
+  do {
+    asm volatile("{\n"
+                 ".reg .pred p;\n"
+                 "mbarrier.test_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                 "selp.u32 %0, 1, 0, p;\n"
+                 "}"
+                 : "=r"(done)
+                 : "r"(bulk_shared_address(barrier)), "r"(parity)
+                 : "memory");
+  } while (!done);
+#elif defined(__CUDA_ARCH__)
+  __trap();
+#endif
+}
+
 /// One arrival at the mbarrier at `barrier`, by the thread `issue` picks
 /// (`mbarrier.arrive`, release at the CTA's scope by default): what it read of
 /// the slot before, it is done with.
@@ -1145,6 +1190,30 @@ __device__ __forceinline__ bool electOne() {
   return false;
 #else
   return false;
+#endif
+}
+
+/// Whether the warps of a pool region go each its own way (the high-order
+/// tile's mixer pool, `multi_element`): true on the device, where every warp
+/// runs on its own anyway -- the host oracle runs each warp of the region as
+/// a coroutine of its own (`kernel_eval.Lockstep`), each its own tickets and
+/// waits, where it runs a role's warps together otherwise.
+__device__ __forceinline__ bool warpsApart() { return true; }
+
+/// The calling warp's next ticket of `counter`, a word of shared memory: one
+/// atomic fetch-add by the warp's first lane, its value every lane's
+/// (`__shfl_sync`) -- every lane of the warp converged at the call, the
+/// full mask.  The tickets a counter hands out are 0, 1, 2, ... in the
+/// order the warps reach it.
+__device__ __forceinline__ int32_t ticketTake(int32_t *counter) {
+#if defined(__CUDA_ARCH__)
+  int32_t ticket = 0;
+  if ((threadIdx.x & 31) == 0) {
+    ticket = atomicAdd(counter, 1);
+  }
+  return __shfl_sync(0xffffffffu, ticket, 0);
+#else
+  return 0;
 #endif
 }
 

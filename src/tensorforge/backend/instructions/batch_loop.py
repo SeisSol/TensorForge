@@ -84,6 +84,9 @@ class Trip(Enum):
 #: element and the mask of any element of the group (`batch_indices`).
 GROUP_KEY = 'group'
 MASK_KEY = 'element_active'
+#: And the group its next trip takes, where the loop strides on to it: a
+#: function of the body's writer, called by what wants it (`_group_ahead`).
+AHEAD_KEY = 'group_ahead'
 #: What a scheduled traversal of the high-order tile publishes besides
 #: (`TileSchedule`): the block's count of its trips, 0 on -- no longer the
 #: group's distance from the block's first -- and the schedule, whose
@@ -786,6 +789,20 @@ class BatchLoop(AbstractInstruction):
             return self._start, self._stride
         self._parted = (bound[f'{name}_end'], stride)
         return bound[f'{name}_start'], stride
+
+    def _group_ahead(self, writer, group):
+        """The group the block takes on its next trip, `group` and the
+        loop's stride on, clamped to `group` past the batch's end as the
+        lookahead indices are (`_lookahead_bindings`) -- or None in the
+        scheduled loop, whose next group is a claim's answer.  Emitted where
+        something asks for it, and nowhere else."""
+        from tensorforge.backend.pir.core import SIZE, BOOL
+        if self._trip_keys:
+            return None
+        step = self._stride if self._parted is None else self._parted[1]
+        ahead = writer.op('add', SIZE, group, step, hint='gn')
+        inside = writer.op('lt', BOOL, ahead, self._count(writer), hint='gn')
+        return writer.op('select', SIZE, inside, ahead, group, hint='gn')
 
     def _lookahead_bindings(self, writer, bound: dict = None) -> None:
         """Bind batchid1..N as clamped element indices, for prefetching.
@@ -1746,6 +1763,8 @@ class BatchLoop(AbstractInstruction):
                     # element of it: what a producer's lanes take theirs by
                     # (`compute.multi_element`).
                     bound[GROUP_KEY] = group
+                    bound[AHEAD_KEY] = (lambda w, group=group:
+                                        self._group_ahead(w, group))
                     bound[MASK_KEY] = (
                         lambda w, element, cond=cond, kind=kind,
                         space=space, n=[0]: self._element_active(
