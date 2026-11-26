@@ -3792,21 +3792,28 @@ class IRBuilder:
         return v
 
     def extract(self, vec: Value, lane: int, type_=None,
-                hint: str = 'el') -> Value:
+                hint: str = 'el', materialize: bool = False) -> Value:
         """``v[i]`` on a packed vector -- the inverse of :meth:`pack`.
 
         An element of the vector's own type unless `type_` says otherwise.
         The kernel's type in its place narrowed every double a kernel reading
         floats took out of a vector: the double operator of SeisSol's
         `toCanonical` in single precision went into its product as floats,
-        one `float v_p = vec[0]` per element."""
+        one `float v_p = vec[0]` per element.
+
+        `materialize` keeps the element in a variable of its own, as
+        :meth:`call`'s does: read on every lane where it stands, not where
+        its one consumer is -- which a select is not, spelled inline
+        (`GlbToRegLoader._block_loops`)."""
         if type_ is None:
             base = getattr(getattr(vec, 'type', None), 'base', None)
             type_ = ScalarType(base if base is not None else self._fptype)
         v = self.value(type_, hint=hint, uniform=_join((vec,)),
                        layout=vec.layout)
-        self._emit_op(Op.EXTRACT, (v,), (vec,), pure=True,
-                      attrs=(('lane', lane),))
+        attrs = (('lane', lane),)
+        if materialize:
+            attrs += (('no_inline', True),)
+        self._emit_op(Op.EXTRACT, (v,), (vec,), pure=True, attrs=attrs)
         return v
 
     def splat(self, value, type_, layout: Optional[RegisterLayout] = None,

@@ -435,6 +435,40 @@ def test_a_guarded_slot_of_an_accumulation_keeps_its_lanes():
     assert re.search(r'if \(v\d+_g\) \{\s*glb_m2\[', tail)
 
 
+@pytest.mark.parametrize('form', [{}, dict(element_base_align=64),
+                                  dict(sycl_dpas_block2d=True,
+                                       sycl_core_threads=32)],
+                         ids=['dpeb', 'dpebp', 'dpbt32eb'])
+def test_a_held_element_of_a_block_is_read_before_its_select(form):
+    """IGC 2.41.5's form (`Options.unguard_window_loads`): the last slot of
+    the order-7 I and Q, rows 80-83 of 96, read by its block and held to its
+    lanes by a select over the element in a variable of its own, never over
+    `v_eblk[3]` inline -- the front end reads an inline element in the
+    select's true arm alone, and the select is the guarded write the option
+    is there to avoid (`GlbToRegLoader._block_loops`).  pvcport J8: the
+    neighbor flux on the bench layout wrong in one cell of every element
+    under IGC 2.41.5, the ninth column's chain sunk into that branch."""
+    kernel = _once('gpu_neighboringFlux[0]', 7, sycl_dpas=True,
+                   unguard_window_loads=True, **form, **ON)
+    assert not re.search(r'\? \(v\d+_eblk\[\d+\]\)', kernel)
+    named = re.findall(r'float (v\d+_el) = v\d+_eblk\[\d+\];', kernel)
+    # I's and Q's, eight columns each: the ninth is a block of its own, a
+    # float; the fallback body reads as today.
+    assert len(named) == 2 * 8
+    for name in named:
+        assert re.search(r'= \(v\d+_g \? ' + name + r' : 0\.0f\);', kernel)
+
+
+def test_without_the_held_form_the_element_keeps_its_guard():
+    """Another IGC than 2.41.5: the slot's elements written under the
+    lane guard as before, nothing named."""
+    kernel = _once('gpu_neighboringFlux[0]', 7, sycl_dpas=True,
+                   unguard_window_loads=False, element_base_align=64, **ON)
+    assert not re.search(r'float v\d+_el = v\d+_eblk\[', kernel)
+    assert re.search(r'if \(v\d+_g\) \{\s*r\d+\[\d+\] = \(v\d+_eblk\[0\]\);',
+                     kernel)
+
+
 def test_a_read_after_a_write_stays_a_read_the_ir_forwards():
     """The derivative writes each derivative and reads it back: those reads
     stay per lane, for `pir.forward` to take from the registers, and so do

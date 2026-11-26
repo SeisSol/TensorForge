@@ -4093,6 +4093,13 @@ GROUPS = {
         ('a temporary taken for a chain',
          sub(EBLOCKS, "    if (not getattr(target, 'is_tmp', False) and addressing is not None\n",
              '    if (addressing is not None\n', 1)),
+        ('a held element selected inline',
+         sub(LOAD, '                       materialize=held is not None and not shift)\n',
+             '                       materialize=False)\n', 1)),
+        ('a materialized element inlined after all',
+         sub(BUILD, "        if materialize:\n            attrs += (('no_inline', True),)\n"
+                    "        self._emit_op(Op.EXTRACT",
+             '        self._emit_op(Op.EXTRACT', 1)),
     ]),
 
     'block2d': ('tests/test_block2d.py', [

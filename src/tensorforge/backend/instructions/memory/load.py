@@ -1399,6 +1399,17 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     took nine.  The lanes the rotation leaves past the column are padding,
     and the guard of today's read zeroes them as before.
 
+    A value the read holds to its lanes by a select (`_fresh_window`'s
+    form, `Options.unguard_window_loads`) selects over an element read
+    into a variable first, on every lane: spelled inline, `g ? (v_eblk[3])
+    : 0.0f`, the element is a call the front end makes in the select's
+    true arm alone, and the select a branch -- the guarded register write
+    the option exists to avoid, which IGC 2.41.5 computes wrong.  pvcport
+    J8: the bench layout's order-7 neighbor flux lost two terms of one
+    cell in every element under two of its block forms, the ninth
+    column's chain of the last slot, sunk into that branch, reading its
+    broadcasts out of a register the other arm had zeroed.
+
     False, and nothing built, where the bound buffer is not in this body."""
     from tensorforge.backend.pir import block_reads
     from tensorforge.backend.pir.core import ScalarType
@@ -1418,10 +1429,11 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
           width=found.pitch, height=found.columns, pitch=found.pitch,
           element=True, hint='eblk') for q, rows in pieces]
 
-    def column(blocks, q):
+    def column(blocks, q, materialize=False):
       for (start, rows), block in zip(pieces, blocks):
         if start <= q < start + rows:
-          return block if rows == 1 else writer.extract(block, q - start)
+          return block if rows == 1 else writer.extract(
+              block, q - start, materialize=materialize)
       raise ValueError(q)
 
     start, end = lead.start, lead.end
@@ -1466,17 +1478,21 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
 
       def at(w):
         indices = v + w
-        value = column(blocks, int(w[0]._value))
-        if shift:
-          value = writer.rawexpr(lexic.sub_group_shift('{0}', shift), value,
-                                 type_=ScalarType(elem), hint='erot',
-                                 pure=True, crosslane=True)
         held = self._src._valid_access(writer,
                                        [add_offset(x, self._offset[i])
                                         for i, x in enumerate(indices)],
                                        getattr(index, 'valid', None),
                                        first=getattr(index, 'first', 0) or 0,
                                        read=True).get('predicate')
+        # Held by a select, the element in a variable of its own: inline,
+        # the front end reads it in the select's true arm alone, a branch
+        # (the docstring).  A rotation's operand is a call's argument.
+        value = column(blocks, int(w[0]._value),
+                       materialize=held is not None and not shift)
+        if shift:
+          value = writer.rawexpr(lexic.sub_group_shift('{0}', shift), value,
+                                 type_=ScalarType(elem), hint='erot',
+                                 pure=True, crosslane=True)
         if held is not None:
           value = writer.op('select', ScalarType(elem), held, value,
                             writer.const(0), hint='edata')
