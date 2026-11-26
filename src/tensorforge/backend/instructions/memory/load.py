@@ -1345,7 +1345,7 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     sixteen lanes a slot, its rows on the lanes -- the multiplication's, one
     element a sub-group -- one element a lane, its columns in registers,
     with at least one slot inside the operand's columns."""
-    if (self._linearize or not element_blocks.asked(self._context)
+    if (self._linearize or not element_blocks.wanted(self._context)
         or element_blocks.target_refusal(self._context) is not None):
       return None
     found = element_blocks.surface(self._src)
@@ -1365,7 +1365,9 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     first = self._offset[0]
     span = element_blocks.LANES
     slots = range(lo // span, -(-hi // span))
-    if not any(element_blocks.slots_inside(found, first, s) for s in slots):
+    if not any(element_blocks.slots_inside(found, first, s)
+               or element_blocks.overlap_shift(found, first, s) is not None
+               for s in slots):
       return None
     if not (0 <= bbox.lower()[1] + self._offset[1]
             and bbox.upper()[1] + self._offset[1] <= found.columns):
@@ -1388,10 +1390,18 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     tail's `valid` or before a head's `first` get the zero the predicated
     read gives them (`Symbol._valid_access`).
 
+    A slot whose 16 rows leave the operand's columns -- the last of a
+    leading dimension that is no multiple of 16 -- is read as the block
+    that ends with the column, 16 rows inside it, and each column's value
+    rotated down the sub-group by the rows it starts before the slot
+    (`element_blocks.overlap_shift`, `Lexic.sub_group_shift`): two messages
+    and nine rotations for SeisSol's rows 48-55 of 56, where today's reads
+    took nine.  The lanes the rotation leaves past the column are padding,
+    and the guard of today's read zeroes them as before.
+
     False, and nothing built, where the bound buffer is not in this body."""
     from tensorforge.backend.pir import block_reads
     from tensorforge.backend.pir.core import ScalarType
-    from tensorforge.backend.symbol import LeadIndex
     base = self._src.pir_buffer(writer)
     if base is None or not hasattr(writer, 'lane_index'):
       return False
@@ -1418,8 +1428,17 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
     loop_lo, loop_hi = -(-start // span), end // span
     static = sorted(set(range(start // span, -(-end // span)))
                     - (set() if lead.unroll else set(range(loop_lo, loop_hi))))
-    up_front = {s: read(s * span + first_row) for s in static
-                if element_blocks.slots_inside(found, first_row, s)}
+    up_front = {}
+    rotate = {}
+    lexic = self._context.target.lexic
+    for s in static:
+      if element_blocks.slots_inside(found, first_row, s):
+        up_front[s] = read(s * span + first_row)
+        continue
+      shift = element_blocks.overlap_shift(found, first_row, s)
+      if shift is not None and lexic.sub_group_shift('{0}', shift) is not None:
+        up_front[s] = read(found.rows - span)
+        rotate[s] = shift
     in_loop = (loop_lo < loop_hi and not lead.unroll
                and element_blocks.slots_inside(found, first_row, loop_lo)
                and element_blocks.slots_inside(found, first_row,
@@ -1442,9 +1461,16 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
         cols_loop.write(self._context, writer, lambda w: inner(v + w))
         return
 
+      shift = rotate.get(int(slot)) if isinstance(
+          slot, (int, np.integer)) else None
+
       def at(w):
         indices = v + w
         value = column(blocks, int(w[0]._value))
+        if shift:
+          value = writer.rawexpr(lexic.sub_group_shift('{0}', shift), value,
+                                 type_=ScalarType(elem), hint='erot',
+                                 pure=True, crosslane=True)
         held = self._src._valid_access(writer,
                                        [add_offset(x, self._offset[i])
                                         for i, x in enumerate(indices)],

@@ -427,6 +427,21 @@ def test_a_2d_block_write_is_a_call_that_writes_its_buffer():
     assert s.args[1:3] == (0, 3) and s.attr('element') is None
 
 
+def test_a_call_for_its_effect_beside_a_block_write_stays_a_call():
+    """An intrinsic called for its effect is a call as the block write is:
+    the write is told apart by what it carries, not by its op, and under
+    SPMD the call is spelled as itself beside the block's helper."""
+    def build(b):
+        build.write = _write(b, element=True, **ELEMENT)
+        build.call = b.call_stmt('tensorforge::touch', b.const(1.0))
+    src, _ = _spmd(build)
+    assert block_reads.is_block2d_store(build.write)
+    assert build.call.op == Op.CALL
+    assert not block_reads.is_block2d_store(build.call)
+    assert src.count('tensorforge::elementBlock2dStore<') == 1
+    assert re.search(r'tensorforge::touch\(', src), src
+
+
 def test_a_write_takes_a_lanes_rows():
     b = IRBuilder(fptype=F32)
     g = b.alloc(F32, (4096,), MemSpace.GLOBAL, extern='m1')

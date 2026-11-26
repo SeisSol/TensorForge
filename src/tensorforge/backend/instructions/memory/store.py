@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 SeisSol Group
 #
 # SPDX-License-Identifier: MIT
-from typing import List
+from typing import List, Optional, Tuple
 import numpy as np
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor
@@ -509,7 +509,7 @@ class StoreRegToGlb(AbstractInstruction):
     of sixteen lanes a slot, its rows on the lanes, one element a lane, and
     no mask of a stack's elements over the writes."""
     from tensorforge.backend import elementmask
-    if (not element_blocks.asked(self._context)
+    if (not element_blocks.wanted(self._context)
         or element_blocks.target_refusal(self._context) is not None):
       return None
     found = element_blocks.surface(self._dest)
@@ -545,9 +545,21 @@ class StoreRegToGlb(AbstractInstruction):
     guard: the lead loop puts the slots that need one under it, and those
     are the ones written as today.
 
+    The ragged last slot of a write that ends inside a slot -- SeisSol's
+    rows 48-55, of a 56-row column or of the first 56 of 64 -- is written
+    as the block that ends with its last row, 16 rows back, when the slot
+    before it is one this store writes whole by blocks: its lanes are that
+    slot's upper ones and this slot's written ones, each rotated into place
+    down or up the sub-group and the two merged by lane
+    (`Lexic.sub_group_shift`) -- the rows today's writes write, with their
+    values, two messages for nine (`_overlap_tail_plan`).  Not a padded
+    tail (`LeadLoop.pad`): today's write zeroes the padding rows after the
+    data, which that block ends before -- inside the columns it is a slot
+    written whole, as above.
+
     False, and nothing built, where the bound buffer is not in this body."""
     from tensorforge.backend.pir import block_reads
-    from tensorforge.backend.pir.core import INDEX, ScalarType, Value
+    from tensorforge.backend.pir.core import BOOL, INDEX, ScalarType, Value
     base = self._dest.pir_buffer(writer)
     if base is None or not hasattr(writer, 'pack'):
       return False
@@ -575,11 +587,63 @@ class StoreRegToGlb(AbstractInstruction):
         return start <= slot * span and (slot + 1) * span <= end
       return True
 
+    lexic = self._context.target.lexic
+    tail = self._overlap_tail_plan(found, lead, loop_lo, loop_hi,
+                                   loop_inside, first_row)
+
+    def write_tail(slot, valid):
+      """The ragged last slot `slot`, lanes below `valid` written today, as
+      the block of the 16 rows that end with its last one, written after
+      the lead loop and under no guard: lanes below `16 - valid` the upper
+      lanes of the slot before -- one this store writes whole by blocks --
+      rotated down, the rest this slot's rotated up, both as the image
+      holds them."""
+      from tensorforge.backend.symbol import LeadIndex
+      ahead = span - valid
+      mine = [LeadIndex(slot, lead.threads, lead.stride, width=lead.width)]
+      before = [LeadIndex(slot - 1, lead.threads, lead.stride,
+                          width=lead.width)]
+      lane = writer.lane_index(span, hint='elane')
+      low = writer.op('lt', BOOL, lane, ahead, hint='elow')
+      merged = {}
+
+      def at(w):
+        q = int(w[0]._value)
+        if not src_bbox.lower()[1] <= q < src_bbox.upper()[1]:
+          merged[q] = writer.const(0)
+          return
+        own = self._src.load(writer, self._context, None, mine + w, False)
+        prior = self._src.load(writer, self._context, None, before + w,
+                               False)
+        down = writer.rawexpr(lexic.sub_group_shift('{0}', valid), prior,
+                              type_=ScalarType(elem), hint='erot', pure=True,
+                              crosslane=True)
+        up = writer.rawexpr(lexic.sub_group_shift('{0}', ahead, down=False),
+                            own, type_=ScalarType(elem), hint='erot',
+                            pure=True, crosslane=True)
+        merged[q] = writer.op('select', ScalarType(elem), low, down, up,
+                              hint='emerge')
+
+      Loop(cols.var, c_lo, c_hi, cols.step, unroll=True).write(
+          self._context, writer, at)
+      x = slot * span + first_row + valid - span
+      for q, rows in pieces:
+        part = [merged[c] for c in range(q, q + rows)]
+        share = (part[0] if rows == 1 else
+                 writer.pack(ScalarType(elem, rows), *part, hint='eshare'))
+        block_reads.store_block2d(
+            writer, base, x, q + first_col, share, rows=rows, cols=span,
+            width=found.pitch, height=found.columns, pitch=found.pitch,
+            element=True)
+
     def slot_level(v):
       index = v[0]
       slot = index._nonlead
       static = isinstance(slot, (int, np.integer))
       slot = int(slot) if static else slot
+      if static and tail is not None and slot == tail[0]:
+        # Written by `write_tail` after the loop, under no guard.
+        return
       inside = (element_blocks.slots_inside(found, first_row, slot)
                 if static else loop_inside and isinstance(index._value, Value))
       if not (inside and whole(index, slot)):
@@ -623,7 +687,36 @@ class StoreRegToGlb(AbstractInstruction):
             element=True)
 
     lead.write(self._context, writer, slot_level)
+    if tail is not None:
+      write_tail(*tail)
     return True
+
+  def _overlap_tail_plan(self, found, lead, loop_lo, loop_hi, loop_inside,
+                         first_row) -> Optional[Tuple[int, int]]:
+    """`(slot, valid)` for the ragged last slot of this store's lead range
+    that `_block_loops` writes as the block ending with its last row, or
+    None: the range ends inside a slot and no padding follows it that
+    today's write zeroes (`LeadLoop.pad`), the slot before is one the store
+    writes whole by blocks -- inside the operand's columns, after the
+    range's start, a static slot or one of a loop of slots inside -- the
+    block lies in the columns, and the target spells the rotation."""
+    span = element_blocks.LANES
+    start, end = lead.start, lead.end
+    if (not end % span or lead.pad
+        or self._context.target.lexic.sub_group_shift('{0}', 1) is None):
+      return None
+    slot = (end - 1) // span
+    valid = end - slot * span
+    before = slot - 1
+    if before * span < start or not element_blocks.slots_inside(
+        found, first_row, before):
+      return None
+    if not lead.unroll and loop_lo <= before < loop_hi and not loop_inside:
+      return None
+    x = slot * span + first_row + valid - span
+    if x < 0 or x + span > found.rows:
+      return None
+    return slot, valid
 
   def _store_split(self, writer, split, src_bbox, dest_bbox,
                    allow_nontemporal) -> None:

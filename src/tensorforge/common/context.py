@@ -48,7 +48,8 @@ class Context:
       # An element's operands by 2D blocks (`Options.sycl_element_blocks`):
       # their helpers are in the same header.
       self.target.lexic.element_blocks = (
-          getattr(self._options, 'sycl_element_blocks', False) is True)
+          getattr(self._options, 'sycl_element_blocks', False) in (True,
+                                                                   'auto'))
     if hasattr(self.target.lexic, 'element_cache'):
       # Through IGC's cache-opts forms, L1-uncached
       # (`Options.sycl_element_streaming`): LSC cache option 2.

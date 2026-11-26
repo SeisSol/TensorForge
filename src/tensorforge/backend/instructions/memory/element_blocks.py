@@ -66,21 +66,121 @@ class Surface(NamedTuple):
 
 
 def asked(context) -> bool:
-  """Whether the option asks for blocks: `True` only -- `auto` is off until
-  the blocks are measured."""
+  """Whether the option asks for blocks outright: `True` -- `auto` decides
+  kernel by kernel (`auto_refusal`)."""
   return getattr(context.get_user_options(), 'sycl_element_blocks',
                  False) is True
 
 
+def auto(context) -> bool:
+  """Whether the option leaves the blocks to J6b's rule (`auto_refusal`)."""
+  return getattr(context.get_user_options(), 'sycl_element_blocks',
+                 False) == 'auto'
+
+
+def wanted(context) -> bool:
+  """Whether a kernel may take blocks: asked for, or left to the rule."""
+  return asked(context) or auto(context)
+
+
+#: The lane slots a column may have where `auto` blocks an operand
+#: accumulated over a box that starts inside a slot (`auto_refusal`).
+AUTO_RAGGED_SLOTS = 4
+
+
+def auto_refusal(context, transfers, surfaces) -> Optional[str]:
+  """Why `sycl_element_blocks=auto` keeps a kernel's element blocks off, or
+  None where it builds them -- the rule pvcport J6b's timings support
+  (SeisSol's elastic kernels at orders 6 and 8, two layouts):
+
+  1. the DPAS path (`Options.sycl_dpas` on): the step's best forms are DPAS
+     forms, and under FMA the blocks lose on localFluxAll (x1.11);
+  2. whole lane slots for every operand -- moot since the last slot of a
+     leading dimension that is no multiple of 16 is read and written as the
+     block that ends with the column (`overlap_shift`);
+  3. no element operand the body writes and then reads for another one's
+     product -- the derivative's chain, each derivative read back for the
+     next and for the integral, lost with every form, x1.28 to x1.84 -- an
+     accumulator the body reads back to add to, the volume's and
+     localFluxAll's Q, is no chain;
+  4. an operand accumulated -- read and written -- over a box that does
+     not start at a column's first row, the volume's Q, rows 1-55, only up
+     to `AUTO_RAGGED_SLOTS` lane slots a column: the volume paid at order 6
+     (x0.90) and lost at order 8 (x1.19), where localFluxAll and the
+     neighbor flux, whose accumulations start at row 0, paid as well.
+
+  `transfers` are the body's `(kind, name, first_row)` in order, for every
+  operand of the element -- a load or a store of `name`, the operand row
+  it starts at -- a product's loads before the store of its result;
+  `surfaces` the surfaces of the operands the blocks take, by name.  Rule
+  3 across the sections of a kernel fission cut is the kernel's
+  (`chain_refusal`, `context.element_chain`).  Off by default: confirmed
+  at two orders of one equation, to be confirmed at orders 5 and 7."""
+  if getattr(context.get_user_options(), 'sycl_dpas', False) is not True:
+    return 'not the DPAS path'
+  chain = getattr(context, 'element_chain', None)
+  if chain is not None:
+    return chain
+  stored, loaded, read_back, ragged = set(), set(), set(), {}
+  for kind, name, first_row in transfers:
+    if kind != 'store':
+      loaded.add(name)
+      if name in stored:
+        read_back.add(name)
+      continue
+    chained = sorted(read_back - {name})
+    if chained:
+      return f'{", ".join(chained)} read back for {name}'
+    read_back.clear()
+    stored.add(name)
+    if name in surfaces and first_row > 0:
+      ragged.setdefault(name, first_row)
+  for name, first_row in ragged.items():
+    slots = -(-surfaces[name].rows // LANES)
+    if name in loaded and slots > AUTO_RAGGED_SLOTS:
+      return (f'{name} accumulated from row {first_row} over {slots} lane '
+              f'slots')
+  return None
+
+
+def chain_refusal(descrs) -> Optional[str]:
+  """Rule 3 of `auto_refusal` asked of a kernel's operations in their
+  order, whatever sections fission cuts them into -- `auto_refusal` sees a
+  section's transfers alone, and a derivative read back in the section
+  after the one that wrote it is a load of nothing the section stored: a
+  tensor of the element's own, not a temporary, that one operation writes
+  and a later one reads to write another.  The derivative writes each
+  derivative and reads it back for the next and for the integral; an
+  accumulator read to be added to is its own operation's destination, and
+  a temporary lives in the body.  None where there is no such tensor."""
+  written = set()
+  for operation in (o for d in descrs for o in d.operations()):
+    dest = operation.writes()
+    target = getattr(dest, 'tensor', None)
+    if target is None:
+      continue
+    for view in operation.reads():
+      tensor = getattr(view, 'tensor', None)
+      if (tensor is not None and tensor is not target
+          and id(tensor) in written):
+        return (f'{tensor.alias or tensor.name} read back for '
+                f'{target.alias or target.name}')
+    addressing = getattr(target, 'addressing', None)
+    if (not getattr(target, 'is_tmp', False) and addressing is not None
+        and addressing.per_element()):
+      written.add(id(target))
+  return None
+
+
 def target_refusal(context) -> Optional[str]:
   """Why the target has no element blocks, or None: SPMD SYCL on an Intel
-  device under oneAPI, which states its sub-group of 16."""
+  device under oneAPI, which states its sub-group of 16 -- the explicit
+  vector form has a backend of its own (`EXPLICIT_SIMD_BACKENDS`)."""
   target = context.target
-  if not getattr(target, 'sycl', False) or getattr(target, 'explicit_simd',
-                                                   False):
-    return 'not SPMD SYCL'
+  if not getattr(target, 'sycl', False):
+    return 'not SYCL'
   if target.hw.vendor != 'intel' or target.backend != 'oneapi':
-    return 'not oneAPI on Intel'
+    return 'not SPMD SYCL under oneAPI on Intel'
   sizes = target.pinned_sub_groups
   if sizes is None or LANES not in sizes:
     return f'no sub-group of {LANES} stated'
@@ -190,6 +290,24 @@ def slots_inside(found: Surface, first_row: int, slot: int) -> bool:
   return start >= 0 and start + LANES <= found.rows
 
 
+def overlap_shift(found: Surface, first_row: int, slot: int) -> Optional[int]:
+  """For the lane slot `slot` of an image whose rows start at `first_row`
+  that leaves the operand's columns at their end -- the last slot of a
+  leading dimension that is no multiple of 16, rows 48-55 of SeisSol's 56 --
+  the lanes it lies past the block that ends with the column: read as the
+  16 rows before the end (`x = rows - 16`, inside the column), the slot's
+  lane `l` is that block's lane `l + shift`, which a rotation of the
+  sub-group puts in place (`Lexic.sub_group_shift`); the lanes past the
+  column are the image's padding.  None for a slot inside the columns, one
+  before them, one with none of its rows in them, or a column of fewer than
+  16 rows."""
+  start = first_row + slot * LANES
+  if (start < 0 or start + LANES <= found.rows or start >= found.rows
+      or found.rows < LANES):
+    return None
+  return start - (found.rows - LANES)
+
+
 def chunks(columns_lo: int, columns_hi: int):
   """The messages a slot's columns `lo` to `hi` take: `(first, rows)` of
   eight columns while eight are left, then the rest one 4, 2, 1 rows each
@@ -202,6 +320,8 @@ def chunks(columns_lo: int, columns_hi: int):
   return out
 
 
-__all__ = ['BASE_ALIGN', 'LANES', 'ROWS', 'Surface', 'active', 'asked',
-           'building', 'chunks', 'needs_check', 'slots_inside', 'surface',
-           'surface_refusal', 'target_refusal']
+__all__ = ['AUTO_RAGGED_SLOTS', 'BASE_ALIGN', 'LANES', 'ROWS', 'Surface',
+           'active', 'asked', 'auto', 'auto_refusal', 'building',
+           'chain_refusal', 'chunks',
+           'needs_check', 'overlap_shift', 'slots_inside', 'surface',
+           'surface_refusal', 'target_refusal', 'wanted']

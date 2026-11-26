@@ -626,6 +626,12 @@ class SyclLexic(Lexic):
     return (f'tensorforge::elementPrefetch2d<{nbytes}>('
             f'item.get_sub_group(), {base});')
 
+  def sub_group_shift(self, variable, delta, down=True):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    which = 'shift_group_left' if down else 'shift_group_right'
+    return f'sycl::{which}(item.get_sub_group(), {variable}, {delta})'
+
   def element_blocks_check(self, pitch, base):
     if self._explicit_simd or self._sub_groups is None:
       return None
