@@ -190,6 +190,10 @@ def test_pointer_based_addressing_builds_an_identity_pointer_table():
         elem = op.ctype if op.is_sink else f"const {op.ctype}"
         assert f"static {elem}** d_p_{op.kernel_name}" in tu
     assert "return how == nullptr ? 0 :" in tu, "a shift nobody asked for"
+    # Read once: the fill and the checksum ask for the shift a value and a
+    # cell at a time, and a getenv each made one check on SNG2 take half an
+    # hour (pvcport J6).
+    assert "static const size_t shift = [] {" in tu, "the shift read per call"
 
 
 def test_a_sparse_operand_is_allocated_at_its_storage_volume():

@@ -537,10 +537,15 @@ def entry_points(tag: str, decls: Sequence[str], allocs: Sequence[str],
 _ELEMENT_ORDER = r"""
 /* `TFB_ELEMENT_SHIFT`: the scalars each element of a pointer table lies into a
    slab that many longer than its data, 0 unless asked -- elements at every
-   alignment the step reaches, for the element blocks' fallback. */
+   alignment the step reaches, for the element blocks' fallback.  Read once:
+   the fill and the checksum ask for it in their loops, a value and a cell at
+   a time, and one getenv each made a check on SNG2 take half an hour. */
 static inline size_t tfb_element_shift() {
-  const char* how = std::getenv("TFB_ELEMENT_SHIFT");
-  return how == nullptr ? 0 : (size_t)std::strtoul(how, nullptr, 10);
+  static const size_t shift = [] {
+    const char* how = std::getenv("TFB_ELEMENT_SHIFT");
+    return how == nullptr ? 0 : (size_t)std::strtoul(how, nullptr, 10);
+  }();
+  return shift;
 }
 static inline void tfb_element_order(size_t* order, size_t batch) {
   for (size_t i = 0; i < batch; ++i) order[i] = i;
