@@ -65,6 +65,10 @@ class SyclLexic(Lexic):
     #: where the DPAS path reads its operator copies so
     #: (`Options.sycl_dpas_block2d`).
     self.block2d = False
+    #: Whether a body reads and writes an element's operands by 2D blocks
+    #: (`Options.sycl_element_blocks`, `tensorforge::elementBlock2d`), which
+    #: the context sets.
+    self.element_blocks = False
     #: Whether a kernel may call DPAS from the SPMD lowering
     #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
     #: as it sets the split above: the call is declared in the header that
@@ -419,12 +423,13 @@ class SyclLexic(Lexic):
       headers = ['sycl/sycl.hpp',
                  'sycl/ext/intel/experimental/grf_size_properties.hpp']
       if ((self.split_broadcast or self.dpas or self.block_runs
-           or self.block2d)
+           or self.block2d or self.element_blocks)
           and self._sub_groups is not None):
         # `tensorforge::split_broadcast`, which `broadcast` writes,
         # `tensorforge::dpasTF32`, which the matrix path does,
-        # `tensorforge::subGroupRun`, which a run reads through, and
-        # `tensorforge::subGroupBlock2d`, a 2D block.
+        # `tensorforge::subGroupRun`, which a run reads through,
+        # `tensorforge::subGroupBlock2d`, a 2D block, and
+        # `tensorforge::elementBlock2d`, an element's.
         headers.append('tensorforge_device/sycl_spmd.h')
       return headers
     return ['sycl/sycl.hpp']

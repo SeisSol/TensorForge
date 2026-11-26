@@ -177,14 +177,19 @@ def test_pointer_based_addressing_builds_an_identity_pointer_table():
     assert ops, "the case no longer has a pointer-based operand"
     for op in ops:
         assert f"d_p_{op.kernel_name}" in tu, f"no table for {op.kernel_name}"
-        # identity, and by the element stride rather than the scalar one
-        assert (f"h[i] = d_{op.kernel_name} + i * (size_t)" in tu), (
+        # identity, and by the element stride rather than the scalar one --
+        # a slab an element, `TFB_ELEMENT_SHIFT` scalars longer than its data
+        # and the data that far into it, none unless asked (`_span`)
+        assert re.search(rf"h\[i\] = d_{op.kernel_name} \+ i \* \(\(size_t\)"
+                         rf"\d+u \+ tfb_element_shift\(\)\) \+ "
+                         rf"tfb_element_shift\(\);", tu), (
             f"{op.kernel_name}: the table is not the identity layout, or it "
             f"advances by one scalar where the kernel indexes by one element")
         # a source-only batch is read through `const T**`; `T**` does not
         # convert to it, so the declaration has to carry the constness
         elem = op.ctype if op.is_sink else f"const {op.ctype}"
         assert f"static {elem}** d_p_{op.kernel_name}" in tu
+    assert "return how == nullptr ? 0 :" in tu, "a shift nobody asked for"
 
 
 def test_a_sparse_operand_is_allocated_at_its_storage_volume():

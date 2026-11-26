@@ -10,9 +10,10 @@ from . import AbstractShrMemWrite, MemoryInstruction
 from tensorforge.backend.symbol import RELAXED, Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
-from tensorforge.backend.pir.core import BOOL, INDEX
+from tensorforge.backend.pir.core import BOOL, INDEX, Value
 from tensorforge.common.context import Context
 from tensorforge.backend.data_types import RegMemObject
+from . import element_blocks
 from .hints import cache_hint, readers
 
 
@@ -1326,7 +1327,140 @@ class GlbToRegLoader(MemoryInstruction, LoadInstruction):
                         for i, x in enumerate(indices)], allow_nontemporal)
         self._dest.store(writer, self._context, value, indices, False)
 
+      # A hint the target cannot spell is no hint: SYCL has none, and its
+      # reads are plain with or without one (`Target.nontemporal`).
+      hinted = bool(allow_nontemporal) and self._context.target.nontemporal(
+          self._src.get_fptype())
+      found = (element_blocks.active(self._context, self)
+               if not hinted else None)
+      if (found is not None and self.element_surface() is not None
+          and self._block_loops(writer, found, loops, inner)):
+        return
       write_loops(self._context, writer, loops, inner)
+
+  def element_surface(self):
+    """The element surface this transfer reads by 2D blocks where the body
+    asks for them (`Options.sycl_element_blocks`), or None: an operand of
+    the element with one (`element_blocks.surface`) read into an image of
+    sixteen lanes a slot, its rows on the lanes -- the multiplication's, one
+    element a sub-group -- one element a lane, its columns in registers,
+    with at least one slot inside the operand's columns."""
+    if (self._linearize or not element_blocks.asked(self._context)
+        or element_blocks.target_refusal(self._context) is not None):
+      return None
+    found = element_blocks.surface(self._src)
+    if found is None or self._dest.lead_dims != [0]:
+      return None
+    if (len(self._dest.lead_dims) != 1 or self._lead_width != 1
+        or self._num_threads != element_blocks.LANES
+        or self._dest.lead_block(0) != element_blocks.LANES):
+      return None
+    layout = self._dest.register_layout()
+    if layout is not None and len(getattr(layout, 'axes', ())) > 1:
+      return None
+    bbox = self._bbox
+    if bbox.rank() != 2:
+      return None
+    lo, hi = bbox.lower()[0], bbox.upper()[0]
+    first = self._offset[0]
+    span = element_blocks.LANES
+    slots = range(lo // span, -(-hi // span))
+    if not any(element_blocks.slots_inside(found, first, s) for s in slots):
+      return None
+    if not (0 <= bbox.lower()[1] + self._offset[1]
+            and bbox.upper()[1] + self._offset[1] <= found.columns):
+      return None
+    return found
+
+  def _block_loops(self, writer, found, loops, inner) -> bool:
+    """`loops` with the element's slots read by 2D blocks: the slot's
+    columns in messages of eight (`element_blocks.chunks`), the image
+    written from them as today's reads would write it.
+
+    Over the same lead loop, so that every guard and every full-lane tail
+    is the one today's reads get: the register side is not touched, only
+    where a value comes from.  A block is one message of the whole
+    sub-group, so none stands under a guard: the slots a guard holds --
+    a ragged head or tail -- are read up front, ahead of the loop, and a
+    slot of the loop inside it, which no guard holds.  A slot whose 16 rows
+    leave the operand's columns -- the last of a leading dimension that is
+    no multiple of 16 -- is read as today.  The lanes past a full-lane
+    tail's `valid` or before a head's `first` get the zero the predicated
+    read gives them (`Symbol._valid_access`).
+
+    False, and nothing built, where the bound buffer is not in this body."""
+    from tensorforge.backend.pir import block_reads
+    from tensorforge.backend.pir.core import ScalarType
+    from tensorforge.backend.symbol import LeadIndex
+    base = self._src.pir_buffer(writer)
+    if base is None or not hasattr(writer, 'lane_index'):
+      return False
+    lead, cols = loops
+    span = element_blocks.LANES
+    first_row, first_col = self._offset[0], self._offset[1]
+    c_lo, c_hi = cols.start, cols.end
+    pieces = element_blocks.chunks(c_lo, c_hi)
+    elem = self._src.get_fptype()
+
+    def read(x):
+      return [block_reads.load_block2d(
+          writer, base, x, q + first_col, rows=rows, cols=span,
+          width=found.pitch, height=found.columns, pitch=found.pitch,
+          element=True, hint='eblk') for q, rows in pieces]
+
+    def column(blocks, q):
+      for (start, rows), block in zip(pieces, blocks):
+        if start <= q < start + rows:
+          return block if rows == 1 else writer.extract(block, q - start)
+      raise ValueError(q)
+
+    start, end = lead.start, lead.end
+    loop_lo, loop_hi = -(-start // span), end // span
+    static = sorted(set(range(start // span, -(-end // span)))
+                    - (set() if lead.unroll else set(range(loop_lo, loop_hi))))
+    up_front = {s: read(s * span + first_row) for s in static
+                if element_blocks.slots_inside(found, first_row, s)}
+    in_loop = (loop_lo < loop_hi and not lead.unroll
+               and element_blocks.slots_inside(found, first_row, loop_lo)
+               and element_blocks.slots_inside(found, first_row,
+                                               loop_hi - 1))
+
+    def slot_level(v):
+      index = v[0]
+      slot = index._nonlead
+      if isinstance(slot, (int, np.integer)):
+        blocks = up_front.get(int(slot))
+      elif in_loop and isinstance(index._value, Value):
+        x = writer.op('mul', INDEX, index._value, span, hint='eslot')
+        if first_row:
+          x = writer.op('add', INDEX, x, first_row, hint='eslot')
+        blocks = read(x)
+      else:
+        blocks = None
+      if blocks is None:
+        cols_loop = Loop(cols.var, c_lo, c_hi, cols.step)
+        cols_loop.write(self._context, writer, lambda w: inner(v + w))
+        return
+
+      def at(w):
+        indices = v + w
+        value = column(blocks, int(w[0]._value))
+        held = self._src._valid_access(writer,
+                                       [add_offset(x, self._offset[i])
+                                        for i, x in enumerate(indices)],
+                                       getattr(index, 'valid', None),
+                                       first=getattr(index, 'first', 0) or 0,
+                                       read=True).get('predicate')
+        if held is not None:
+          value = writer.op('select', ScalarType(elem), held, value,
+                            writer.const(0), hint='edata')
+        self._dest.store(writer, self._context, value, indices, False)
+
+      Loop(cols.var, c_lo, c_hi, cols.step, unroll=True).write(
+          self._context, writer, at)
+
+    lead.write(self._context, writer, slot_level)
+    return True
 
   def _full_lane_tail(self, i) -> bool:
     """May the ragged end of lead dimension `i` load on every lane?

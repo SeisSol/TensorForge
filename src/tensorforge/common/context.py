@@ -44,6 +44,11 @@ class Context:
       self.target.lexic.block2d = bool(
           getattr(self.target.lexic, 'dpas', False)
           and self._options.sycl_dpas_block2d)
+    if hasattr(self.target.lexic, 'element_blocks'):
+      # An element's operands by 2D blocks (`Options.sycl_element_blocks`):
+      # their helpers are in the same header.
+      self.target.lexic.element_blocks = (
+          getattr(self._options, 'sycl_element_blocks', False) is True)
     #: The permutation each staged window is built with, by the window's
     #: symbol, where `pir.banks.propose` chose one from a body built without
     #: (`Options.swizzle` `decide`; `AbstractShrMemWrite._swizzle`).  Kept

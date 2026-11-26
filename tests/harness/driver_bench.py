@@ -289,8 +289,13 @@ def _literal(value: float, ctype: str) -> str:
 
 def _span(b: Buffer) -> str:
     elem = _ELEM_BYTES[b.ctype]
-    return (f"(size_t){b.per}u * {elem}" if b.addressing == "none"
-            else f"(size_t){b.per}u * batch * {elem}")
+    if b.addressing == "none":
+        return f"(size_t){b.per}u * {elem}"
+    if b.addressing == "pointer_based":
+        # A slab an element, `TFB_ELEMENT_SHIFT` scalars longer than its data
+        # (`tfb_element_shift`, 0 unless asked).
+        return f"((size_t){b.per}u + tfb_element_shift()) * batch * {elem}"
+    return f"(size_t){b.per}u * batch * {elem}"
 
 
 def buffer_code(buffers: Sequence[Buffer]) -> Tuple[List[str], List[str],
@@ -335,12 +340,22 @@ def buffer_code(buffers: Sequence[Buffer]) -> Tuple[List[str], List[str],
             allocs.append(f"    DEV_MALLOC(d_p_{b.stem}, {ptr_bytes});")
             reorder = ("      tfb_reorder(h, batch);\n"
                        if b.addressing == "pointer_based" else "")
+            # `TFB_ELEMENT_SHIFT=k` at run time: each element `k` scalars into
+            # a slab `k` longer than its data (`_span`), so that the elements'
+            # alignment steps through the batch -- a layout of the element
+            # blocks' fallback (`Options.sycl_element_blocks`).  A pointer
+            # table of the batch's own only: an index list's cells are not
+            # slabs of this buffer's.
+            step = (f"((size_t){b.per}u + tfb_element_shift())"
+                    if b.addressing == "pointer_based" else f"(size_t){b.per}u")
+            into = (" + tfb_element_shift()" if b.addressing == "pointer_based"
+                    else "")
             fills.append(
                 f"    {{ void** h = (void**)std::malloc({ptr_bytes});\n"
                 f"      if (!h) {{ std::fprintf(stderr, \"host alloc\\n\"); "
                 f"std::exit(2); }}\n"
                 f"      for (size_t i = 0; i < batch; ++i)\n"
-                f"        h[i] = d_{b.stem} + i * (size_t){b.per}u;\n"
+                f"        h[i] = d_{b.stem} + i * {step}{into};\n"
                 + reorder +
                 f"      DEV_MEMCPY_H2D(d_p_{b.stem}, h, {ptr_bytes});\n"
                 f"      std::free(h); }}")
@@ -439,7 +454,13 @@ def _region_sum(b: Buffer, span: str) -> str:
     offset = " + ".join(f"(x{d} - {r.starts[d]}u) * {strides[d]}u"
                         for d in range(len(r.lo))) or "0"
     indent += "  "
-    lines.append(f"{indent}{{ const size_t i = e * (size_t){b.per}u + "
+    # An element's slab, and where in it its data starts: `TFB_ELEMENT_SHIFT`
+    # scalars in, for a pointer table (`_span`).
+    slab, into = ((f"((size_t){b.per}u + tfb_element_shift())",
+                   "tfb_element_shift() + ")
+                  if b.addressing == "pointer_based"
+                  else (f"(size_t){b.per}u", ""))
+    lines.append(f"{indent}{{ const size_t i = e * {slab} + {into}"
                  f"{offset};")
     lines.append(f"{indent}  const double w = (double)((i % 1021u) + 1u);")
     lines.append(f"{indent}  acc += (double)p[i] * w; "
@@ -514,6 +535,13 @@ def entry_points(tag: str, decls: Sequence[str], allocs: Sequence[str],
 #: run time a fixed permutation (Fisher-Yates over a fixed LCG), so that one
 #: binary measures both an ordered batch and a scattered one.
 _ELEMENT_ORDER = r"""
+/* `TFB_ELEMENT_SHIFT`: the scalars each element of a pointer table lies into a
+   slab that many longer than its data, 0 unless asked -- elements at every
+   alignment the step reaches, for the element blocks' fallback. */
+static inline size_t tfb_element_shift() {
+  const char* how = std::getenv("TFB_ELEMENT_SHIFT");
+  return how == nullptr ? 0 : (size_t)std::strtoul(how, nullptr, 10);
+}
 static inline void tfb_element_order(size_t* order, size_t batch) {
   for (size_t i = 0; i < batch; ++i) order[i] = i;
   const char* how = std::getenv("TFB_ELEMENT_ORDER");
