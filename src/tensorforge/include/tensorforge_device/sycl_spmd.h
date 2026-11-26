@@ -7,6 +7,8 @@
 #include <sycl/sycl.hpp>
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <type_traits>
 
@@ -51,6 +53,86 @@ TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r2x1c)
 TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r4x1c)
 TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r8x1c)
 #undef TENSORFORGE_BLOCK2D_READ
+
+/// Its writes: a block of 1 to 8 rows of 32-bit data, each work-item its
+/// column of 16 (`tensorforge::subGroupBlock2dStore`).  Declared as the reads
+/// are; unused, they are no reference.
+#define TENSORFORGE_BLOCK2D_WRITE(NAME)                                        \
+  SYCL_EXTERNAL void NAME(__attribute__((opencl_global)) void *base,           \
+                          int width, int height, int pitch,                    \
+                          tensorforgeInt2 coord,                               \
+                          __attribute__((opencl_private)) std::uint32_t *in);
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_1r16x1c)
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_2r16x1c)
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_4r16x1c)
+TENSORFORGE_BLOCK2D_WRITE(intel_sub_group_2d_block_write_32b_8r16x1c)
+#undef TENSORFORGE_BLOCK2D_WRITE
+
+/// IGC's own forms of the 2D block messages, which take an LSC cache option
+/// the extension's builtins have no room for (`Options.sycl_element_streaming`,
+/// `Options.sycl_element_prefetch`).  IGC-internal names, which IGC 2.41.5 and
+/// 2.42.6 resolve -- the generator asks the `ocloc` on PATH before it writes a
+/// call (`toolchain.intel_block2d_cacheopts`).  The width, height and pitch go
+/// in less one, the hardware's encoding; the cache option is IGC's `LSC_LDCC`
+/// for a read and a prefetch, `LSC_STCC` for a write: 2 is L1 uncached, L3
+/// cached (written back).  Declared as the builtins above are; unused, they
+/// are no reference.
+typedef unsigned tensorforgeUint2 __attribute__((ext_vector_type(2)));
+typedef unsigned tensorforgeUint4 __attribute__((ext_vector_type(4)));
+typedef unsigned tensorforgeUint8 __attribute__((ext_vector_type(8)));
+#define TENSORFORGE_BLOCK2D_CACHED_READ(TYPE, NAME)                            \
+  extern "C" SYCL_EXTERNAL TYPE NAME(long base, int width, int height,         \
+                                     int pitch, tensorforgeInt2 coord,         \
+                                     int cache);
+TENSORFORGE_BLOCK2D_CACHED_READ(
+    unsigned, __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi1_m1k16v1)
+TENSORFORGE_BLOCK2D_CACHED_READ(
+    tensorforgeUint2,
+    __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi2_m2k16v1)
+TENSORFORGE_BLOCK2D_CACHED_READ(
+    tensorforgeUint4,
+    __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi4_m4k16v1)
+TENSORFORGE_BLOCK2D_CACHED_READ(
+    tensorforgeUint8,
+    __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi8_m8k16v1)
+#undef TENSORFORGE_BLOCK2D_CACHED_READ
+#define TENSORFORGE_BLOCK2D_CACHED_WRITE(TYPE, NAME)                           \
+  extern "C" SYCL_EXTERNAL void NAME(long base, int width, int height,         \
+                                     int pitch, tensorforgeInt2 coord,         \
+                                     TYPE data, int cache);
+TENSORFORGE_BLOCK2D_CACHED_WRITE(
+    unsigned, __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi1_m1k16v1)
+TENSORFORGE_BLOCK2D_CACHED_WRITE(
+    tensorforgeUint2,
+    __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi2_m2k16v1)
+TENSORFORGE_BLOCK2D_CACHED_WRITE(
+    tensorforgeUint4,
+    __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi4_m4k16v1)
+TENSORFORGE_BLOCK2D_CACHED_WRITE(
+    tensorforgeUint8,
+    __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi8_m8k16v1)
+#undef TENSORFORGE_BLOCK2D_CACHED_WRITE
+#define TENSORFORGE_BLOCK2D_PREFETCH(NAME)                                     \
+  extern "C" SYCL_EXTERNAL void NAME(long base, int width, int height,         \
+                                     int pitch, tensorforgeInt2 coord,         \
+                                     int cache);
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m32k64v1)
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m16k64v1)
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m8k64v1)
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m4k64v1)
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m2k64v1)
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m1k64v1)
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m1k16v1)
+TENSORFORGE_BLOCK2D_PREFETCH(
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m1k8v1)
+#undef TENSORFORGE_BLOCK2D_PREFETCH
 #endif
 
 namespace tensorforge {
@@ -83,6 +165,34 @@ inline sycl::vec<T, N> subGroupRun(const sycl::sub_group &group, const T *p) {
 /// What a work-item gets of a 2D block: `Count` elements, one as a number.
 template <typename T, int Count>
 using Block2dShare = std::conditional_t<Count == 1, T, sycl::vec<T, Count>>;
+
+namespace detail {
+/// Off the device, a 2D block message whose surface breaks a rule of
+/// `cl_intel_subgroup_2d_block_io` stops the program, naming the rule: the
+/// extension leaves such a message undefined, so the model has no value to
+/// give it, and one that went on would let a missing check pass by luck.
+[[noreturn]] inline void surfaceRuleBroken(const char *what) {
+  std::fprintf(stderr, "tensorforge: a 2D block message %s\n", what);
+  std::abort();
+}
+
+/// The extension's rules for a surface of `size`-byte elements: the base
+/// 64-byte aligned, the width from 64 bytes and a whole number of elements,
+/// at least one row, the pitch at least the width and a multiple of 16.
+inline void checkSurface(const void *base, int width, int height, int pitch,
+                         int size) {
+  if (reinterpret_cast<std::uintptr_t>(base) % 64 != 0)
+    surfaceRuleBroken("on a surface whose base is not 64-byte aligned");
+  if (width < 64 || width % size != 0)
+    surfaceRuleBroken("on a surface under 64 bytes wide or not a whole "
+                      "number of elements");
+  if (height < 1)
+    surfaceRuleBroken("on a surface of no rows");
+  if (pitch < width || pitch % 16 != 0)
+    surfaceRuleBroken("on a surface whose pitch is under its width or not "
+                      "a multiple of 16 bytes");
+}
+} // namespace detail
 
 /// A 2D block of `Rows` x `Cols` 32-bit elements of the surface at `base` --
 /// `width` bytes wide, `height` rows high, rows `pitch` bytes apart -- from
@@ -146,6 +256,7 @@ subGroupBlock2d(const sycl::sub_group &group, const T *base, int width,
                                                  at, out);
   }
 #else
+  detail::checkSurface(base, width, height, pitch, sizeof(T));
   const int lane = static_cast<int>(group.get_local_linear_id());
   const auto *bytes = reinterpret_cast<const unsigned char *>(base);
   for (int k = 0; k < Count; ++k) {
@@ -173,6 +284,332 @@ subGroupBlock2d(const sycl::sub_group &group, const T *base, int width,
     }
     return share;
   }
+}
+
+/// A 2D block of `Rows` x 16 32-bit elements written by the sub-group `group`
+/// -- 16 wide and full -- to the surface at `base`, `width` bytes wide,
+/// `height` rows high, rows `pitch` bytes apart, from column `x` and row `y`:
+/// work-item `l` hands in column `x + l`, its `Rows` elements in order
+/// (`pir.block_reads.store_block2d`).  Untransposed only, which is all the
+/// hardware writes.
+///
+/// Off the device the elements are written one at a time, and a block that
+/// does not lie wholly inside its surface stops the program: what the
+/// device does with the part outside the extension leaves unstated, and no
+/// writer here may rely on it.  `share` is the work-item's `Rows` elements
+/// in any vector that indexes them -- `sycl::vec` or OpenCL's own, the one
+/// the DPAS path holds its values in -- or a number where it is one.
+template <typename T, int Rows, typename Share>
+inline void subGroupBlock2dStore(const sycl::sub_group &group, T *base,
+                                 int width, int height, int pitch, int x, int y,
+                                 Share share) {
+  static_assert(sizeof(T) == 4, "a 2D block write of 32-bit data");
+  static_assert(Rows == 1 || Rows == 2 || Rows == 4 || Rows == 8,
+                "a block write of 1, 2, 4 or 8 rows");
+  std::uint32_t words[Rows];
+  if constexpr (Rows == 1) {
+    words[0] = sycl::bit_cast<std::uint32_t>(static_cast<T>(share));
+  } else {
+#pragma unroll
+    for (int k = 0; k < Rows; ++k) {
+      words[k] = sycl::bit_cast<std::uint32_t>(static_cast<T>(share[k]));
+    }
+  }
+#if defined(__SYCL_DEVICE_ONLY__)
+  (void)group;
+  auto *surface = (__attribute__((opencl_global)) void *)(base);
+  auto *in = (__attribute__((opencl_private)) std::uint32_t *)(&words[0]);
+  const tensorforgeInt2 at{x, y};
+  if constexpr (Rows == 1)
+    intel_sub_group_2d_block_write_32b_1r16x1c(surface, width, height, pitch,
+                                               at, in);
+  else if constexpr (Rows == 2)
+    intel_sub_group_2d_block_write_32b_2r16x1c(surface, width, height, pitch,
+                                               at, in);
+  else if constexpr (Rows == 4)
+    intel_sub_group_2d_block_write_32b_4r16x1c(surface, width, height, pitch,
+                                               at, in);
+  else
+    intel_sub_group_2d_block_write_32b_8r16x1c(surface, width, height, pitch,
+                                               at, in);
+#else
+  detail::checkSurface(base, width, height, pitch, sizeof(T));
+  const int lane = static_cast<int>(group.get_local_linear_id());
+  auto *bytes = reinterpret_cast<unsigned char *>(base);
+  for (int k = 0; k < Rows; ++k) {
+    const int col = x + lane;
+    const int row = y + k;
+    if (col < 0 || row < 0 || (col + 1) * static_cast<int>(sizeof(T)) > width ||
+        row >= height)
+      detail::surfaceRuleBroken("writing past its surface");
+    std::memcpy(bytes + static_cast<std::size_t>(row) * pitch +
+                    static_cast<std::size_t>(col) * sizeof(T),
+                &words[k], sizeof(T));
+  }
+#endif
+}
+
+namespace detail {
+/// A 2D block read of `Rows` rows of 16 through IGC's cache-opts form, with
+/// the LSC cache option `Cache` (`Options.sycl_element_streaming`), on the
+/// terms of `subGroupBlock2d`.  Off the device the same read: a cache option
+/// moves no number.
+template <typename T, int Rows, int Cache>
+inline Block2dShare<T, Rows> cachedBlock2d(const sycl::sub_group &group,
+                                           const T *base, int width, int height,
+                                           int pitch, int x, int y) {
+  static_assert(sizeof(T) == 4, "a 2D block read of 32-bit data");
+  static_assert(Rows == 1 || Rows == 2 || Rows == 4 || Rows == 8,
+                "a cached block of 1, 2, 4 or 8 rows");
+#if defined(__SYCL_DEVICE_ONLY__)
+  (void)group;
+  const long at = static_cast<long>(reinterpret_cast<std::uintptr_t>(base));
+  const tensorforgeInt2 corner{x, y};
+  if constexpr (Rows == 1) {
+    return sycl::bit_cast<T>(
+        __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi1_m1k16v1(
+            at, width - 1, height - 1, pitch - 1, corner, Cache));
+  } else {
+    sycl::vec<T, Rows> share;
+    if constexpr (Rows == 2) {
+      const tensorforgeUint2 w =
+          __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi2_m2k16v1(
+              at, width - 1, height - 1, pitch - 1, corner, Cache);
+      for (int k = 0; k < Rows; ++k)
+        share[k] = sycl::bit_cast<T>(static_cast<std::uint32_t>(w[k]));
+    } else if constexpr (Rows == 4) {
+      const tensorforgeUint4 w =
+          __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi4_m4k16v1(
+              at, width - 1, height - 1, pitch - 1, corner, Cache);
+      for (int k = 0; k < Rows; ++k)
+        share[k] = sycl::bit_cast<T>(static_cast<std::uint32_t>(w[k]));
+    } else {
+      const tensorforgeUint8 w =
+          __builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi8_m8k16v1(
+              at, width - 1, height - 1, pitch - 1, corner, Cache);
+      for (int k = 0; k < Rows; ++k)
+        share[k] = sycl::bit_cast<T>(static_cast<std::uint32_t>(w[k]));
+    }
+    return share;
+  }
+#else
+  return subGroupBlock2d<T, Rows, 16, false>(group, base, width, height, pitch,
+                                             x, y);
+#endif
+}
+
+/// The write through IGC's cache-opts form, with the LSC cache option
+/// `Cache` -- on the terms of `subGroupBlock2dStore`, whose model it is off
+/// the device.
+template <typename T, int Rows, int Cache, typename Share>
+inline void cachedBlock2dStore(const sycl::sub_group &group, T *base, int width,
+                               int height, int pitch, int x, int y,
+                               Share share) {
+  static_assert(sizeof(T) == 4, "a 2D block write of 32-bit data");
+  static_assert(Rows == 1 || Rows == 2 || Rows == 4 || Rows == 8,
+                "a cached block write of 1, 2, 4 or 8 rows");
+#if defined(__SYCL_DEVICE_ONLY__)
+  (void)group;
+  const long at = static_cast<long>(reinterpret_cast<std::uintptr_t>(base));
+  const tensorforgeInt2 corner{x, y};
+  if constexpr (Rows == 1) {
+    __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi1_m1k16v1(
+        at, width - 1, height - 1, pitch - 1, corner,
+        sycl::bit_cast<std::uint32_t>(static_cast<T>(share)), Cache);
+  } else if constexpr (Rows == 2) {
+    tensorforgeUint2 w;
+    for (int k = 0; k < Rows; ++k)
+      w[k] = sycl::bit_cast<std::uint32_t>(static_cast<T>(share[k]));
+    __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi2_m2k16v1(
+        at, width - 1, height - 1, pitch - 1, corner, w, Cache);
+  } else if constexpr (Rows == 4) {
+    tensorforgeUint4 w;
+    for (int k = 0; k < Rows; ++k)
+      w[k] = sycl::bit_cast<std::uint32_t>(static_cast<T>(share[k]));
+    __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi4_m4k16v1(
+        at, width - 1, height - 1, pitch - 1, corner, w, Cache);
+  } else {
+    tensorforgeUint8 w;
+    for (int k = 0; k < Rows; ++k)
+      w[k] = sycl::bit_cast<std::uint32_t>(static_cast<T>(share[k]));
+    __builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi8_m8k16v1(
+        at, width - 1, height - 1, pitch - 1, corner, w, Cache);
+  }
+#else
+  subGroupBlock2dStore<T, Rows>(group, base, width, height, pitch, x, y, share);
+#endif
+}
+
+#if defined(__SYCL_DEVICE_ONLY__)
+/// One 2D block prefetch of `Rows` rows of `Width` dwords from dword `x` of
+/// row `y` on, over a surface of `height` rows of 256 bytes from `base`, LSC
+/// cache option 2: L1 uncached, L3 cached.  The widths are the ones a 2D
+/// block prefetch takes: 256 bytes, or 64 bytes and less (vISA's rule, which
+/// IGC's release builds do not check), up to 32 rows.
+template <int Rows, int Width>
+inline void prefetchBlock2d(long base, int height, int x, int y) {
+  static_assert(Width == 64 || Width == 16 || Width == 8,
+                "a 2D block prefetch of 256, 64 or 32 bytes a row");
+  const tensorforgeInt2 corner{x, y};
+#define TENSORFORGE_PREFETCH_CASE(R, W)                                        \
+  if constexpr (Rows == R && Width == W)                                       \
+    __builtin_IB_subgroup_block_read_flat_prefetch_u32_m##R##k##W##v1(         \
+        base, 255, height - 1, 255, corner, 2);
+  TENSORFORGE_PREFETCH_CASE(32, 64)
+  TENSORFORGE_PREFETCH_CASE(16, 64)
+  TENSORFORGE_PREFETCH_CASE(8, 64)
+  TENSORFORGE_PREFETCH_CASE(4, 64)
+  TENSORFORGE_PREFETCH_CASE(2, 64)
+  TENSORFORGE_PREFETCH_CASE(1, 64)
+  TENSORFORGE_PREFETCH_CASE(1, 16)
+  TENSORFORGE_PREFETCH_CASE(1, 8)
+#undef TENSORFORGE_PREFETCH_CASE
+}
+#endif
+} // namespace detail
+
+namespace detail {
+/// Where an element's surface starts (`Options.sycl_element_blocks`): its
+/// columns are `Pitch` bytes apart, and the 2D block messages want the
+/// surface's base on a 64-byte boundary, which the element's own pointer
+/// need not be.  It need only be aligned to `grain`, the largest power of
+/// two dividing both the pitch and 64: then some `j` of the `period` pitches
+/// before it is on the boundary, and the surface starts there, its rows from
+/// `j` on the element's columns -- rows the messages read and write; the
+/// `j` before them are only addressed.  `j` is the element's offset from the
+/// boundary, in grains, times the inverse of `Pitch / grain` modulo
+/// `period`: an odd number, its own inverse modulo 2 and 4.
+template <int Pitch> struct ElementSurface {
+  static_assert(Pitch > 0 && Pitch % 16 == 0,
+                "a pitch of a whole number of 16 bytes");
+  static constexpr int grain = (Pitch & -Pitch) < 64 ? (Pitch & -Pitch) : 64;
+  static constexpr int period = 64 / grain;
+  static constexpr int inverse = (Pitch / grain) % period;
+
+  /// Whether an element at `address` has such a surface.
+  static bool fits(std::uintptr_t address) {
+    return (address & static_cast<std::uintptr_t>(grain - 1)) == 0;
+  }
+
+  /// The pitches its surface starts before it.
+  static int shift(std::uintptr_t address) {
+    return static_cast<int>((((address & 63) / grain) * inverse) &
+                            (period - 1));
+  }
+};
+} // namespace detail
+
+/// Whether the element at `element` -- its columns `Pitch` bytes apart --
+/// has a surface the 2D block messages can address
+/// (`Options.sycl_element_blocks`): its address aligned to the grain of
+/// `detail::ElementSurface`, 64 bytes for a pitch of whole cache lines, 32
+/// for SeisSol's padding to 32 on PVC.  The sub-group's answer, from the
+/// address of its first work-item, which holds the sub-group's element: a
+/// branch on it is one the compiler takes for the sub-group.
+template <int Pitch>
+inline bool elementBlocks(const sycl::sub_group &group, const void *element) {
+  const std::uintptr_t address = sycl::group_broadcast(
+      group, reinterpret_cast<std::uintptr_t>(element), 0);
+  return detail::ElementSurface<Pitch>::fits(address);
+}
+
+/// A 2D block of `Rows` rows of the element at `element`, read by the
+/// sub-group `group` (`Options.sycl_element_blocks`): the element's storage
+/// as a surface of its `Columns` columns, `Pitch` bytes each, every column a
+/// row -- work-item `l` gets element `x + l` of columns `y` to `y + Rows`.
+/// Only for an element `elementBlocks` answered for, and only for a block
+/// inside its columns: the surface is the storage and nothing past it.
+/// `Cache`, where it is not 0, is the LSC cache option of IGC's cache-opts
+/// form (`Options.sycl_element_streaming`): 2 reads L1-uncached.
+template <typename T, int Rows, int Pitch, int Columns, int Cache = 0>
+inline Block2dShare<T, Rows> elementBlock2d(const sycl::sub_group &group,
+                                            const T *element, int x, int y) {
+  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(element);
+  const int j = detail::ElementSurface<Pitch>::shift(address);
+  const T *base = reinterpret_cast<const T *>(
+      address - static_cast<std::uintptr_t>(j) * Pitch);
+  if constexpr (Cache == 0) {
+    return subGroupBlock2d<T, Rows, 16, false>(group, base, Pitch, Columns + j,
+                                               Pitch, x, y + j);
+  } else {
+    return detail::cachedBlock2d<T, Rows, Cache>(group, base, Pitch,
+                                                 Columns + j, Pitch, x, y + j);
+  }
+}
+
+/// The write of the same block: work-item `l` hands in element `x + l` of
+/// columns `y` to `y + Rows`, 1 to 8 of them, as `subGroupBlock2dStore`
+/// takes them.  `Cache` as for the read: 2 writes L1-uncached, L3 back.
+template <typename T, int Rows, int Pitch, int Columns, int Cache = 0,
+          typename Share>
+inline void elementBlock2dStore(const sycl::sub_group &group, T *element, int x,
+                                int y, Share share) {
+  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(element);
+  const int j = detail::ElementSurface<Pitch>::shift(address);
+  T *base =
+      reinterpret_cast<T *>(address - static_cast<std::uintptr_t>(j) * Pitch);
+  if constexpr (Cache == 0) {
+    subGroupBlock2dStore<T, Rows>(group, base, Pitch, Columns + j, Pitch, x,
+                                  y + j, share);
+  } else {
+    detail::cachedBlock2dStore<T, Rows, Cache>(group, base, Pitch, Columns + j,
+                                               Pitch, x, y + j, share);
+  }
+}
+
+/// The `Bytes` of the element at `element` hinted to the cache
+/// (`Options.sycl_element_prefetch`) by 2D block prefetches over its storage
+/// as rows of 256 bytes from the 64-byte line it starts in -- up to 32 rows a
+/// message, whole rows first, then what is left of the last row by pieces of
+/// 64 and 32 bytes -- L1 uncached, L3 cached.  The line the element starts in
+/// is a surface's base whatever its alignment, so every element is hinted;
+/// the last piece short of 32 bytes is not asked for, and nothing past the
+/// element's storage is.
+template <int Bytes>
+inline void elementPrefetch2d(const sycl::sub_group &group,
+                              const void *element) {
+  const std::uintptr_t address = sycl::group_broadcast(
+      group, reinterpret_cast<std::uintptr_t>(element), 0);
+#if defined(__SYCL_DEVICE_ONLY__)
+  const std::uintptr_t line = address & ~static_cast<std::uintptr_t>(63);
+  const int span = static_cast<int>(address - line) + Bytes;
+  const int rows = span >> 8;
+  const int tail = span & 255;
+  const int height = rows + (tail != 0 ? 1 : 0);
+  const long base = static_cast<long>(line);
+  int y = 0;
+  for (; y + 32 <= rows; y += 32) {
+    detail::prefetchBlock2d<32, 64>(base, height, 0, y);
+  }
+  if ((rows & 16) != 0) {
+    detail::prefetchBlock2d<16, 64>(base, height, 0, y);
+    y += 16;
+  }
+  if ((rows & 8) != 0) {
+    detail::prefetchBlock2d<8, 64>(base, height, 0, y);
+    y += 8;
+  }
+  if ((rows & 4) != 0) {
+    detail::prefetchBlock2d<4, 64>(base, height, 0, y);
+    y += 4;
+  }
+  if ((rows & 2) != 0) {
+    detail::prefetchBlock2d<2, 64>(base, height, 0, y);
+    y += 2;
+  }
+  if ((rows & 1) != 0) {
+    detail::prefetchBlock2d<1, 64>(base, height, 0, y);
+  }
+  int x = 0;
+  for (; x + 64 <= tail; x += 64) {
+    detail::prefetchBlock2d<1, 16>(base, height, x / 4, rows);
+  }
+  if (tail - x >= 32) {
+    detail::prefetchBlock2d<1, 8>(base, height, x / 4, rows);
+  }
+#else
+  (void)address;
+#endif
 }
 
 /// `x` rounded to TF32: to nearest, ties away from zero, the low thirteen bits

@@ -22,7 +22,7 @@ comment.
 
 from contextlib import contextmanager
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from tensorforge.common.basic_types import FlagMode, GeneralLexicon
 from tensorforge.common.context import Context
@@ -32,6 +32,7 @@ from tensorforge.backend import elementmask
 from tensorforge.backend.pir.core import Uniformity
 from tensorforge.generators import stacking
 from .abstract_instruction import AbstractInstruction
+from .memory import element_blocks
 
 
 def _loop_body_fence(writer, text: str) -> None:
@@ -191,6 +192,23 @@ class TileSchedule:
         b.barrier(Participants.WAVE)
         b.ring_release(self.ring, slot, lane0)
         return nxt
+
+
+class _NoPlan(Exception):
+    """A region the element blocks do not take (`BatchLoop._element_plan`)."""
+
+
+class _ElementPlan(NamedTuple):
+    """How a region takes element blocks (`BatchLoop._element_plan`): the
+    bindings it starts with and the instructions after them; the operands
+    the device checks, by name, to their surfaces; the transfers that take
+    blocks behind the check, and those that take them in either body
+    because the promise covers their operand -- by `id`, to the surface."""
+    bindings: list
+    rest: list
+    checked: dict
+    chosen: dict
+    unchecked: dict
 
 
 class BatchLoop(AbstractInstruction):
@@ -1073,13 +1091,151 @@ class BatchLoop(AbstractInstruction):
         if AbstractInstruction._shared_body:
             # Already inside one -- opened by `gen_code` around the loop.
             self._bind_entries(writer)
-            for instr in guarded:
-                instr.gen_code(writer)
+            self._emit_versions(writer, guarded)
         else:
             # one body for every instruction of the region
             AbstractInstruction.build_shared_body(
                 self._context, writer,
-                lambda _builder: [instr.gen_code(writer) for instr in guarded])
+                lambda _builder: self._emit_versions(writer, guarded))
+
+    def _emit_versions(self, writer, guarded) -> None:
+        """The region, once -- or, where its element's operands are read and
+        written by 2D blocks (`Options.sycl_element_blocks`), twice: the
+        blocks behind the element's check (`tensorforge::elementBlocks`),
+        today's transfers behind its failure.
+
+        One check for the element and the body twice, not a branch around
+        each transfer: around each, the branch kept IGC from moving a read
+        over it and cost moves on both sides of every join -- a fifth of the
+        instructions the blocks save in SeisSol's order-6 volume, against
+        the whole of them here, at twice the static code.  The bindings go
+        first, once: the check reads the element's pointers.  An operand the
+        caller promised the alignment of (`Options.element_base_align`) is
+        read by blocks in both bodies, and where every one is, there is one
+        body and no check."""
+        plan = self._element_plan(writer, guarded)
+        if plan is None:
+            for instr in guarded:
+                instr.gen_code(writer)
+            return
+        for instr in plan.bindings:
+            instr.gen_code(writer)
+        cond = self._element_check(writer, plan.bindings, plan.checked)
+        if cond is None:
+            with element_blocks.building(self._context, plan.unchecked):
+                for instr in plan.rest:
+                    instr.gen_code(writer)
+            return
+        branch = writer.if_else(cond, [], attrs=(('guard', 'element_blocks'),))
+        with branch.then():
+            with element_blocks.building(self._context, plan.chosen):
+                for instr in plan.rest:
+                    instr.gen_code(writer)
+        with branch.otherwise():
+            with element_blocks.building(self._context, plan.unchecked):
+                for instr in plan.rest:
+                    instr.gen_code(writer)
+
+    def _element_plan(self, writer, guarded) -> Optional['_ElementPlan']:
+        """How the region takes element blocks (`_ElementPlan`), or None:
+        the bindings the region starts with, the instructions after them,
+        and the transfers that read or write an operand by blocks, split by
+        whether the device checks the operand or the promise covers it.
+
+        Only transfers of the region itself, not of a loop inside it, and of
+        an operand the region reads and writes only a read before its first
+        write and a write after its last read: the pseudo-IR takes a read of
+        what the lane stored from the register it stored (`pir.forward`),
+        which a block is no read or store for -- the derivative's
+        accumulations would read memory back.  None where the option is off,
+        the target has no blocks, the body is text, or no transfer takes a
+        block: then the body is what it always was."""
+        if (not element_blocks.asked(self._context)
+                or element_blocks.target_refusal(self._context) is not None
+                or not hasattr(writer, 'if_else')
+                or not hasattr(writer, 'rawexpr')):
+            return None
+        from .memory.load import GlbToRegLoader
+        from .memory.store import StoreRegToGlb
+        from .ptr_manip import GetElementPtr
+        guarded = list(guarded)
+        cut = 0
+        while cut < len(guarded) and isinstance(guarded[cut], GetElementPtr):
+            cut += 1
+        bindings, rest = guarded[:cut], guarded[cut:]
+        bound = {b._dest.name for b in bindings}
+
+        def transfers(instrs, top):
+            for instr in instrs:
+                if isinstance(instr, GetElementPtr):
+                    # A binding after the start: the check before the body
+                    # could not read it.
+                    raise _NoPlan()
+                if isinstance(instr, GlbToRegLoader):
+                    yield instr, instr._src, 'load', top
+                elif isinstance(instr, StoreRegToGlb):
+                    yield instr, instr._dest, 'store', top
+                regions = getattr(instr, 'regions', None)
+                for region in (regions() if regions is not None else ()):
+                    yield from transfers(region, False)
+
+        try:
+            seen = list(transfers(rest, True))
+        except _NoPlan:
+            return None
+        first_store, last_load = {}, {}
+        for at, (_, symbol, kind, _) in enumerate(seen):
+            if kind == 'store':
+                first_store.setdefault(symbol.name, at)
+            else:
+                last_load[symbol.name] = at
+        chosen, surfaces = {}, {}
+        for at, (instr, symbol, kind, top) in enumerate(seen):
+            if not top or symbol.name not in bound:
+                continue
+            if kind == 'load' and at > first_store.get(symbol.name, at):
+                continue
+            if kind == 'store' and at < last_load.get(symbol.name, at):
+                continue
+            surface = instr.element_surface()
+            if surface is not None:
+                chosen[id(instr)] = surface
+                surfaces[symbol.name] = surface
+        if not chosen:
+            return None
+        if getattr(self._context.get_user_options(),
+                   'sycl_element_streaming', False):
+            # Through IGC's cache-opts forms: refused, naming the reason,
+            # where the ocloc on PATH does not resolve them.
+            element_blocks.cacheopts_refusal(self._context,
+                                             'sycl_element_streaming')
+        checked = {n: s for n, s in surfaces.items()
+                   if element_blocks.needs_check(self._context, s)}
+        by_instr = {id(i): sym.name for i, sym, _, _ in seen}
+        unchecked = {k: v for k, v in chosen.items()
+                     if by_instr[k] not in checked}
+        return _ElementPlan(bindings, rest, checked, chosen, unchecked)
+
+    def _element_check(self, writer, bindings, checked):
+        """The element's check for the `checked` operands, one boolean of
+        the sub-group, or None where there is nothing to check."""
+        if not checked:
+            return None
+        from tensorforge.backend.pir.core import BOOL
+        lexic = self._context.target.lexic
+        by_name = {b._dest.name: b._dest for b in bindings}
+        cond = None
+        for name in sorted(checked):
+            buffer = by_name[name].pir_buffer(writer)
+            text = lexic.element_blocks_check(checked[name].pitch, '{0}')
+            if buffer is None or text is None:
+                raise InternalError(f'{name}: an element check with no '
+                                    f'binding or spelling in this body')
+            fits = writer.rawexpr(text, buffer, type_=BOOL,
+                                  hint=f'{name}_blocks', crosslane=True)
+            cond = fits if cond is None else writer.op(
+                'and', BOOL, cond, fits, hint='blocks')
+        return cond
 
     def gen_code(self, writer) -> None:
         # Deliberately no writer.Scope() and no comment: adding either would

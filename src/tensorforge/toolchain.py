@@ -850,6 +850,78 @@ def intel_dpas_tf32(device: str = 'pvc',
     return _DPAS_TF32[key]
 
 
+#: IGC's own forms of the 2D block messages that take an LSC cache option:
+#: a read and a write of a lane slot, and a prefetch (`sycl_spmd.h`,
+#: `Options.sycl_element_streaming`, `Options.sycl_element_prefetch`).
+BLOCK2D_CACHEOPTS_BUILTINS = (
+    '__builtin_IB_subgroup_block_read_flat_cacheopts_u32_wi8_m8k16v1',
+    '__builtin_IB_subgroup_block_write_flat_cacheopts_u32_wi8_m8k16v1',
+    '__builtin_IB_subgroup_block_read_flat_prefetch_u32_m8k64v1')
+
+_BLOCK2D_CACHEOPTS_PROBE = f'''\
+uint8 {BLOCK2D_CACHEOPTS_BUILTINS[0]}(long base, int width, int height,
+    int pitch, int2 coord, int cache);
+void {BLOCK2D_CACHEOPTS_BUILTINS[1]}(long base, int width, int height,
+    int pitch, int2 coord, uint8 data, int cache);
+void {BLOCK2D_CACHEOPTS_BUILTINS[2]}(long base, int width, int height,
+    int pitch, int2 coord, int cache);
+__attribute__((intel_reqd_sub_group_size(16)))
+kernel void probe(global float *p) {{
+  long at = (long)p;
+  uint8 v = {BLOCK2D_CACHEOPTS_BUILTINS[0]}(at, 255, 8, 255, (int2)(0, 0), 2);
+  {BLOCK2D_CACHEOPTS_BUILTINS[1]}(at + 4096, 255, 8, 255, (int2)(0, 0), v, 2);
+  {BLOCK2D_CACHEOPTS_BUILTINS[2]}(at + 8192, 255, 8, 255, (int2)(0, 0), 2);
+}}
+'''
+
+_BLOCK2D_CACHEOPTS: Dict[Tuple[str, str], Optional[bool]] = {}
+
+
+def intel_block2d_cacheopts(device: str = 'pvc',
+                            ocloc: Optional[str] = None) -> Optional[bool]:
+    """Whether the IGC behind `ocloc` -- the one on PATH -- resolves its own
+    cache-opts and prefetch forms of the 2D block messages for `device`
+    (`BLOCK2D_CACHEOPTS_BUILTINS`); None where there is no `ocloc` to ask.
+
+    IGC-internal names, which no extension promises: IGC 2.41.5 and 2.42.6
+    turn them into `load_block2d` / `store_block2d` with the cache controls
+    asked for.  Asked as the DPAS builtin is (`intel_dpas_tf32`): by a
+    kernel that calls them, the answer the binary's symbol table -- a name
+    IGC does not know stays an undefined symbol -- and a build that fails is
+    a no.  Asked once per `ocloc` and device."""
+    import subprocess
+    import tempfile
+    path = ocloc or shutil.which('ocloc')
+    if path is None:
+        return None
+    key = (path, device)
+    if key not in _BLOCK2D_CACHEOPTS:
+        answer: Optional[bool] = None
+        try:
+            with tempfile.TemporaryDirectory() as cwd:
+                with open(os.path.join(cwd, 'probe.cl'), 'w') as f:
+                    f.write(_BLOCK2D_CACHEOPTS_PROBE)
+                out = os.path.join(cwd, 'out')
+                p = subprocess.run([path, 'compile', '-file', 'probe.cl',
+                                    '-device', device, '-out_dir', out,
+                                    '-output', 'probe', '-q'], cwd=cwd,
+                                   capture_output=True, text=True,
+                                   timeout=300)
+                answer = False
+                if p.returncode == 0 and os.path.isdir(out):
+                    tables = [elf_undefined_symbols(os.path.join(out, name))
+                              for name in sorted(os.listdir(out))]
+                    tables = [t for t in tables if t is not None]
+                    answer = bool(tables) and not any(
+                        builtin in name
+                        for table in tables for name in table
+                        for builtin in BLOCK2D_CACHEOPTS_BUILTINS)
+        except (OSError, subprocess.SubprocessError):
+            answer = None
+        _BLOCK2D_CACHEOPTS[key] = answer
+    return _BLOCK2D_CACHEOPTS[key]
+
+
 #: A named barrier's signal and wait under ESIMD, for the IGC behind an
 #: ahead-of-time build to write (`intel_named_barrier_signal`).
 _NAMED_SIGNAL_PROBE = r'''#include <sycl/sycl.hpp>

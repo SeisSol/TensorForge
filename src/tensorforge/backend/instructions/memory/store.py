@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 from typing import List
+import numpy as np
 from tensorforge.common.context import Context
 from tensorforge.common.matrix.tensor import Tensor
 from tensorforge.common.matrix.boundingbox import BoundingBox
@@ -9,7 +10,7 @@ from tensorforge.backend.data_types import RegMemObject
 from tensorforge.backend.symbol import Symbol, SymbolType, DataView, write_loops, LeadLoop, Loop, Immediate, add_offset
 from tensorforge.common.exceptions import InternalError
 from tensorforge.backend.writer import Writer
-from . import AbstractShrMemWrite
+from . import AbstractShrMemWrite, element_blocks
 from .hints import cache_hint, readers
 from ..abstract_instruction import AbstractInstruction
 
@@ -486,13 +487,143 @@ class StoreRegToGlb(AbstractInstruction):
                          f' == {owner}'):
             emit()
 
-      write_loops(self._context, writer, loops, inner)
+      # As the loader: a hint the target cannot spell is none.
+      hinted = bool(allow_nontemporal) and self._context.target.nontemporal(
+          self._dest.get_fptype())
+      found = (element_blocks.active(self._context, self)
+               if not hinted else None)
+      if not (found is not None and self.element_surface() is not None
+              and self._block_loops(writer, found, loops, inner, src_bbox)):
+        write_loops(self._context, writer, loops, inner)
 
       # The whole tail wrote its padding lanes' zeros already.
       threads = self._num_threads
       filled = (-(-src_bbox.upper()[0] // threads) * threads) if pad else None
       self._fill_lead_remainder(writer, src_bbox, dest_bbox, allow_nontemporal,
                                 upper_from=filled)
+
+  def element_surface(self):
+    """The element surface this store writes by 2D blocks where the body
+    asks for them (`Options.sycl_element_blocks`), or None: an operand of
+    the element with one (`element_blocks.surface`) written out of an image
+    of sixteen lanes a slot, its rows on the lanes, one element a lane, and
+    no mask of a stack's elements over the writes."""
+    from tensorforge.backend import elementmask
+    if (not element_blocks.asked(self._context)
+        or element_blocks.target_refusal(self._context) is not None):
+      return None
+    found = element_blocks.surface(self._dest)
+    if found is None or _split_axes_of(self._src) is not None:
+      return None
+    if (self._src.lead_dims != [0] or self._lead_width != 1
+        or self._num_threads != element_blocks.LANES
+        or self._src.lead_block(0) != element_blocks.LANES
+        or elementmask.active()[0] is not None):
+      return None
+    bbox = self._src.data_view.get_bbox()
+    if bbox.rank() != 2:
+      return None
+    span = element_blocks.LANES
+    lo, hi = bbox.lower()[0], bbox.upper()[0]
+    slots = range(lo // span, -(-hi // span))
+    if not any(element_blocks.slots_inside(found, self._dest_offset[0], s)
+               for s in slots):
+      return None
+    return found
+
+  def _block_loops(self, writer, found, loops, inner, src_bbox) -> bool:
+    """`loops` with the slots whose every lane this store writes today
+    written by 2D blocks: a slot of the loop, a whole slot handed over on
+    its own, a full-lane tail that writes its padding lanes' zeros (`pad`).
+    The values are today's -- the image's, the zero a column past the image
+    gets, the zero of a padding lane -- gathered a slot at a time and
+    written in messages of eight columns (`element_blocks.chunks`).  A slot
+    a guard holds to some of its lanes -- the ragged slot of an
+    accumulation, which promises nothing of the rest -- is written as
+    today, lane by lane, and so is a slot whose 16 rows leave the operand's
+    columns.  The message writes its block whole and stands under no
+    guard: the lead loop puts the slots that need one under it, and those
+    are the ones written as today.
+
+    False, and nothing built, where the bound buffer is not in this body."""
+    from tensorforge.backend.pir import block_reads
+    from tensorforge.backend.pir.core import INDEX, ScalarType, Value
+    base = self._dest.pir_buffer(writer)
+    if base is None or not hasattr(writer, 'pack'):
+      return False
+    lead, cols = loops
+    span = element_blocks.LANES
+    first_row, first_col = self._dest_offset[0], self._dest_offset[1]
+    c_lo, c_hi = cols.start, cols.end
+    if not (0 <= c_lo + first_col and c_hi + first_col <= found.columns):
+      return False
+    pieces = element_blocks.chunks(c_lo, c_hi)
+    elem = self._dest.get_fptype()
+    start, end = lead.start, lead.end
+    loop_lo, loop_hi = -(-start // span), end // span
+    loop_inside = (loop_lo < loop_hi
+                   and element_blocks.slots_inside(found, first_row, loop_lo)
+                   and element_blocks.slots_inside(found, first_row,
+                                                   loop_hi - 1))
+
+    def whole(index, slot) -> bool:
+      if getattr(index, 'first', 0):
+        return False
+      if index.valid is not None:
+        return bool(index.pad)
+      if isinstance(slot, int):
+        return start <= slot * span and (slot + 1) * span <= end
+      return True
+
+    def slot_level(v):
+      index = v[0]
+      slot = index._nonlead
+      static = isinstance(slot, (int, np.integer))
+      slot = int(slot) if static else slot
+      inside = (element_blocks.slots_inside(found, first_row, slot)
+                if static else loop_inside and isinstance(index._value, Value))
+      if not (inside and whole(index, slot)):
+        Loop(cols.var, c_lo, c_hi, cols.step, cols.unroll).write(
+            self._context, writer, lambda w: inner(v + w))
+        return
+      values = {}
+
+      def at(w):
+        indices = v + w
+        q = int(w[0]._value)
+        if src_bbox.lower()[1] <= q < src_bbox.upper()[1]:
+          value = self._src.load(writer, self._context, None, indices, False)
+        else:
+          value = writer.const(0)
+        if index.valid is not None:
+          held = self._dest._valid_access(
+              writer, [add_offset(x, self._dest_offset[i])
+                       for i, x in enumerate(indices)],
+              index.valid).get('predicate')
+          if held is not None:
+            value = writer.op('select', ScalarType(elem), held, value,
+                              writer.const(0), hint='edata')
+        values[q] = value
+
+      Loop(cols.var, c_lo, c_hi, cols.step, unroll=True).write(
+          self._context, writer, at)
+      if static:
+        x = slot * span + first_row
+      else:
+        x = writer.op('mul', INDEX, index._value, span, hint='eslot')
+        if first_row:
+          x = writer.op('add', INDEX, x, first_row, hint='eslot')
+      for q, rows in pieces:
+        part = [values[c] for c in range(q, q + rows)]
+        share = (part[0] if rows == 1 else
+                 writer.pack(ScalarType(elem, rows), *part, hint='eshare'))
+        block_reads.store_block2d(
+            writer, base, x, q + first_col, share, rows=rows, cols=span,
+            width=found.pitch, height=found.columns, pitch=found.pitch,
+            element=True)
+
+    lead.write(self._context, writer, slot_level)
+    return True
 
   def _store_split(self, writer, split, src_bbox, dest_bbox,
                    allow_nontemporal) -> None:

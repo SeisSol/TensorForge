@@ -49,6 +49,9 @@ SYM = Path('src/tensorforge/backend/symbol.py')
 HIP = Path('src/tensorforge/include/tensorforge_device/hip.h')
 EMIT = Path('src/tensorforge/backend/pir/emit.py')
 BLOCKS = Path('src/tensorforge/backend/pir/block_reads.py')
+SPMD_H = Path('src/tensorforge/include/tensorforge_device/sycl_spmd.h')
+EBLOCKS = Path('src/tensorforge/backend/instructions/memory/element_blocks.py')
+STORE = Path('src/tensorforge/backend/instructions/memory/store.py')
 ABSTR = Path('src/tensorforge/backend/instructions/abstract_instruction.py')
 EQUIV = Path('tools/access_equiv.py')
 ALLOC = Path('src/tensorforge/backend/pir/allocate.py')
@@ -3895,11 +3898,154 @@ GROUPS = {
     ]),
     # Intel's 2D block reads (`block_reads.load_block2d`): each limit its own
     # answer, the lanes' share, and both lowerings of the one statement.
+    # An element's operands by 2D blocks (`Options.sycl_element_blocks`): the
+    # check, the fallback, the reads the IR forwards, the slots a guard holds,
+    # the promise and the surfaces.
+    'elementblocks': ('tests/test_sycl_element_blocks.py', [
+        ('the blocks without the element\'s check',
+         sub(BATCHLOOP, '        cond = self._element_check(writer, plan.bindings, plan.checked)\n'
+                    '        if cond is None:\n'
+                    '            with element_blocks.building(self._context, plan.unchecked):\n',
+             '        cond = None\n'
+             '        if cond is None:\n'
+             '            with element_blocks.building(self._context, plan.chosen):\n', 1)),
+        ('the fallback built with the blocks',
+         sub(BATCHLOOP, '        with branch.otherwise():\n'
+                    '            with element_blocks.building(self._context, plan.unchecked):\n',
+             '        with branch.otherwise():\n'
+             '            with element_blocks.building(self._context, plan.chosen):\n', 1)),
+        ('a read after a write by a block',
+         sub(BATCHLOOP, "            if kind == 'load' and at > first_store.get(symbol.name, at):\n"
+                    '                continue\n', '', 1)),
+        ('a write a read follows by a block',
+         sub(BATCHLOOP, "            if kind == 'store' and at < last_load.get(symbol.name, at):\n"
+                    '                continue\n', '', 1)),
+        ('a transfer of a loop inside the body by blocks',
+         sub(BATCHLOOP, '            if not top or symbol.name not in bound:\n',
+             '            if symbol.name not in bound:\n', 1)),
+        ('the promise ignored',
+         sub(EBLOCKS, '  return not (promise > 0 and promise % found.grain == 0)\n',
+             '  return True\n', 1)),
+        ('the promise taken for any alignment',
+         sub(EBLOCKS, '  return not (promise > 0 and promise % found.grain == 0)\n',
+             '  return not promise > 0\n', 1)),
+        ('a surface on a column of whole words',
+         sub(EBLOCKS, '  if pitch < BASE_ALIGN or pitch % 16:\n', '  if pitch % 4:\n', 1)),
+        ('the grain of a pitch on whole cache lines only',
+         sub(EBLOCKS, '    return min(self.pitch & -self.pitch, BASE_ALIGN)\n',
+             '    return BASE_ALIGN\n', 1)),
+        ('a slot sticking out of its columns',
+         sub(EBLOCKS, '  return start >= 0 and start + LANES <= found.rows\n',
+             '  return start >= 0 and start < found.rows\n', 1)),
+        ('a slot of a guard written whole',
+         sub(STORE, '      if isinstance(slot, int):\n'
+                    '        return start <= slot * span and (slot + 1) * span <= end\n',
+             '      if isinstance(slot, int):\n'
+             '        return True\n', 1)),
+        ('auto taken for on',
+         sub(EBLOCKS, "                 False) is True\n", "                 False) in (True, 'auto')\n", 1)),
+        ('the explicit vector given blocks',
+         sub(EBLOCKS, "  if not getattr(target, 'sycl', False) or getattr(target, 'explicit_simd',\n",
+             "  if not getattr(target, 'sycl', False) or False and getattr(target, 'explicit_simd',\n", 1)),
+        ('no header for an element block',
+         sub(Path('src/tensorforge/common/vm/lexic/sycl_lexic.py'),
+             '           or self.block2d or self.element_blocks)\n',
+             '           or self.block2d)\n', 1)),
+        ('the check spelled at another pitch',
+         sub(Path('src/tensorforge/common/vm/lexic/sycl_lexic.py'),
+             "    return (f'tensorforge::elementBlocks<{pitch}>(item.get_sub_group(), '\n",
+             "    return (f'tensorforge::elementBlocks<64>(item.get_sub_group(), '\n", 1)),
+        ('the blocks streamed without the cache option',
+         sub(Path('src/tensorforge/common/context.py'),
+             "          2 if getattr(self._options, 'sycl_element_streaming', False) else 0)\n",
+             '          0)\n', 1)),
+        ('an IGC without the cache-opts forms taken for one with them',
+         sub(EBLOCKS, '  if toolchain.intel_block2d_cacheopts(device) is False:\n',
+             '  if False:\n', 1)),
+        ('streaming blocks without asking the IGC',
+         sub(BATCHLOOP, '            element_blocks.cacheopts_refusal(self._context,\n'
+                        "                                             'sycl_element_streaming')\n",
+             '            pass\n', 1)),
+        ('2D prefetches without asking the IGC',
+         sub(Path('src/tensorforge/backend/instructions/abstract_instruction.py'),
+             "        element_blocks.cacheopts_refusal(context, 'sycl_element_prefetch')\n",
+             '        pass\n', 1)),
+        ('the IGC asked for 2D prefetches without element blocks',
+         sub(Path('src/tensorforge/backend/instructions/abstract_instruction.py'),
+             '                      and element_blocks.asked(context)\n', '', 1)),
+        ('the next element\'s I hinted a lane under the 2D prefetch',
+         sub(Path('src/tensorforge/backend/instructions/ptr_manip.py'),
+             "    return (('prefetch2d', True),)\n", '    return ()\n', 1)),
+        ('the hints of a versioned body read off its block body',
+         sub(Path('src/tensorforge/backend/pir/prefetch.py'),
+             '            out.extend(s.regions[1].body)\n', '            out.append(s)\n', 1)),
+        ('a 2D prefetch of one element\'s worth',
+         sub(Path('src/tensorforge/backend/pir/emit.py'),
+             "                nbytes = (int(s.attr('elems', 1))\n", '                nbytes = (1\n', 1)),
+        ('the cache-opts probe answering yes to an undefined form',
+         sub(Path('src/tensorforge/toolchain.py'),
+             '                    answer = bool(tables) and not any(\n'
+             '                        builtin in name\n',
+             '                    answer = bool(tables) or not any(\n'
+             '                        builtin in name\n', 1)),
+    ]),
+
     'block2d': ('tests/test_block2d.py', [
-        ('a transposed store refused as any store',
-         sub(BLOCKS, "        if transpose:\n"
-                     "            return 'the hardware has no transposed 2D block store'\n",
+        ('a transposed store taken for a read',
+         sub(BLOCKS, "    if store and transpose:\n"
+                     "        return 'the hardware has no transposed 2D block store'\n",
              '', 1)),
+        ('a store of 16 rows taken',
+         sub(BLOCKS, 'BLOCK2D_STORE_ROWS = (1, 2, 4, 8)\n',
+             'BLOCK2D_STORE_ROWS = (1, 2, 4, 8, 16)\n', 1)),
+        ('a store of another width than the lanes',
+         sub(BLOCKS, '    if store and (cols != BLOCK2D_LANES or rows not in BLOCK2D_STORE_ROWS):\n',
+             '    if store and rows not in BLOCK2D_STORE_ROWS:\n', 1)),
+        ('an element surface on the caller\'s alignment',
+         sub(BLOCKS, '    return SURFACE_BASE_ALIGN if element else align\n',
+             '    return align\n', 1)),
+        ('an element surface on any pitch',
+         sub(BLOCKS, '    return SURFACE_BASE_ALIGN if element else align\n',
+             '    return SURFACE_BASE_ALIGN if element else align\n'
+             '    if element:\n        pass\n', 1)),
+        ('the write recorded against no memory',
+         sub(BLOCKS, '        accesses=(Access(Effect.WRITE, MemSpace.GLOBAL,\n'
+                     '                         builder.alias_root(base)),),\n'
+                     "        attrs=(('block2d_store', True), ('shape', (rows, cols)),\n",
+             "        accesses=(),\n"
+             "        attrs=(('block2d_store', True), ('shape', (rows, cols)),\n", 1)),
+        ('the write moved by the passes',
+         sub(BLOCKS, '        op=Op.CALL, target=(), args=(base, x, y, value), pure=False,\n'
+                     '        movable=False, effect=Effect.WRITE,\n',
+             '        op=Op.CALL, target=(), args=(base, x, y, value), pure=False,\n'
+                     '        movable=True, effect=Effect.WRITE,\n', 1)),
+        ('a write of fewer elements than rows',
+         sub(BLOCKS, '    if length != rows:\n', '    if False:\n', 1)),
+        ('the write told apart from no call',
+         sub(BLOCKS, "    return s.op == Op.CALL and bool(s.attr('block2d_store'))\n",
+             "    return s.op == Op.CALL\n", 1)),
+        ('the element read spelled as a surface read',
+         sub(EMIT, "        if s.attr('element'):\n"
+                   "            # One element's own storage (`block_reads.load_block2d`): the\n",
+             "        if False:\n"
+             "            # One element's own storage (`block_reads.load_block2d`): the\n", 1)),
+        ('the element write spelled as a surface write',
+         sub(EMIT, "        if s.attr('element'):\n"
+                   "            write = (getattr(lex, 'element_block2d_store', None)\n",
+             "        if False:\n"
+             "            write = (getattr(lex, 'element_block2d_store', None)\n", 1)),
+        ('SPMD writing a block with a sub-group of 32',
+         sub(EMIT, "        if stated != lanes or lanes != getattr(self.context, 'mult_lanes',\n",
+             "        if stated != lanes or False and lanes != getattr(self.context, 'mult_lanes',\n", 1)),
+        ('the element surface\'s inverse taken as one',
+         sub(SPMD_H, '  static constexpr int inverse = (Pitch / grain) % period;\n',
+             '  static constexpr int inverse = 1;\n', 1)),
+        ('the element surface on whole cache lines only',
+         sub(SPMD_H, '  static constexpr int grain = (Pitch & -Pitch) < 64 ? (Pitch & -Pitch) : 64;\n',
+             '  static constexpr int grain = 64;\n', 1)),
+        ('the element surface shifted by the pitch\'s grains',
+         sub(SPMD_H, '    return static_cast<int>((((address & 63) / grain) * inverse) &\n',
+             '    return static_cast<int>((((address & 63) / grain)) &\n', 1)),
         ('elements through a table taken',
          sub(BLOCKS, '    table = elements and kind is not None and kind.follows_pointer()\n',
              '    table = False\n', 1)),
@@ -3935,8 +4081,8 @@ GROUPS = {
         ('a pitch of eight-byte steps',
          sub(BLOCKS, 'SURFACE_PITCH_ALIGN = 16\n', 'SURFACE_PITCH_ALIGN = 8\n', 1)),
         ('a surface in shared memory',
-         sub(BLOCKS, '    if space is not MemSpace.GLOBAL:\n        raise IRError(f\'a 2D block read of',
-             '    if False:\n        raise IRError(f\'a 2D block read of', 1)),
+         sub(BLOCKS, '    if space is not MemSpace.GLOBAL:\n        raise IRError(f\'a 2D block {what} of',
+             '    if False:\n        raise IRError(f\'a 2D block {what} of', 1)),
         ('the transposed share counted in rows',
          sub(BLOCKS, '    count = cols if transpose else rows\n    v = builder.value(',
              '    count = rows\n    v = builder.value(', 1)),
@@ -3986,7 +4132,8 @@ GROUPS = {
                          "    return (f'tensorforge::blockLoad2d",
              "    flag = 'false'\n    return (f'tensorforge::blockLoad2d", 1)),
         ('no header for a 2D block',
-         sub(SYCL_LEXIC, '           or self.block2d)\n', '           )\n', 1)),
+         sub(SYCL_LEXIC, '           or self.block2d or self.element_blocks)\n',
+             '           or self.element_blocks)\n', 1)),
         ('a builtin left undeclared',
          sub(Path('src/tensorforge/include/tensorforge_device/sycl_spmd.h'),
              'TENSORFORGE_BLOCK2D_READ(intel_sub_group_2d_block_read_transpose_32b_16r4x1c)\n',

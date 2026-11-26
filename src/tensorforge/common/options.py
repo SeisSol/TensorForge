@@ -1563,6 +1563,88 @@ declare('sycl_dpas_block2d',
             'allocation took the blocks to 7.7 kB of spill against the '
             'tiles\' 2.8.  Off by default.')
 
+declare('sycl_element_blocks',
+        default=False,
+        env='TF_SYCL_ELEMENT_BLOCKS',
+        parse=parse_bool_or_auto,
+        doc='Under SPMD SYCL for Intel (oneAPI) with a sub-group of 16 that is '
+            'the multiplication, read and write an element\'s operands in '
+            'global memory -- I, Q, the derivatives -- by 2D block messages '
+            'of the sub-group over the element\'s own storage: its columns '
+            'the rows of a surface, a lane slot of 16 rows and eight columns '
+            'one message, the ninth another (`tensorforge::elementBlock2d`, '
+            '`elementBlock2dStore`, `cl_intel_subgroup_2d_block_io`), where '
+            'each (slot, column) is a message of its own.  The surface is the '
+            'element\'s, so no stride between elements is assumed and a '
+            'shuffled or repeating pointer table is read as it is.  Only F32 '
+            'operands stored dense in their box, a column at least 64 bytes '
+            'and a whole number of 16, a slot inside its column; a write only '
+            'of slots every lane of which it writes today (whole slots, '
+            'full-lane tails), an accumulation\'s ragged slots keep their '
+            'lanes\' writes.  The messages want a 64-byte base: the element '
+            'needs only the alignment its pitch and 64 share -- 32 bytes for '
+            'SeisSol\'s padding to 32 on PVC -- and the surface starts the '
+            'pitches before it that are on the boundary.  That is checked on '
+            'the device, once an element (`tensorforge::elementBlocks`), and '
+            'the element body is built twice, the blocks behind the check and '
+            'today\'s reads and writes behind its failure: a branch around '
+            'each transfer kept a fifth of the instructions the blocks save '
+            '(SeisSol\'s order-6 volume) and two copies of the body cost the '
+            'static code twice and IGC\'s time 1.3 to 2 times (order-8 '
+            '`localFluxAll` 60 to 113 s, IGC 2.41.5) -- a cost of SeisSol\'s '
+            'build should the option ever be a default.  Without a check '
+            'where `element_base_align` promises the alignment.  `auto`: off, '
+            'until measured.  Off by default.')
+
+declare('sycl_element_streaming',
+        default=False,
+        env='TF_SYCL_ELEMENT_STREAMING',
+        parse=parse_bool,
+        doc='Under `sycl_element_blocks`, the element blocks L1-uncached: reads '
+            'L3-cached, writes written back at L3 (LSC cache options 2), so '
+            'that the operator tiles the element\'s products read keep L1 -- '
+            'through IGC\'s cache-opts forms of the 2D block messages '
+            '(`__builtin_IB_subgroup_block_{read,write}_flat_cacheopts_u32_*`), '
+            'which the extension\'s builtins have no cache option for and an '
+            'annotated pointer does not reach.  IGC-internal names that IGC '
+            '2.41.5 and 2.42.6 resolve: refused, naming the reason, where the '
+            '`ocloc` on PATH does not (`toolchain.intel_block2d_cacheopts`), '
+            'never a quiet return to the plain messages.  The per-lane '
+            'transfers are as they are.  Off by default.')
+
+declare('sycl_element_prefetch',
+        default=False,
+        env='TF_SYCL_ELEMENT_PREFETCH',
+        parse=parse_bool,
+        doc='Under `sycl_element_blocks` and `prefetch_data`, the next '
+            'element\'s operands that have an element surface hinted by 2D '
+            'block prefetches over their storage, where `prefetch_data` asks '
+            'for a line a lane: rows of 256 bytes from the 64-byte line the '
+            'element starts in, up to 32 rows a message, and what is left of '
+            'the last row by pieces of 64 and 32 bytes -- the widths a 2D '
+            'block prefetch takes -- L1 uncached and L3 cached (`tensorforge::'
+            'elementPrefetch2d`).  Every element is hinted, aligned or not.  '
+            'SeisSol\'s I with columns of 64 and 128 floats: two messages '
+            'against nine and fifteen; of 56 and 120 (its PVC layout): one or '
+            'seven against six, two or five against fifteen, by where the '
+            'element starts.  Through IGC\'s prefetch forms, refused as '
+            '`sycl_element_streaming` is where the `ocloc` on PATH does not '
+            'resolve them.  Off by default.')
+
+declare('element_base_align',
+        default=0,
+        env='TF_ELEMENT_BASE_ALIGN',
+        parse=parse_int,
+        doc='What the caller promises of every element\'s operand pointers, '
+            'the extra offset included, in bytes: aligned to this many, 0 for '
+            'no promise.  Read by `sycl_element_blocks`: an operand whose '
+            'surface needs no more alignment than the promise is read and '
+            'written by blocks without the check, and where that holds of '
+            'every such operand of a body the body is built once.  32 is what '
+            'SeisSol\'s layout states on PVC: its buckets start on 32 bytes or '
+            'more, and an element\'s tensors are padded to 32 '
+            '(`Vectorsize`).  Nothing checks a promise on the device.')
+
 declare('lead_split',
         rule=lambda target: (2 if (target.hw.vendor == 'intel'
                                    and target.backend == 'oneapi'

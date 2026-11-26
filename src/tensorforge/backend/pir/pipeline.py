@@ -300,8 +300,10 @@ class Prefetch(Pass):
 
     def __init__(self, scratch, pointers: bool = False, data: bool = False,
                  level: str = 'l2', line_bytes: int = 128,
-                 report: Optional[List[str]] = None, spread: int = 1):
+                 report: Optional[List[str]] = None, spread: int = 1,
+                 surfaces: bool = False):
         self._scratch = scratch
+        self._surfaces = surfaces
         self._pointers = pointers
         self._data = data
         self._level = level
@@ -319,7 +321,9 @@ class Prefetch(Pass):
                                  line_bytes=self._line_bytes,
                                  report=self._report,
                                  spread=(1 if pc.explicit_simd
-                                         else self._spread))
+                                         else self._spread),
+                                 surfaces=(self._surfaces
+                                           and not pc.explicit_simd))
 
 
 class CarryTrips(Pass):

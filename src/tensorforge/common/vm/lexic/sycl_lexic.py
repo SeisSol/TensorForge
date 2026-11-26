@@ -65,6 +65,14 @@ class SyclLexic(Lexic):
     #: where the DPAS path reads its operator copies so
     #: (`Options.sycl_dpas_block2d`).
     self.block2d = False
+    #: Whether a body reads and writes an element's operands by 2D blocks
+    #: (`Options.sycl_element_blocks`, `tensorforge::elementBlock2d`), which
+    #: the context sets.
+    self.element_blocks = False
+    #: The LSC cache option the element blocks go through IGC's cache-opts
+    #: forms with (`Options.sycl_element_streaming`), 0 for the extension's
+    #: own messages; the context sets it.
+    self.element_cache = 0
     #: Whether a kernel may call DPAS from the SPMD lowering
     #: (`Options.sycl_dpas`, `tensorforge::dpasTF32`), which the context sets
     #: as it sets the split above: the call is declared in the header that
@@ -419,12 +427,13 @@ class SyclLexic(Lexic):
       headers = ['sycl/sycl.hpp',
                  'sycl/ext/intel/experimental/grf_size_properties.hpp']
       if ((self.split_broadcast or self.dpas or self.block_runs
-           or self.block2d)
+           or self.block2d or self.element_blocks)
           and self._sub_groups is not None):
         # `tensorforge::split_broadcast`, which `broadcast` writes,
         # `tensorforge::dpasTF32`, which the matrix path does,
-        # `tensorforge::subGroupRun`, which a run reads through, and
-        # `tensorforge::subGroupBlock2d`, a 2D block.
+        # `tensorforge::subGroupRun`, which a run reads through,
+        # `tensorforge::subGroupBlock2d`, a 2D block, and
+        # `tensorforge::elementBlock2d`, an element's.
         headers.append('tensorforge_device/sycl_spmd.h')
       return headers
     return ['sycl/sycl.hpp']
@@ -585,6 +594,44 @@ class SyclLexic(Lexic):
             f'tensorforge::subGroupBlock2d<{elem}, {rows}, {cols}, {flag}>('
             f'item.get_sub_group(), {base}, {width}, {height}, {pitch}, '
             f'{x}, {y})')
+
+  def sub_group_block2d_store(self, elem, rows, cols, base, width, height,
+                              pitch, x, y, value):
+    if self._explicit_simd or self._sub_groups is None or cols != 16:
+      return None
+    return (f'tensorforge::subGroupBlock2dStore<{elem}, {rows}>('
+            f'item.get_sub_group(), {base}, {width}, {height}, {pitch}, '
+            f'{x}, {y}, {value});')
+
+  def element_block2d(self, elem, rows, base, pitch, columns, x, y):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    kind = elem if rows == 1 else f'sycl::vec<{elem}, {rows}>'
+    cache = f', {self.element_cache}' if self.element_cache else ''
+    return (kind,
+            f'tensorforge::elementBlock2d<{elem}, {rows}, {pitch}, {columns}'
+            f'{cache}>(item.get_sub_group(), {base}, {x}, {y})')
+
+  def element_block2d_store(self, elem, rows, base, pitch, columns, x, y,
+                            value):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    cache = f', {self.element_cache}' if self.element_cache else ''
+    return (f'tensorforge::elementBlock2dStore<{elem}, {rows}, {pitch}, '
+            f'{columns}{cache}>(item.get_sub_group(), {base}, {x}, {y}, '
+            f'{value});')
+
+  def element_prefetch2d(self, nbytes, base):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    return (f'tensorforge::elementPrefetch2d<{nbytes}>('
+            f'item.get_sub_group(), {base});')
+
+  def element_blocks_check(self, pitch, base):
+    if self._explicit_simd or self._sub_groups is None:
+      return None
+    return (f'tensorforge::elementBlocks<{pitch}>(item.get_sub_group(), '
+            f'{base})')
 
   def block2d_load(self, elem, width, height, transpose, base, surface_width,
                    surface_height, pitch, x, y):

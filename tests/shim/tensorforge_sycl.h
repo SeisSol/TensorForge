@@ -315,6 +315,34 @@ subGroupBlock2d(const sycl::sub_group &, const T *, int, int, int, int, int) {
   return {};
 }
 
+// `tensorforge_device/sycl_spmd.h`: a 2D block written by a sub-group of 16
+// (`pir.block_reads.store_block2d`), each work-item its column of `Rows` in
+// any vector that indexes them.
+template <typename T, int Rows, typename Share>
+inline void subGroupBlock2dStore(const sycl::sub_group &, T *, int, int, int,
+                                 int, int, Share) {}
+
+// `tensorforge_device/sycl_spmd.h`: an element's own storage as a 2D surface
+// (`Options.sycl_element_blocks`): the check of its address, a block read and
+// a block write, with the cache option of `Options.sycl_element_streaming`,
+// and the 2D block prefetch of `Options.sycl_element_prefetch`.  The
+// signatures; the arithmetic is the header's.
+template <int Pitch>
+inline bool elementBlocks(const sycl::sub_group &, const void *) {
+  return true;
+}
+template <typename T, int Rows, int Pitch, int Columns, int Cache = 0>
+inline std::conditional_t<Rows == 1, T, sycl::vec<T, Rows>>
+elementBlock2d(const sycl::sub_group &, const T *, int, int) {
+  return {};
+}
+template <typename T, int Rows, int Pitch, int Columns, int Cache = 0,
+          typename Share>
+inline void elementBlock2dStore(const sycl::sub_group &, T *, int, int, Share) {
+}
+template <int Bytes>
+inline void elementPrefetch2d(const sycl::sub_group &, const void *) {}
+
 // `tensorforge_device/sycl_spmd.h`: DPAS from the SPMD lowering
 // (`Options.sycl_dpas`).  The signatures, which is what parsing can check:
 // the A fragment four floats a work-item, B and the accumulator eight, the
