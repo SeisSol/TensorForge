@@ -6904,9 +6904,9 @@ GROUPS = {
              '            if not pieces:\n                span = (0, stages[p].width)\n', 1)),
         ("the spans the options ask for not the tile's on wgmma",
          sub(ME_GROUP, "        tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                        spans_asked(context),\n",
+                       "                        spans_asked(context), groups,\n",
              "        tile = TileRows('wgmma', width, max(1, per), tiles,\n"
-                       "                        'dense',\n", 1)),
+                       "                        'dense', groups,\n", 1)),
         ("the spans kept where known zeros are not skipped",
          sub(ME_GROUP, "    if not getattr(options, 'skip_known_zeros', True):\n        return 'dense'\n", '', 1)),
         ("an inactive group taken",
@@ -7037,9 +7037,9 @@ GROUPS = {
          sub(BUILD, '            widest = max(int(w) for w in widths)\n',
              '            widest = min(int(w) for w in widths)\n', 1)),
         ("the groups the options ask for not the tile's on wgmma",
-         sub(ME_GROUP, "                        tile_groups('wgmma', context, tiles,\n"
-                       "                                    step.rows[1] - step.rows[0]),\n",
-             "                        'loop',\n", 1)),
+         sub(ME_GROUP, "        groups = tile_groups('wgmma', context, tiles,\n"
+                       "                             step.rows[1] - step.rows[0])\n",
+             "        groups = 'loop'\n", 1)),
         ("a block's products at their own spans in the loop",
          sub(ME_GROUP, "        if pieces and tile is not None and tile.groups == 'loop':\n",
              '        if False:\n', 1)),
@@ -7057,10 +7057,10 @@ GROUPS = {
         ("the epilogue reading D ahead of its products",
          sub(ME_SECTION, '            b.ring_take(dring, dslot, dparity)\n', '', 1)),
         ("the products committed onto D's empty side",
-         sub(ME_SECTION, "            b.commit_group('tcgen05', object=dring, issue=lane0, slot=dslot,\n"
-                         "                           side='full')\n",
-             "            b.commit_group('tcgen05', object=dring, issue=lane0, slot=dslot,\n"
-             "                           side='empty')\n", 1)),
+         sub(ME_SECTION, "                b.commit_group('tcgen05', object=dring, issue=issue,\n"
+                         "                               slot=dslot, side='full')\n",
+             "                b.commit_group('tcgen05', object=dring, issue=issue,\n"
+             "                               slot=dslot, side='empty')\n", 1)),
         ("the epilogue reading the first slot of D",
          sub(ME_SECTION, '            _tcgen05_role_epilogue(trip, step, M, base=dbase)\n',
              '            _tcgen05_role_epilogue(trip, step, M, base=None)\n', 1)),
@@ -7411,6 +7411,94 @@ GROUPS = {
         ("wgmma's chunks without their ring's slots",
          sub(ME_GROUP, '                                  (chunk, cslots))\n',
              '                                  (chunk, 0))\n', 1)),
+    ]),
+    # The high-order tile's mma warp on tcgen05 issuing by the lane
+    # elect.sync picks, the trip in one branch of its own (`Options.
+    # matrix_issue` `elect`, `element_group.tile_issue`, `kernel_eval.
+    # Interp._elect`).
+    # The tests of the issue alone: its mutants reach nothing the
+    # tile's other tests build.
+    'hiissue': (' '.join(f'tests/test_hiorder_tile.py::{t}' for t in (
+        'test_the_issue_options_parse',
+        'test_the_issue_the_options_ask_for',
+        'test_the_tables_the_options_ask_for',
+        'test_the_loop_s_tables_in_constant_memory',
+        'test_the_elect_issue_text',
+        'test_the_oracle_elects_a_converged_warp_s_lowest_lane',
+        'test_the_elect_issue_on_the_oracle',
+        'test_the_elect_issue_over_o8_s_blocks_on_the_oracle',
+        'test_the_elect_issue_builds',
+        )) + ' -n 6', [
+        ("the issue the first lane's under elect",
+         sub(ME_GROUP, "    return issue_asked(context) if engine == 'tcgen05' else 'thread'\n",
+             "    return 'thread'\n", 1)),
+        ("wgmma's tile taking elect",
+         sub(ME_GROUP, "    return issue_asked(context) if engine == 'tcgen05' else 'thread'\n",
+             "    return issue_asked(context)\n", 1)),
+        ("elect by default",
+         sub(OPTIONS, "declare('matrix_issue',\n        default='thread',\n",
+             "declare('matrix_issue',\n        default='elect',\n", 1)),
+        ("the elected lane's trip in no branch of its own",
+         sub(ME_SECTION, '                branch = b.if_(issue)\n',
+             '                branch = contextlib.nullcontext()\n', 1)),
+        ("the branch the first lane's under elect",
+         sub(ME_SECTION, "                issue = b.rawexpr('tensorforge::electOne()', type_=BOOL,\n"
+                         "                                  hint='elect', uniform=Uniformity.LANE,\n"
+                         "                                  crosslane=True)\n",
+             '                issue = lane0\n', 1)),
+        ("the group loop's products under the first lane's predicate",
+         sub(ME_SECTION, '                    _tcgen05_groups(trip, step, fold, operator, base, trips,\n'
+                         '                                    issue, d_base=dbase)\n',
+             '                    _tcgen05_groups(trip, step, fold, operator, base, trips,\n'
+                         '                                    lane0, d_base=dbase)\n', 1)),
+        # Not "B's last chunks given back by the first lane": the tile's
+        # hold on tcgen05 is 1, and no chunk is left behind the blocks to
+        # give back -- an equivalent mutant.
+        ("D's commit by the first lane",
+         sub(ME_SECTION, "                b.commit_group('tcgen05', object=dring, issue=issue,\n",
+             "                b.commit_group('tcgen05', object=dring, issue=lane0,\n", 1)),
+        ("every lane elected on the device",
+         sub(CUDA_H, '               "elect.sync _|e, 0xffffffff;\\n"\n',
+             '               "setp.eq.u32 e, 0, 0;\\n"\n', 1)),
+        ("the oracle electing the warp's highest lane",
+         sub(ORACLE, "            picked = run.wave_cache[('elect', warp)] = min(lanes)\n",
+             "            picked = run.wave_cache[('elect', warp)] = max(lanes)\n", 1)),
+        ("the oracle electing in a warp short of lanes",
+         sub(ORACLE, "            if len(lanes) != Races.WARP:\n",
+             "            if not lanes:\n", 1)),
+        ("the oracle electing every lane",
+         sub(ORACLE, '        return self.lane == picked\n', '        return True\n', 1)),
+        ("the oracle not reading the elect",
+         sub(ORACLE, "    e = re.sub(r'\\btensorforge::electOne\\s*\\(\\s*\\)', 'ELECT()', e)\n", '', 1)),
+        ("the comment silent on the elect",
+         sub(ME_GROUP, "    return ' -- the lane elect.sync picks, the trip in one branch of its own'\n",
+             "    return ''\n", 1)),
+        ("wgmma's tile silent on the elect it declines",
+         sub(ME_GROUP, '    if asked != section.tile.issue:\n',
+             '    if False:\n', 1)),
+        ("the group loop's tables in global memory under constant",
+         sub(ME_GROUP, '    return tables_asked(context)\n', "    return 'device'\n", 1)),
+        ("wgmma's loop taking constant tables",
+         sub(ME_GROUP, "    if engine != 'tcgen05' or groups != 'loop':\n",
+             "    if groups != 'loop':\n", 1)),
+        ("the written-out blocks taking constant tables",
+         sub(ME_GROUP, "    if engine != 'tcgen05' or groups != 'loop':\n",
+             "    if engine != 'tcgen05':\n", 1)),
+        ("wgmma's tile silent on the tables it declines",
+         sub(ME_GROUP, "    if tables != 'device':\n", '    if False:\n', 1)),
+        ("the comment silent on the constant tables",
+         sub(ME_GROUP, "            f'width' + (', its tables in constant memory'\n",
+             "            f'width' + (''\n", 1)),
+        ("the group loop reading its tables from global memory",
+         sub(ME_SECTION, "    space = 'constant' if trip.section.tile.tables == 'constant' else None\n",
+             '    space = None\n', 1)),
+        ("the constant tables named as global memory's",
+         sub(ME_SECTION, "    if space == 'constant':\n        prefix += 'c'\n", '', 1)),
+        ("the definitions dropping a table's space",
+         sub(GEN, '      space = entry[3] if len(entry) > 3 else None\n', '      space = None\n', 1)),
+        ("CUDA's constant tables in global memory",
+         sub(CUDA_LEXIC, "    storage = '__constant__' if space == 'constant' else '__device__'\n",
+             "    storage = '__device__'\n", 1)),
     ]),
     # The high-order tile's defaults on tcgen05, as a GB200 measured them
     # (`Options.matrix_bands`, `Options.matrix_output` `auto`,

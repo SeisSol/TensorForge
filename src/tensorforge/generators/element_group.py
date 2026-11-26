@@ -1990,6 +1990,14 @@ class TileRows:
     #: How the epilogue adds D into the output (`tile_output`,
     #: `Options.matrix_output`): `red`, or on tcgen05 `bulk` or `box`.
     output: str = 'red'
+    #: tcgen05's: which thread of the mma warp issues (`Options.
+    #: matrix_issue`, `tile_issue`): the warp's first lane, each wait,
+    #: product and commit under its predicate (`thread`), or the lane
+    #: `elect.sync` picks, the trip in one branch of its own (`elect`).
+    issue: str = 'thread'
+    #: tcgen05's group loop: where its tables are (`Options.tile_tables`,
+    #: `tile_tables`), global memory (`device`) or constant memory.
+    tables: str = 'device'
 
     @property
     def granule(self) -> int:
@@ -2224,6 +2232,34 @@ def groups_asked(context) -> str:
     """How the options ask the tile to walk its groups (`Options.
     matrix_groups`): `auto`, `loop` or `unrolled`."""
     return getattr(context.get_user_options(), 'matrix_groups', 'unrolled')
+
+
+def issue_asked(context) -> str:
+    """Which thread of the mma warp the options ask to issue (`Options.
+    matrix_issue`): `thread` or `elect`."""
+    return getattr(context.get_user_options(), 'matrix_issue', 'thread')
+
+
+def tile_issue(engine: str, context) -> str:
+    """Which thread issues the tile's products on `engine` (`TileRows.
+    issue`): as the options ask on tcgen05, whose products a thread issues;
+    on wgmma the warpgroup's, `thread` as ever."""
+    return issue_asked(context) if engine == 'tcgen05' else 'thread'
+
+
+def tables_asked(context) -> str:
+    """Where the options ask the tile's group loop to read its tables
+    (`Options.tile_tables`): `device` or `constant`."""
+    return getattr(context.get_user_options(), 'tile_tables', 'device')
+
+
+def tile_tables(engine: str, groups: str, context) -> str:
+    """Where the tile's group loop on `engine` reads its tables
+    (`TileRows.tables`): as the options ask on tcgen05's loop; `device`
+    where the blocks are written out, which read none, and on wgmma."""
+    if engine != 'tcgen05' or groups != 'loop':
+        return 'device'
+    return tables_asked(context)
 
 
 #: The rows of D an element up to which `auto` writes wgmma's blocks out
@@ -2625,13 +2661,15 @@ def _wgmma_tile_search(section: GroupSection, context, budget: int,
     passes = tile_passes('wgmma', step.rows[1] - step.rows[0], context)
     lowered = tile = None
     for tiles in range(consumers, 0, -1):
+        groups = tile_groups('wgmma', context, tiles,
+                             step.rows[1] - step.rows[0])
         tile = TileRows('wgmma', width, max(1, per), tiles,
-                        spans_asked(context),
-                        tile_groups('wgmma', context, tiles,
-                                    step.rows[1] - step.rows[0]),
+                        spans_asked(context), groups,
                         passes=passes, chunk=chunk, cslots=cslots,
                         output=tile_output('wgmma', step.rows[1]
-                                           - step.rows[0], context))
+                                           - step.rows[0], context),
+                        issue=tile_issue('wgmma', context),
+                        tables=tile_tables('wgmma', groups, context))
         for operators in operator_slots_tried(context):
             for slots in PRODUCER_SLOTS + (1,):
                 lowered = tile_lowered(section, context, tile, slots,
@@ -2668,11 +2706,13 @@ def _tcgen05_tile_search(section: GroupSection, context, budget: int,
         # bands than slots, the slots a multiple of them.
         bands = min(int(getattr(context.get_user_options(), 'matrix_bands',
                                 TILE_BANDS)), aslots)
+        groups = tile_groups('tcgen05', context)
         tile = TileRows('tcgen05', width, elements, 1, spans_asked(context),
-                        tile_groups('tcgen05', context), bands, dslots,
+                        groups, bands, dslots,
                         tile_schedule('tcgen05', context),
                         bands * (aslots // bands), chunk=chunk, cslots=cslots,
-                        output=output)
+                        output=output, issue=tile_issue('tcgen05', context),
+                        tables=tile_tables('tcgen05', groups, context))
         for operators in operator_slots_tried(context):
             for ring in PRODUCER_SLOTS[1:] + (1,):
                 lowered = tile_lowered(section, context, tile, ring,
@@ -2728,7 +2768,8 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
                 f'{"s" if group.section.ring > 1 else ""}'
                 f'{_chunks_note(group.section)}, warp {c + 1} fills '
                 f'B\'s ring', _spans_note(group.section)] + \
-            _schedule_notes(group.section, context)
+            _schedule_notes(group.section, context) + \
+            _issue_notes(group.section, context)
     b = WARPGROUP_WARPS * tile.bands
     return [f'the high-order tile: {rows}; warps 0 to {b - 1} its star '
             f'bands, A into tensor memory; warps {b} to {b + 3} the epilogue, '
@@ -2739,8 +2780,35 @@ def tile_notes(group: 'ElementGroup', context) -> List[str]:
             f'{group.section.ring} slot'
             f'{"s" if group.section.ring > 1 else ""}'
             f'{_chunks_note(group.section)}, warp {b + 5} fills '
-            f'B\'s ring, warp {b + 6} issues', _spans_note(group.section)] + \
+            f'B\'s ring, warp {b + 6} issues{_issue_note(tile)}',
+            _spans_note(group.section)] + \
         _schedule_notes(group.section, context)
+
+
+def _issue_note(tile: TileRows) -> str:
+    """The kernel's word on which thread of the mma warp issues
+    (`TileRows.issue`), where it is not the warp's first lane."""
+    if tile.issue != 'elect':
+        return ''
+    return ' -- the lane elect.sync picks, the trip in one branch of its own'
+
+
+def _issue_notes(section: GroupSection, context) -> List[str]:
+    """Why wgmma's tile declined tcgen05's levers of the issue the
+    options ask for (`Options.matrix_issue`, `Options.tile_tables`): its
+    products are the warpgroup's, and its loop's tables not their
+    operands."""
+    notes = []
+    asked = issue_asked(context)
+    if asked != section.tile.issue:
+        notes.append(f'matrix_issue={asked} declined: '
+                     f'{section.tile.engine}\'s products are the '
+                     f'warpgroup\'s')
+    tables = tables_asked(context)
+    if tables != 'device':
+        notes.append(f'tile_tables={tables} declined: tcgen05\'s group '
+                     f'loop\'s alone')
+    return notes
 
 
 def _chunks_note(section: GroupSection) -> str:
@@ -2787,8 +2855,10 @@ def _spans_note(section: GroupSection) -> str:
     (step,) = [s for s in section.steps if s.lowering in ASYNC_LOWERINGS]
     if section.tile.spans != 'kept':
         return ('B dense, every product\'s whole width a block of K'
-                + ('; the blocks one loop' if section.tile.groups == 'loop'
-                   else ''))
+                + ('; the blocks one loop' + (
+                    ', its tables in constant memory'
+                    if section.tile.tables == 'constant' else '')
+                   if section.tile.groups == 'loop' else ''))
     stages = _step_stages(section, step)
     chunks = tile_chunks(section, step)
     kept = sum(rows * (hi - lo) for chunk in chunks
@@ -2799,7 +2869,9 @@ def _spans_note(section: GroupSection) -> str:
     shown = (f'{len(widths)} widths from {widths[0]} to {widths[-1]}'
              if len(widths) > 1 else f'one width, {widths[0]}')
     walk = (f'; the {len(chunks)} blocks of K one loop, a dispatch on their '
-            f'width' if section.tile.groups == 'loop' else '')
+            f'width' + (', its tables in constant memory'
+                        if section.tile.tables == 'constant' else '')
+            if section.tile.groups == 'loop' else '')
     return (f'B in kept spans: {round(100 * kept / dense)} % of the dense '
             f'rows of N, {shown}' + (', each to the stage\'s last row, its '
                                      'tiles last first'
@@ -4967,7 +5039,8 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'HALF_READERS', 'Product', 'RING_CHUNK', 'RING_SLOTS', 'Role',
            'STAR_ROWS', 'STAR_SLOTS', 'folded', 'fuse', 'fuse_refusal',
            'TILE_PRODUCER_WARPS', 'TileRows', 'rowless', 'tile_asked',
-           'groups_asked', 'kept_span', 'spans_asked', 'tile_chunks',
+           'groups_asked', 'issue_asked', 'kept_span', 'spans_asked',
+           'tile_chunks', 'tile_issue', 'tables_asked', 'tile_tables',
            'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_TCGEN05', 'TMEM_BUDGET',
            'tile_dslots', 'tile_groups', 'tile_output', 'TILE_UNROLLED_ROWS',
            'TILE_OUTPUT_KEEP',

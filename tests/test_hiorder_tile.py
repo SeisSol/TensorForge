@@ -1619,6 +1619,172 @@ def test_wgmma_s_bulk_epilogue_in_rounds_on_the_oracle(monkeypatch, rows):
     assert (bulk == red).all()
 
 
+# -- the mma warp's issue (H3e) ------------------------------------------------ #
+
+def test_the_issue_options_parse():
+    from tensorforge.common.options import (parse_matrix_issue,
+                                            parse_tile_tables, registry)
+    assert registry()['matrix_issue'].default == 'thread'
+    assert registry()['tile_tables'].default == 'device'
+    assert [parse_matrix_issue(t) for t in ('thread', 'ELECT')] == [
+        'thread', 'elect']
+    assert [parse_tile_tables(t) for t in ('device', 'Constant')] == [
+        'device', 'constant']
+    with pytest.raises(ValueError):
+        parse_matrix_issue('warp')
+    with pytest.raises(ValueError):
+        parse_tile_tables('shared')
+
+
+@pytest.mark.parametrize('order', [4, 8, 12])
+def test_the_issue_the_options_ask_for(order):
+    """`elect` on tcgen05's tile; on wgmma, whose products are the
+    warpgroup's, declined, as its comment says; `thread` as the options
+    leave it."""
+    assert _group(order, 'sm_100a').section.tile.issue == 'thread'
+    assert _group(order, 'sm_100a',
+                  matrix_issue='elect').section.tile.issue == 'elect'
+    wgmma = _group(order, 'sm_90a', matrix_issue='elect')
+    assert wgmma.section.tile.issue == 'thread'
+    notes = eg.tile_notes(wgmma, me._context(
+        'sm_90a', 's', multi_element='force',
+        **{**HIGH, 'matrix_issue': 'elect'}))
+    assert ('matrix_issue=elect declined: wgmma\'s products are the '
+            'warpgroup\'s') in notes
+
+
+def test_the_tables_the_options_ask_for():
+    """`constant` on tcgen05's group loop; where the blocks are written out,
+    which read no table, and on wgmma, `device` -- declined there in its
+    comment."""
+    assert _group(8, 'sm_100a').section.tile.tables == 'device'
+    asked = {'tile_tables': 'constant'}
+    assert _group(8, 'sm_100a', **asked).section.tile.tables == 'constant'
+    assert _group(8, 'sm_100a', matrix_groups='unrolled',
+                  **asked).section.tile.tables == 'device'
+    wgmma = _group(8, 'sm_90a', matrix_groups='loop', **asked)
+    assert wgmma.section.tile.tables == 'device'
+    notes = eg.tile_notes(wgmma, me._context(
+        'sm_90a', 's', multi_element='force',
+        **{**HIGH, 'matrix_groups': 'loop', **asked}))
+    assert ('tile_tables=constant declined: tcgen05\'s group loop\'s '
+            'alone') in notes
+
+
+def test_the_loop_s_tables_in_constant_memory():
+    """`constant`: the group loop's first columns and widths in constant
+    memory under names of their own -- a kernel of the file reading the
+    same numbers from global memory names its own tables -- the comment
+    saying so; as the options leave them, in global memory."""
+    plain = _kernel(8, 'sm_100a').get_kernel()
+    src = _kernel(8, 'sm_100a', tile_tables='constant').get_kernel()
+    assert re.search(r'^__device__ const int32_t tf_tl_\w+\[11\]', plain,
+                     re.M)
+    assert not re.search(r'__constant__', plain)
+    for prefix in ('tlc', 'tnc'):
+        assert len(re.findall(rf'^__constant__ const int32_t tf_{prefix}_\w+'
+                              rf'\[11\] = ', src, re.M)) == 1
+        assert re.search(rf'\(?tf_{prefix}_\w+\[v\d+_g\]', src)
+    assert not re.search(r'\btf_t[ln]_', src)
+    assert 'one loop, a dispatch on their width, its tables in constant ' \
+           'memory' in src
+
+
+def _region(src: str, head: int) -> str:
+    """The text of the braces opened at `src[head]`, string literals
+    skipped (the asm templates hold braces of their own)."""
+    depth, j = 0, head
+    while True:
+        c = src[j]
+        if c == '"':
+            j += 1
+            while src[j] != '"':
+                j += 2 if src[j] == '\\' else 1
+        elif c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return src[head:j + 1]
+        j += 1
+
+
+@pytest.mark.parametrize('groups', ['loop', 'unrolled'])
+def test_the_elect_issue_text(groups):
+    """`elect`: the mma warp's lanes elect one at the role's head -- the
+    kernel's one elect -- and the trip in one branch on it: D's slot, every
+    block's waits, products and commits, B's releases and D's commit, each
+    under that lane's predicate; the comment says so.  As the options leave
+    it, no elect."""
+    assert 'electOne' not in _kernel(8, 'sm_100a',
+                                     matrix_groups=groups).get_kernel()
+    src = _kernel(8, 'sm_100a', matrix_groups=groups,
+                  matrix_issue='elect').get_kernel()
+    assert src.count('tensorforge::electOne()') == 1
+    head = re.search(r'bool (v\d+_elect) = tensorforge::electOne\(\);\s*'
+                     r'if \(\1\) \{', src)
+    assert head is not None
+    elect = head.group(1)
+    branch = _region(src, head.end() - 1)
+    products = src.count('tcgen05.mma.cta_group')
+    assert products and branch.count('tcgen05.mma.cta_group') == products
+    assert branch.count(f'"r"(static_cast<uint32_t>({elect}))') == products
+    commits = re.findall(r'tensorforge::tcgen05CommitOn\(&\w+\[[^]]*\], '
+                         r'(\w+)\)', src)
+    assert commits and set(commits) == {elect}
+    assert len(re.findall(r'tensorforge::tcgen05CommitOn\(', branch)) == len(
+        commits)
+    assert re.search(rf'if \({elect}\) \{{\s*tensorforge::mbarrierWait\('
+                     rf'&td_ring', branch)
+    assert ('warp 14 issues -- the lane elect.sync picks, the trip in one '
+            'branch of its own') in ''.join(
+        l for l in src.splitlines() if l.strip().startswith('// tile:'))
+
+
+def test_the_oracle_elects_a_converged_warp_s_lowest_lane():
+    """`tensorforge::electOne()` on the oracle: true in the lowest lane of
+    each warp the run brings to it whole; a warp short of a lane there --
+    which the full mask does not allow -- an `Abort`."""
+    from tensorforge.reference import kernel_eval as ke
+    lanes = []
+    for t in range(64):
+        lane = ke.Interp(ke.Slot(), {})
+        lane.lane = t
+        lanes.append(lane)
+    run = ke.Lockstep(lanes)
+    run.current, run.wave_cache = lanes, {}
+    assert [it.lane for it in lanes
+            if it.ev('tensorforge::electOne()')] == [0, 32]
+    run.current, run.wave_cache = lanes[32:], {}
+    assert [it.lane for it in lanes[32:]
+            if it.ev('tensorforge::electOne()')] == [32]
+    run.current, run.wave_cache = lanes[1:32], {}
+    with pytest.raises(ke.Abort, match='elect.sync in 31 lanes of warp 0'):
+        lanes[1].ev('tensorforge::electOne()')
+
+
+@pytest.mark.parametrize('order,groups,tables', [
+    (4, 'loop', 'device'), (4, 'unrolled', 'device'), (6, 'loop', 'device'),
+    (6, 'unrolled', 'device'), (6, 'loop', 'constant')])
+def test_the_elect_issue_on_the_oracle(order, groups, tables):
+    """`elect` over three trips, o4's two blocks and o6's five, the loop and
+    written out, and the loop's tables in constant memory: against NumPy
+    without a race, and bit for bit what the first lane's issue gives --
+    the lane elect.sync picks is the warp's lowest, which the oracle checks
+    is all there."""
+    _, thread = _on_the_oracle('sm_100a', order, 31, matrix_groups=groups)
+    _, elect = _on_the_oracle('sm_100a', order, 31, matrix_groups=groups,
+                              matrix_issue='elect', tile_tables=tables)
+    assert (elect == thread).all()
+
+
+def test_the_elect_issue_over_o8_s_blocks_on_the_oracle():
+    """`elect` at o8, its eleven blocks over two trips of the group loop,
+    against NumPy without a race."""
+    gen, _ = _on_the_oracle('sm_100a', 8, 17, matrix_issue='elect')
+    assert gen.built._element_group.section.tile.issue == 'elect'
+
+
 # -- the build and the hardware ------------------------------------------------- #
 
 def _ptxas(arch, tmp_path, order=8, **options):
@@ -1702,19 +1868,54 @@ def test_the_build_reads_back(arch, engine, products, options, tmp_path):
         assert code not in report, report[-2000:]
 
 
+@pytest.mark.parametrize('groups,products,tables', [
+    ('loop', 9, 'device'), ('unrolled', 99, 'device'),
+    ('loop', 9, 'constant')])
+def test_the_elect_issue_builds(groups, products, tables, tmp_path):
+    """o8 built for sm_100a with `elect`: the products the first lane's
+    issue builds, none of them in a loop over the lanes that might issue
+    it -- no ELECT or BRA.U.ANY from the first to the last -- and nothing
+    spilled or reloaded between them; in the group loop at most one operand
+    moved into a uniform register there (R2UR), where the first lane's
+    issue moves 48, and none with its tables in constant memory, which it
+    reads by uniform loads (LDCU)."""
+    sass, report = _ptxas('sm_100a', tmp_path, matrix_groups=groups,
+                          matrix_issue='elect', tile_tables=tables)
+    ops = [m.group(1).strip() for m in re.finditer(
+        r'/\*[0-9a-f]{4,}\*/\s+([^;]*);', sass)]
+    mmas = [i for i, op in enumerate(ops) if 'UTCHMMA' in op]
+    assert len(mmas) == products
+    span = ops[mmas[0]:mmas[-1] + 1]
+    assert not any('ELECT' in op or 'BRA.U.ANY' in op for op in span)
+    assert not any(re.match(r'(?:@!?U?P\w+\s+)?(?:LDL|STL)\b', op)
+                   for op in span)
+    moved = sum(bool(re.search(r'\bR2UR\b', op)) for op in span)
+    if groups == 'loop':
+        assert moved <= (1 if tables == 'device' else 0)
+    if tables == 'constant':
+        assert sum(op.startswith('LDCU') for op in ops) >= 2
+    for code in ('C7510', 'C7511', 'C7514', 'C7517', 'C7519'):
+        assert code not in report, report[-2000:]
+
+
 #: The tile's variants on the GPU: as the options leave it, its blocks
 #: written out and in one loop, I whole in the input ring and in chunks
 #: (wgmma's as the options leave it is I whole where it fits, tcgen05's in
 #: chunks), and
 #: tcgen05's own levers -- three star bands, D added a cell at a time, by
-#: bulk reductions a column and an element's box.
+#: bulk reductions a column and an element's box, the mma warp's issue by
+#: the lane elect.sync picks, and with it the group loop's tables in
+#: constant memory.
 GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                 'loop': {'matrix_groups': 'loop'},
                 'whole': {'matrix_input_chunks': 'whole'},
                 'chunks': {'matrix_input_chunks': 32},
                 'b3': {'matrix_bands': 3}, 'red': {'matrix_output': 'red'},
                 'bulk': {'matrix_output': 'bulk'},
-                'box': {'matrix_output': 'box'}}
+                'box': {'matrix_output': 'box'},
+                'elect': {'matrix_issue': 'elect'},
+                'constant': {'matrix_issue': 'elect',
+                             'tile_tables': 'constant'}}
 
 
 @pytest.mark.parametrize('variant', sorted(GPU_VARIANTS))
@@ -1727,14 +1928,17 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
     (`test_multi_element._described`)."""
     if target.backend != 'cuda' or target.arch not in ('sm_90', 'sm_100'):
         pytest.skip('no GPU with wgmma or tcgen05')
-    if target.arch == 'sm_90' and variant in ('b3', 'red', 'box'):
-        pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands and '
-                    'adds D a cell or a row a reduction')
+    if target.arch == 'sm_90' and variant in ('b3', 'red', 'box', 'elect',
+                                              'constant'):
+        pytest.skip('tcgen05\'s levers: wgmma\'s tile has no bands, adds D '
+                    'a cell or a row a reduction, and its products are the '
+                    'warpgroup\'s')
     if order > 8 and variant not in ('', 'unrolled', 'loop', 'whole',
-                                     'chunks'):
+                                     'chunks', 'elect', 'constant'):
         pytest.skip('o10 and o12: the tile as the options leave it, its '
-                    'blocks written out and in one loop, and I whole and in '
-                    'chunks')
+                    'blocks written out and in one loop, I whole and in '
+                    'chunks, and the mma warp\'s issue by elect.sync\'s '
+                    'lane, its loop\'s tables in constant memory too')
     from harness.runner import run_case
     options = {**HIGH, **GPU_VARIANTS[variant]}
     special = dataclasses.replace(target, arch=target.arch + 'a')
@@ -1755,7 +1959,8 @@ def test_the_tile_computes_on_the_gpu(order, variant, target, cache_root,
                            result.detail)
 
 
-@pytest.mark.parametrize('variant', ['', 'unrolled', 'red', 'bulk', 'box'])
+@pytest.mark.parametrize('variant', ['', 'unrolled', 'red', 'bulk', 'box',
+                                     'elect', 'constant'])
 @pytest.mark.parametrize('order', [6, 8])
 def test_many_trips_of_the_tile_on_the_gpu(order, variant, target, cache_root,
                                            tensorforge_include):

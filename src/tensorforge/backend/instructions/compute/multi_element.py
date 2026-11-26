@@ -416,15 +416,22 @@ def tmem_columns(section) -> int:
     return columns
 
 
-def _module_table(instruction, prefix: str, numbers) -> str:
+def _module_table(instruction, prefix: str, numbers, space=None) -> str:
     """The name of a table of integers in the generated file, which says
     which numbers it holds (`multilinear._module_table_name`), kept by
-    `instruction` for its `module_tables`; one zero where it holds none."""
+    `instruction` for its `module_tables`; one zero where it holds none.
+    In constant memory where `space` says `constant` (`Options.
+    tile_tables`), its name its own: a kernel of the file that reads the
+    same numbers from global memory names another table."""
     from tensorforge.backend.instructions.compute.multilinear import \
         _module_table_name
     numbers = tuple(int(n) for n in numbers) or (0,)
+    if space == 'constant':
+        prefix += 'c'
     name = _module_table_name(prefix, Datatype.I32, numbers)
-    instruction._module_tables[name] = (Datatype.I32, numbers)
+    instruction._module_tables[name] = ((Datatype.I32, numbers)
+                                        if space is None else
+                                        (Datatype.I32, numbers, None, space))
     instruction._context.module_tables[name] = numbers
     return name
 
@@ -3890,8 +3897,12 @@ def _tcgen05_groups(trip, step, fold, ring, base, trips, issue,
         (span,) = found
         spans.append(span)
     widths = sorted({hi - lo for lo, hi in spans})
-    los = trip.table('tl', [lo for lo, _ in spans])
-    ns = trip.table('tn', [hi - lo for lo, hi in spans])
+    # In constant memory where the plan says so (`TileRows.tables`): a
+    # uniform load each, which the products' operands take from uniform
+    # registers, where a load from global memory puts it in a lane's.
+    space = 'constant' if trip.section.tile.tables == 'constant' else None
+    los = trip.table('tl', [lo for lo, _ in spans], space)
+    ns = trip.table('tn', [hi - lo for lo, hi in spans], space)
     hold = ring.hold
     with b.for_(0, len(chunks), unroll=1, hint='g') as loop:
         j = loop.induction
@@ -5594,8 +5605,8 @@ class MultiElementSection(AbstractInstruction):
         self._tables = {}
         trip = _Trip(builder, self._context, self._group, self._symbols,
                      self._operators.buffers, self._operators.tables)
-        trip.table = lambda prefix, numbers: _module_table(self, prefix,
-                                                           numbers)
+        trip.table = lambda prefix, numbers, space=None: _module_table(
+            self, prefix, numbers, space)
         trip.tmem = self._operators.tmem
         trip.rings = dict(self._operators.rings)
         if _rowless(section):
@@ -6002,27 +6013,42 @@ class MultiElementSection(AbstractInstruction):
                     operator.fill(trip, j, base, lane0)
         with roles.role('mma'):
             hold = operator.hold
-            with b.if_(lane0):
-                # D's slot back from the epilogue's last round of it.
-                b.ring_acquire(dring, dslot, dparity)
-                b.fence(FenceKind.THREAD_SYNC, engine='tcgen05',
-                        side='after')
-            if tile.groups == 'loop':
-                _tcgen05_groups(trip, step, fold, operator, base, trips,
-                                lane0, d_base=dbase)
+            # The thread that issues (`TileRows.issue`): the warp's first
+            # lane, each wait, product and commit under its predicate; or
+            # the lane elect.sync picks -- every lane of the warp here, at
+            # the role's head -- and the trip in one branch that lane alone
+            # takes, in which ptxas issues the products back to back from
+            # uniform registers, where under the first lane's predicate it
+            # wraps each in a loop over the lanes that might issue it.
+            if tile.issue == 'elect':
+                issue = b.rawexpr('tensorforge::electOne()', type_=BOOL,
+                                  hint='elect', uniform=Uniformity.LANE,
+                                  crosslane=True)
+                branch = b.if_(issue)
             else:
-                start = True
-                for j in range(fold.blocks):
-                    jslot, jparity, at = fold.round(trips, j)
-                    start = fold.issue(trip, j, jslot, jparity, at, lane0,
-                                       base, n, start, release=False,
-                                       d_base=dbase)
-                    if j >= hold - 1:
-                        operator.release(trip, j - hold + 1, base, lane0)
-            for j in range(max(0, fold.blocks - hold + 1), fold.blocks):
-                operator.release(trip, j, base, lane0)
-            b.commit_group('tcgen05', object=dring, issue=lane0, slot=dslot,
-                           side='full')
+                issue, branch = lane0, contextlib.nullcontext()
+            with branch:
+                with b.if_(issue):
+                    # D's slot back from the epilogue's last round of it.
+                    b.ring_acquire(dring, dslot, dparity)
+                    b.fence(FenceKind.THREAD_SYNC, engine='tcgen05',
+                            side='after')
+                if tile.groups == 'loop':
+                    _tcgen05_groups(trip, step, fold, operator, base, trips,
+                                    issue, d_base=dbase)
+                else:
+                    start = True
+                    for j in range(fold.blocks):
+                        jslot, jparity, at = fold.round(trips, j)
+                        start = fold.issue(trip, j, jslot, jparity, at, issue,
+                                           base, n, start, release=False,
+                                           d_base=dbase)
+                        if j >= hold - 1:
+                            operator.release(trip, j - hold + 1, base, issue)
+                for j in range(max(0, fold.blocks - hold + 1), fold.blocks):
+                    operator.release(trip, j, base, issue)
+                b.commit_group('tcgen05', object=dring, issue=issue,
+                               slot=dslot, side='full')
 
     def _three(self, trip) -> None:
         """A trip in the three roles (`Options.matrix_roles`,

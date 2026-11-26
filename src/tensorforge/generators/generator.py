@@ -5241,9 +5241,13 @@ class Generator:
       # sixteen bytes (`multi_element`'s prepared operators).
       align = (Generator.COPY_ALIGN if name in copies
                else entry[2] if len(entry) > 2 else None)
+      # Where the table is, where its instruction says (the high-order
+      # tile's loop on tcgen05, `Options.tile_tables`): constant memory.
+      space = entry[3] if len(entry) > 3 else None
+      table = lexic.module_constant(str(datatype), name, numbers,
+                                    align=align, space=space)
       definitions.append(
-          f'#ifndef {guard}\n#define {guard}\n'
-          f'{lexic.module_constant(str(datatype), name, numbers, align=align)}\n#endif')
+          f'#ifndef {guard}\n#define {guard}\n{table}\n#endif')
     return definitions
 
   def _write_kernel_meta_data(self, writer):

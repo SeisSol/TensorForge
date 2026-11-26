@@ -22,7 +22,8 @@ class HipLexic(CudaLexic):
     self.grid_dim_x = "gridDim.x"
     self.stream_type = "hipStream_t"
 
-  def module_constant(self, elem: str, name: str, values, align=None) -> str:
+  def module_constant(self, elem: str, name: str, values, align=None,
+                      space=None) -> str:
     # A uniform index into a module constant is an `s_load` out of the
     # scalar cache, which is the same read the kernarg segment gives.
     numbers = ', '.join(v if isinstance(v, str) else str(int(v))

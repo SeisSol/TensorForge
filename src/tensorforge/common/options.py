@@ -394,6 +394,30 @@ def parse_matrix_groups(text: str) -> str:
   return value
 
 
+#: What `Options.matrix_issue` takes.
+MATRIX_ISSUE = ('thread', 'elect')
+
+
+def parse_matrix_issue(text: str) -> str:
+  """`thread` or `elect` (`Options.matrix_issue`)."""
+  value = str(text).strip().lower()
+  if value not in MATRIX_ISSUE:
+    raise ValueError(f'expected one of {MATRIX_ISSUE}, got {text!r}')
+  return value
+
+
+#: What `Options.tile_tables` takes.
+TILE_TABLES = ('device', 'constant')
+
+
+def parse_tile_tables(text: str) -> str:
+  """`device` or `constant` (`Options.tile_tables`)."""
+  value = str(text).strip().lower()
+  if value not in TILE_TABLES:
+    raise ValueError(f'expected one of {TILE_TABLES}, got {text!r}')
+  return value
+
+
 #: What `Options.matrix_spans` takes.
 MATRIX_SPANS = ('kept', 'dense')
 
@@ -3143,6 +3167,40 @@ declare('matrix_groups',
             'the generated file -- so that the code does not grow with the '
             'groups (the hand-written kernels\' group engine); `unrolled`: '
             'each group written out.')
+
+declare('matrix_issue',
+        default='thread',
+        env='TF_MATRIX_ISSUE',
+        parse=parse_matrix_issue,
+        doc='Which thread of the high-order tile\'s mma warp on tcgen05 '
+            'issues the trip\'s products (`matrix_tile` `high`, '
+            '`element_group.TileRows.issue`): `thread`, the default, the '
+            'warp\'s first lane, each wait, product and commit under its own '
+            'predicate -- which ptxas cannot tell holds in one lane, so that '
+            'it wraps every product in a loop over the lanes that might issue '
+            'it (ELECT, R2UR.BROADCAST of its operands, BRA.U.ANY); `elect`: '
+            'the lane `elect.sync` picks, the warp converged at the trip\'s '
+            'head, and the trip\'s waits, products and commits in one branch '
+            'that lane alone takes, as the hand-written kernels issue -- the '
+            'products back to back from uniform registers.  o8 for sm_100a in '
+            'the group loop: a block 248 instructions, 56 of them R2UR and 11 '
+            'ELECT, under the first lane; 104 and 12 R2UR elected, its nine '
+            'products ten instructions from the first to the last.  On wgmma, '
+            'whose products are the warpgroup\'s, declined.')
+
+declare('tile_tables',
+        default='device',
+        env='TF_TILE_TABLES',
+        parse=parse_tile_tables,
+        doc='Where the high-order tile\'s group loop on tcgen05 reads its '
+            'blocks\' first column of D and N from (`matrix_tile` `high`, '
+            '`matrix_groups` `loop`, `element_group.TileRows.tables`): '
+            '`device`, the default, tables of the generated file in global '
+            'memory as every other, a load into a lane\'s registers each; '
+            '`constant`, the tables in constant memory, a uniform load each '
+            'that the products\' operands take from uniform registers: o8 '
+            'for sm_100a, `matrix_issue` `elect`, a block 93 instructions and '
+            '6 R2UR against 104 and 12.  On wgmma declined.')
 
 declare('matrix_consumers',
         default=2,
