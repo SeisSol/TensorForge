@@ -8773,6 +8773,16 @@ GROUPS = {
              "  ACCURACY_REQUESTS = ('multi_element', 'matrix_engine',\n", 1)),
         ("ffma by default",
          sub(OPTIONS, "declare('accuracy',\n        default='relaxed',\n", "declare('accuracy',\n        default='ffma',\n", 1)),
+    ]),    # SeisSol's padding poisoned on the oracle (tests/test_poisoned_padding.py):
+    # the slot form's write-back of a tile it straddles, and its scaled
+    # copies' rows -- a padding row copied into a logical cell.
+    'padding': ('tests/test_poisoned_padding.py -n 6', [
+        ("the slot form's straddled tile written back with zeros",
+         sub(ME_SECTION, "            values[(i, 0)] = (part if i not in old else old[i] if part is None\n",
+             "            values[(i, 0)] = (part if i not in old else None if part is None\n", 1)),
+        ("a scaled copy over its source's stored rows",
+         sub(ME_SECTION, "        rows = range(int(p.first.bbox.lower()[0]),\n                     int(p.first.bbox.upper()[0]))\n",
+             "        rows = range(int(p.first.bbox.lower()[0]),\n                     int(source.bbox.upper()[0]))\n", 1)),
     ]),
 }
 

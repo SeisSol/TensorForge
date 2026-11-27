@@ -2694,7 +2694,38 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
         assert error <= tolerance, (e, error)
 
 
-def _on_the_oracle(gen, count, scalar_values=None):
+def _padding_cells(gen):
+    """Each dense element tensor's padding, by alias: a mask over its
+    stored box, true at the cells no operation's box holds -- the rows
+    SeisSol's storage pads a matrix with past what yateto writes and reads
+    (`test_poisoned_padding`)."""
+    import numpy as np
+    from tensorforge.common.basic_types import Addressing
+    held, tensors = {}, {}
+    for outer in gen.descr_list:
+        for d in outer.operations():
+            for m in d.matrix_list():
+                t = getattr(m, 'tensor', m)
+                tensors.setdefault(t.alias, t)
+                if m is not t:
+                    held.setdefault(t.alias, []).append(
+                        [(int(lo), int(hi)) for lo, hi in zip(m.bbox.lower(),
+                                                              m.bbox.upper())])
+    masks = {}
+    for alias, t in tensors.items():
+        if (t.is_tmp or not t.bbox.lower() or not t.is_dense()
+                or t.addressing.kind is Addressing.NONE):
+            continue
+        (r0, r1), (c0, c1) = [(int(lo), int(hi)) for lo, hi in
+                              zip(t.bbox.lower(), t.bbox.upper())]
+        mask = np.ones((r1 - r0, c1 - c0), dtype=bool)
+        for (v0, v1), (w0, w1) in held.get(alias, []):
+            mask[v0 - r0:v1 - r0, w0 - c0:w1 - c0] = False
+        masks[alias] = mask
+    return masks
+
+
+def _on_the_oracle(gen, count, scalar_values=None, padding=None):
     """`gen`'s kernel run on the host oracle over `count` elements, from the
     oracle's own fill of memory, the operators their description's numbers,
     and no access to shared memory that no barrier orders
@@ -2703,7 +2734,9 @@ def _on_the_oracle(gen, count, scalar_values=None):
     element by element, as the kernel finds it; the scalar factors' values
     -- the oracle's fill, or those `scalar_values` names by alias, handed
     to the kernel; and `after(t)`, a tensor's box as the kernel leaves
-    it."""
+    it.  `padding(alias)`, where given, the value of every padding cell of a
+    dense element tensor before the kernel (`_padding_cells`), in place of
+    the fill's."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
@@ -2736,6 +2769,7 @@ def _on_the_oracle(gen, count, scalar_values=None):
 
     fill = kernel_eval.Slot(SEED)
     preset, inputs, scalars = {}, {}, {}
+    masks = _padding_cells(gen) if padding is not None else {}
     for alias, t in tensors.items():
         if t.is_tmp:
             continue
@@ -2754,6 +2788,13 @@ def _on_the_oracle(gen, count, scalar_values=None):
         else:
             inputs[alias] = memory(t, lambda e, s, t=t: fill.read(
                 f'{t.name}@{e}', s))
+            if padding is not None and alias in masks:
+                flat = masks[alias].reshape(-1, order='F')
+                for e in range(count):
+                    preset[f'{t.name}@{e}'] = [
+                        padding(alias) if flat[s]
+                        else fill.read(f'{t.name}@{e}', s)
+                        for s in range(flat.size)]
     lanes, mults = kernel_eval.launch_geometry(gen.get_launcher())
     races = []
     with warnings.catch_warnings():
