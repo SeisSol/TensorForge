@@ -320,6 +320,19 @@ def parse_matrix_roles(text: str) -> str:
 #: What `Options.matrix_tile` takes.
 MATRIX_TILE = ('off', 'high')
 
+#: What `Options.accuracy` takes: the classes TensorForge may choose from,
+#: the least accurate one each admits -- `relaxed` admits 3xTF32's on
+#: NVIDIA, `ffma` FFMA's and better (`pir.terms.ACCURACY_CLASSES`).
+ACCURACY = ('relaxed', 'ffma')
+
+
+def parse_accuracy(text: str) -> str:
+  """`relaxed` or `ffma` (`Options.accuracy`)."""
+  value = str(text).strip().lower()
+  if value not in ACCURACY:
+    raise ValueError(f'expected one of {ACCURACY}, got {text!r}')
+  return value
+
 
 def parse_matrix_tile(text: str) -> str:
   """`off` or `high` (`Options.matrix_tile`)."""
@@ -3035,7 +3048,9 @@ declare('multi_element',
             'architecture -- the high-order tile, measured on GH200 and '
             'GB200 at F32: the volume from o8, SeisSol\'s premultiplied '
             'localFluxAll from o6 and neighboringFlux on GB200 from o10; '
-            'the per-element kernel where the slot form lost -- and the slot '
+            'the per-element kernel where the slot form lost; the tile not '
+            'under `accuracy` `ffma`, its 3xTF32 below FFMA\'s class, but the '
+            'row\'s fallback -- and the slot '
             'form (`multi_element_fma` `slots`) where no row names the '
             'section and its plan takes it (`AUTO_SLOTS`), at any order, '
             'unmeasured ones included: the volume at o8 on sm_80 and sm_120, '
@@ -3222,6 +3237,28 @@ declare('matrix_ring_hold',
             'it holds it for.  Where a ring cannot hold its slots so, every '
             'ring keeps its engine\'s own and the kernel\'s comment says why '
             '(`element_group.hold_refusal`).')
+
+declare('accuracy',
+        default='relaxed',
+        env='TF_ACCURACY',
+        parse=parse_accuracy,
+        doc='The least accurate arithmetic TensorForge may choose where the '
+            'choice is its own -- `multi_element` `auto`\'s table '
+            '(`element_group.FORM_CHOICES`) and the tuner\'s matrix path '
+            '(`tuning._matrix_candidates`, its `tensor_cores` knob) -- by how '
+            'a product\'s terms add up on the target\'s engine '
+            '(`pir.terms.ACCURACY`), against the F64 reference on SeisSol\'s '
+            'volume.  `relaxed`, the default: 3xTF32\'s class on NVIDIA\'s '
+            'matrix engines, which accumulate with RZ -- about 1.9e-6 '
+            'normwise at o8 against FFMA\'s 3.1e-7, 4.1x to 9.4x FFMA\'s '
+            'error from o4 to o14 -- so the high-order tile where the table '
+            'names it.  `ffma`: FFMA\'s class or better -- the FMA forms and '
+            'the per-element kernel, Intel\'s DPAS (3xTF32 in two chains '
+            'rounded to nearest), AMD\'s stacked BF16X6 -- and on NVIDIA the '
+            'table\'s fallbacks for the tile.  What the options ask for '
+            'themselves (`matrix_tile`, `tensor_cores`, `multi_element` '
+            '`force`, `matrix_tf32_operands`) is built as asked, and where it '
+            'is below the class asked for the kernel\'s comment says so.')
 
 declare('matrix_tf32_operands',
         default=False,

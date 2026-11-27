@@ -265,7 +265,11 @@ def space(descrs, context: Context) -> List[Knob]:
         knobs.append(Knob('inline_constants',
                           lambda c, v=tuple([0] + counts): v))
     if context.target.prefs.tune_matrix_path and contraction_lengths(descrs):
-        knobs.append(Knob('tensor_cores', lambda c: (False, True)))
+        # NVIDIA's matrix path at F32 is 3xTF32's class, which the tuner
+        # chooses only where the options admit it (`Options.accuracy`).
+        paths = ((False,) if _relaxed_refused(descrs, context)
+                 else (False, True))
+        knobs.append(Knob('tensor_cores', lambda c, paths=paths: paths))
         knobs.append(Knob('mma_prefetch',
                           lambda c: ((1, 2) if c.get('tensor_cores') else (None,))))
         knobs.append(Knob('mma_min_depth',
@@ -2062,6 +2066,19 @@ MATRIX_TWIN = {80: (Datatype.F64,),
 MATRIX_SPILL_FLOOR = 1024
 
 
+def _relaxed_refused(descrs, context: Context) -> bool:
+    """Whether the matrix path is one the tuner may not choose for the list:
+    where a product is F32, which NVIDIA's engines compute as 3xTF32 --
+    3xTF32's class (`pir.terms.ACCURACY`) -- and the options admit FFMA's
+    class or better only (`Options.accuracy` `ffma`).  F64's DMMA products
+    are FFMA's."""
+    from tensorforge.backend.pir import terms
+    asked = getattr(context.get_user_options(), 'accuracy', 'relaxed')
+    if terms.admits(asked, 'relaxed'):
+        return False
+    return Datatype.F32 in _product_types(descrs, context)
+
+
 def _matrix_candidates(descrs, first: Build, context: Context,
                        origin: Candidate,
                        fixed: Optional[Mapping[str, Any]]) -> List[Candidate]:
@@ -2091,6 +2108,10 @@ def _matrix_candidates(descrs, first: Build, context: Context,
     # what each one is computed in and not the kernel's type.
     works = _product_types(descrs, context)
     if not works or not works <= set(MATRIX_TWIN.get(sm_of(context), ())):
+        return []
+    if _relaxed_refused(descrs, context):
+        # 3xTF32 at F32, below the class the options ask for: the twin where
+        # every product is F64 alone.
         return []
     lengths = contraction_lengths(_flat(descrs))
     if not lengths:

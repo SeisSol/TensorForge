@@ -88,6 +88,7 @@ ROWS = Path('src/tensorforge/backend/pir/rows.py')
 STACKING = Path('src/tensorforge/generators/stacking.py')
 ME_SECTION = Path('src/tensorforge/backend/instructions/compute/multi_element.py')
 ME_GROUP = Path('src/tensorforge/generators/element_group.py')
+TERMS = Path('src/tensorforge/backend/pir/terms.py')
 GRIDDEP = Path('src/tensorforge/backend/pir/griddep.py')
 CUDA_LEXIC = Path('src/tensorforge/common/vm/lexic/cuda_lexic.py')
 CUDA_H = Path('src/tensorforge/include/tensorforge_device/cuda.h')
@@ -8661,8 +8662,8 @@ GROUPS = {
     # gates for it, and what the kernel's comment says.
     'formchoice': ('tests/test_form_choices.py -n 6', [
         ("a row's tile not tried",
-         sub(ME_GROUP, "    if form == 'tile':\n        if declined is None:\n",
-             "    if False:\n        if declined is None:\n", 1)),
+         sub(ME_GROUP, "    if form == 'tile':\n        level = form_accuracy('tile', section, context)\n",
+             "    if False:\n        level = form_accuracy('tile', section, context)\n", 1)),
         ("the row's fallback left to auto's rule",
          sub(ME_GROUP, "        form = choice.fallback\n", "        form = None\n", 1)),
         ("the table on every target",
@@ -8729,6 +8730,49 @@ GROUPS = {
              "               'slots'),\n", 1)),
         ("the tile's rows on sm_120 too",
          sub(ME_GROUP, "TILE_ARCHS = ('sm_90', 'sm_100')\n", "TILE_ARCHS = ('sm_90', 'sm_100', 'sm_120')\n", 1)),
+    ]),    # How accurate the arithmetic TensorForge chooses has to be (H10-3a,
+    # `Options.accuracy`): each plan's class (`pir.terms.ACCURACY`), a
+    # kernel's from its bodies, auto's tile rows' fallbacks under `ffma`,
+    # the tuner's matrix path at F32 kept to the class, the kernel's comment
+    # where what the options asked for is below it.
+    'accuracy': ('tests/test_accuracy.py -n 6', [
+        ("NVIDIA's 3xTF32 counted FFMA's class",
+         sub(TERMS, "    ('3xtf32', 'nvidia'): 'relaxed',\n", "    ('3xtf32', 'nvidia'): 'ffma',\n", 1)),
+        ("a plan nobody measured counted FFMA's",
+         sub(TERMS, "    return ACCURACY.get((name, vendor), 'relaxed')\n",
+             "    return ACCURACY.get((name, vendor), 'ffma')\n", 1)),
+        ("a plan an accumulator a product not read as its whole",
+         sub(TERMS, "    name = plan.name[:-len('/each')] if plan.name.endswith('/each') \\\n"
+                    "        else plan.name\n    return ACCURACY.get((name, vendor), 'relaxed')\n",
+             "    name = plan.name\n    return ACCURACY.get((name, vendor), 'relaxed')\n", 1)),
+        ("a product in full counted 3xTF32's",
+         sub(TERMS, "    if plan is None:\n        return 'ffma'\n", "    if plan is None:\n        return 'relaxed'\n", 1)),
+        ("the classes compared the other way round",
+         sub(TERMS, "    return ACCURACY_CLASSES.index(level) <= ACCURACY_CLASSES.index(asked)\n",
+             "    return ACCURACY_CLASSES.index(level) >= ACCURACY_CLASSES.index(asked)\n", 1)),
+        ("a body's least accurate product not kept",
+         sub(TERMS, "            if (ACCURACY_CLASSES.index(level)\n                    > ACCURACY_CLASSES.index(worst)):\n",
+             "            if False:\n", 1)),
+        ("auto's tile taken under ffma",
+         sub(ME_GROUP, "        if declined is None and not terms.admits(accuracy_asked(context),\n",
+             "        if False and not terms.admits(accuracy_asked(context),\n", 1)),
+        ("the tuner's twin offered at F32 under ffma",
+         sub(TUNING, "    if _relaxed_refused(descrs, context):\n        # 3xTF32 at F32, below the class the options ask for: the twin where\n",
+             "    if False:\n        # 3xTF32 at F32, below the class the options ask for: the twin where\n", 1)),
+        ("the tuner's knob turning the path on at F32 under ffma",
+         sub(TUNING, "        paths = ((False,) if _relaxed_refused(descrs, context)\n                 else (False, True))\n",
+             "        paths = (False, True)\n", 1)),
+        ("the tuner's gate at every type",
+         sub(TUNING, "    return Datatype.F32 in _product_types(descrs, context)\n", "    return True\n", 1)),
+        ("the kernel's line on accuracy not written",
+         sub(GEN, "    for note in self._accuracy_notes():\n", "    for note in ():\n", 1)),
+        ("a line on accuracy where the class admits the kernel",
+         sub(GEN, "    if terms.admits(asked, level):\n      return []\n", "    if False:\n      return []\n", 1)),
+        ("the request for the tile not named",
+         sub(GEN, "  ACCURACY_REQUESTS = ('matrix_tile', 'multi_element', 'matrix_engine',\n",
+             "  ACCURACY_REQUESTS = ('multi_element', 'matrix_engine',\n", 1)),
+        ("ffma by default",
+         sub(OPTIONS, "declare('accuracy',\n        default='relaxed',\n", "declare('accuracy',\n        default='ffma',\n", 1)),
     ]),
 }
 

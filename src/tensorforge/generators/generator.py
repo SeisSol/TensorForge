@@ -5327,11 +5327,57 @@ class Generator:
           f'#ifndef {guard}\n#define {guard}\n{table}\n#endif')
     return definitions
 
+  #: How a plan below the class asked for computes, for the kernel's comment
+  #: (`_accuracy_notes`), by its name (`pir.terms.ACCURACY`).
+  ACCURACY_WORDS = {
+      '3xtf32': ('3xTF32', 'they accumulate with RZ, 4x to 9x FFMA\'s '
+                 'normwise error on SeisSol\'s volume from o4 to o14, '
+                 'growing with the contraction'),
+      '2xtf32': ('A\'s TF32 halves by B whole in TF32',
+                 'B rounded to TF32\'s ten bits of mantissa, about 2^-11 '
+                 'relative a product, past 3xTF32\'s error')}
+
+  #: The options that ask for a matrix path themselves, which the kernel's
+  #: comment names where it is below the class asked for (`_accuracy_notes`).
+  ACCURACY_REQUESTS = ('matrix_tile', 'multi_element', 'matrix_engine',
+                       'tensor_cores', 'matrix_tf32_operands')
+
+  def _accuracy_notes(self) -> List[str]:
+    """What the kernel's comment says of its arithmetic where it is below
+    the class `Options.accuracy` asks for (`pir.terms.body_accuracy`): only
+    what the options ask for themselves is -- `auto`'s table and the tuner
+    keep to the class (`element_group.auto_plan`, `tuning._relaxed_refused`)
+    -- and it is built as asked.  The plan that sets the class, the options
+    that asked for it, and its error."""
+    from tensorforge.backend.pir import terms
+    options = self._context.get_user_options()
+    asked = getattr(options, 'accuracy', 'relaxed')
+    if terms.admits(asked, 'relaxed'):
+      return []
+    vendor = getattr(self._context.target.hw, 'vendor', None)
+    level, plan = terms.body_accuracy(
+        [s.body for s in self._sections if s.body is not None], vendor)
+    if terms.admits(asked, level):
+      return []
+    name = plan.name[:-len('/each')] if plan.name.endswith('/each') \
+        else plan.name
+    what, error = Generator.ACCURACY_WORDS.get(
+        name, (f'the {name} split', 'its rounding unmeasured'))
+    by = [kv for kv in options.label().split(',')
+          if kv.split('=')[0] in Generator.ACCURACY_REQUESTS]
+    by = ', '.join(by) or 'the matrix path\'s deployment switch'
+    maker = {'nvidia': 'NVIDIA', 'amd': 'AMD', 'intel': 'Intel'}.get(
+        vendor, vendor)
+    return [f'{what} on {maker}\'s matrix engines ({by}), {level}, below '
+            f'accuracy={asked}: {error}']
+
   def _write_kernel_meta_data(self, writer):
     writer(f'// generated with TensorForge. Version: {get_version()}')
     # What was asked for, so that a file found on its own says which of several
     # configurations of one workload it is.
     writer(f'// options: {self._context.get_user_options().describe()}')
+    for note in self._accuracy_notes():
+      writer(f'// accuracy: {note}')
     if self._tuned is not None:
       writer(f'// tuned: {self._tuned.label()}')
     if self._small is not None:

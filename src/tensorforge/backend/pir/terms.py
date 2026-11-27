@@ -344,4 +344,73 @@ def check_plans(body: Sequence[Stmt]) -> List[str]:
     return findings
 
 
-__all__ = ['Epilogue', 'Form', 'Kind', 'TermPlan', 'check_plans', 'plan']
+# --------------------------------------------------------------------------- #
+# How accurate a plan's products are
+# --------------------------------------------------------------------------- #
+
+#: The classes of a kernel's arithmetic, the most accurate first
+#: (`Options.accuracy`): below FFMA's error (`better`: the 6xBF16 work's,
+#: none yet), FFMA's (`ffma`), 3xTF32's on NVIDIA (`relaxed`).  Against the
+#: F64 reference, normwise, on SeisSol's volume; the bar is TensorForge's own
+#: FFMA kernel at the order, 1.2e-7 at o4 to 7.4e-7 at o16.
+ACCURACY_CLASSES = ('better', 'ffma', 'relaxed')
+
+#: A plan's class by its name and the vendor whose engine adds its products
+#: up (`product_accuracy`).  NVIDIA's engines (mma.sync, wgmma, tcgen05)
+#: align an MMA's addends to the largest and truncate them two bits below
+#: its ulp, the sum truncated to 24 bits (RZ): 3xTF32 there is 4.1x (o4) to
+#: 9.4x (o14) FFMA's error -- 1.94e-6 at o8 against 3.08e-7, measured on
+#: GH200 at o12 as modeled, 4.29e-6 -- and A's TF32 halves by B whole in
+#: TF32 (`Options.matrix_tf32_operands`) about 2^-11 a product, worse.
+#: Intel's DPAS adds in two interleaved chains, each step rounded to nearest:
+#: 3xTF32 0.87x to 1.44x FFMA's error, 3.45e-7 and 5.13e-7 measured at o6
+#: and o8.  AMD's stacked BF16X6, 1e-7 measured on SeisSol's kernels.
+ACCURACY: Dict[Tuple[str, str], str] = {
+    ('3xtf32', 'nvidia'): 'relaxed',
+    ('2xtf32', 'nvidia'): 'relaxed',
+    ('3xtf32/b', 'intel'): 'ffma',
+    ('bf16x6', 'amd'): 'ffma',
+}
+
+
+def product_accuracy(plan: Optional[TermPlan], vendor: Optional[str]) -> str:
+    """The class of a product computed by `plan` on `vendor`'s engine
+    (`ACCURACY`): FFMA's for a product in full -- DFMA, DMMA, an MFMA on
+    whole operands -- and a plan's own, one into an accumulator a product
+    (`/each`) as its whole; `relaxed` for a plan the table does not name,
+    whose rounding nobody measured."""
+    if plan is None:
+        return 'ffma'
+    name = plan.name[:-len('/each')] if plan.name.endswith('/each') \
+        else plan.name
+    return ACCURACY.get((name, vendor), 'relaxed')
+
+
+def admits(asked: str, level: str) -> bool:
+    """Whether the class `asked` for (`Options.accuracy`) admits `level`:
+    `level` as accurate or more."""
+    return ACCURACY_CLASSES.index(level) <= ACCURACY_CLASSES.index(asked)
+
+
+def body_accuracy(bodies: Sequence[Sequence[Stmt]], vendor: Optional[str]
+                  ) -> Tuple[str, Optional[TermPlan]]:
+    """The least accurate class of the matrix products of `bodies`
+    (`product_accuracy` of each `MATRIX_MAC`'s plan), and the plan that sets
+    it; FFMA's, and None, where they have no such product."""
+    from .core import walk_stmts
+    worst, by = 'ffma', None
+    for body in bodies:
+        for s in walk_stmts(tuple(body)):
+            if s.op != Op.MATRIX_MAC:
+                continue
+            plan_ = s.attr('plan')
+            level = product_accuracy(plan_, vendor)
+            if (ACCURACY_CLASSES.index(level)
+                    > ACCURACY_CLASSES.index(worst)):
+                worst, by = level, plan_
+    return worst, by
+
+
+__all__ = ['ACCURACY', 'ACCURACY_CLASSES', 'Epilogue', 'Form', 'Kind',
+           'TermPlan', 'admits', 'body_accuracy', 'check_plans', 'plan',
+           'product_accuracy']

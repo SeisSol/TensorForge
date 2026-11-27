@@ -5771,6 +5771,25 @@ def auto_takes(section: GroupSection,
     return lanes, ''
 
 
+def accuracy_asked(context) -> str:
+    """The least accurate class the options let TensorForge choose
+    (`Options.accuracy`, `pir.terms.ACCURACY_CLASSES`)."""
+    return getattr(context.get_user_options(), 'accuracy', 'relaxed')
+
+
+def form_accuracy(form: str, section: GroupSection, context) -> str:
+    """The class of a form's arithmetic on the context's target before it is
+    lowered (`pir.terms.product_accuracy`): the high-order tile's, 3xTF32 on
+    the asynchronous engine (`async_plan`, B prepared in its halves); the
+    FMA forms' and the per-element kernel's, FFMA's."""
+    from tensorforge.backend.instructions.compute.primitives import nvidia
+    from tensorforge.backend.pir import terms
+    if form != 'tile':
+        return 'ffma'
+    return terms.product_accuracy(nvidia.TF32_PLAN,
+                                  getattr(context.target.hw, 'vendor', None))
+
+
 def auto_plan(section: GroupSection, context,
               declined: Optional[str] = None
               ) -> Tuple[Optional[ElementGroup], str]:
@@ -5780,12 +5799,21 @@ def auto_plan(section: GroupSection, context,
     where it does not; the per-element kernel where the row or its fallback
     says so.  `auto`'s rule (`auto_takes`) where no row names the section,
     or the row's form or its fallback is the slot form: the slot form on
-    NVIDIA, the lanes form elsewhere.  `declined`: why the tile declined
-    the section where the options asked for it already (`plan`), so that
-    it is not planned twice."""
+    NVIDIA, the lanes form elsewhere.  The tile's row's fallback too where
+    its arithmetic is below the class the options ask for
+    (`Options.accuracy`, `form_accuracy`); `auto`'s rule takes FFMA's
+    class alone.  `declined`: why the tile declined the section where the
+    options asked for it already (`plan`), so that it is not planned
+    twice."""
+    from tensorforge.backend.pir import terms
     choice = form_choice(section, context)
     form = None if choice is None else choice.form
     if form == 'tile':
+        level = form_accuracy('tile', section, context)
+        if declined is None and not terms.admits(accuracy_asked(context),
+                                                 level):
+            declined = (f'its 3xTF32 on the asynchronous engine is {level}, '
+                        f'below accuracy={accuracy_asked(context)}')
         if declined is None:
             group, declined = fill(section, context, form='tile')
             if group is not None:
@@ -5910,6 +5938,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'plan_exchange', 'slot_needs', 'slot_registers', 'slot_terms',
            'slots_plan', 'split_mapping', 'wrapped_mapping', 'AUTO_SLOTS',
            'SLOT_AHEAD_ROWS', 'FORM_CHOICES', 'FORMS', 'SLOT_GH200_RULES',
-           'FormChoice', 'TILE_ARCHS', 'auto_plan', 'form_choice',
+           'FormChoice', 'TILE_ARCHS', 'accuracy_asked', 'auto_plan',
+           'form_accuracy', 'form_choice',
            'slot_decline',
            'slot_one_round', 'slot_read', 'slot_signature']
