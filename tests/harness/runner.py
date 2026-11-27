@@ -158,8 +158,11 @@ def run_case(case, target: Target, cache_root: Path,
     gen = Generator(descr_list, ctx, attrs=getattr(case, "ATTRS", None))
     gen.generate()
 
-    # Build or fetch cached executable.
-    driver_src = driver_emit.emit(gen, target.backend, default_batch=batch)
+    # Build or fetch cached executable.  The scalars passed by value the
+    # case names (`SCALARS`, by alias), the driver's 0.5 for the others.
+    scalars = getattr(case, "SCALARS", None)
+    driver_src = driver_emit.emit(gen, target.backend, default_batch=batch,
+                                  scalars=scalars)
 
     includes_src = "\n".join(f'#include "{header}"' for header in ctx.target.headers()) + "\n"
     includes_src += "\n".join(f'#include "{header}"' for header in gen.get_helper_headers())
@@ -177,7 +180,7 @@ def run_case(case, target: Target, cache_root: Path,
     exe = build(bi, cache_root)
 
     # Prepare inputs and expected output.
-    ops_meta = driver_emit.collect_operands(gen)
+    ops_meta = driver_emit.collect_operands(gen, scalars)
     rng = np.random.default_rng(abs(hash((case.NAME, target.arch))) & 0xFFFFFFFF)
 
     # Optional case-side input domain shaping. The kernel sees the

@@ -202,7 +202,8 @@ def _covers(outer: Range, inner: Range) -> bool:
 @dataclass(frozen=True)
 class Product:
     """One product of the section, `dest (+)= first x second` with
-    `dest(i, j) = sum_k first(i, k) second(k, j)`, and its kind.
+    `dest(i, j) = sum_k first(i, k) second(k, j)`, and its kind -- or a
+    scaled one, `dest (+)= s first x second` (`scalar`).
 
     The views are the description's (`SubTensor`); `rows`, `cols` and
     `depth` are the ranges of `i`, `j` and `k` it runs over."""
@@ -213,6 +214,11 @@ class Product:
     second: object
     dest: object
     add: bool
+    #: A scaled product's factor, a view over no axis (`_product_factor`):
+    #: yateto's alpha -- a number the description holds, or a scalar the
+    #: kernel is handed (`Role.SCALAR`) -- None for a product of the two
+    #: alone.  A scaled copy's factor is its `second`.
+    scalar: object = None
 
     @property
     def rows(self) -> Range:
@@ -795,6 +801,17 @@ def _scaled(op) -> Optional[Tuple[object, object]]:
     return None
 
 
+def _product_factor(op) -> Optional[object]:
+    """A scaled product's factor -- `dest (+)= s first x second`, yateto's
+    alpha as the frontend hands it on: one more operand over no axis, last,
+    its target and permutation empty (`frontend.yateto`, `GemmDescr`) -- or
+    None."""
+    if (len(op.ops) == 3 and len(op.ops[2].bbox.lower()) == 0
+            and not list(op.target[2]) and not list(op.permute[2])):
+        return op.ops[2]
+    return None
+
+
 def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
     """The section of `descrs` as the multi-element layout runs it, or None
     and why not -- every product classified, or none."""
@@ -870,14 +887,26 @@ def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
             products.append(Product(op, Kind.SCALE, first, scalar, op.dest,
                                     op.add))
             continue
-        if len(op.ops) != 2:
+        factor = _product_factor(op)
+        if len(op.ops) != (2 if factor is None else 3):
             return None, (f'operation {n} is not a product of two matrices '
-                          f'(a scaled product, or another arity)')
-        if ([list(t) for t in op.target] != [[0, -1], [-1, 1]]
-                or [list(p) for p in op.permute] != [[0, 1], [0, 1]]):
+                          f'(another arity)')
+        if ([list(t) for t in op.target][:2] != [[0, -1], [-1, 1]]
+                or [list(p) for p in op.permute][:2] != [[0, 1], [0, 1]]):
             return None, (f'operation {n} is not a product of two matrices '
                           f'into a matrix in their order')
-        first, second = op.ops
+        first, second = op.ops[:2]
+        if factor is not None:
+            # yateto's alpha: a number the description holds, or a scalar
+            # the kernel is handed, as a scaled copy's factor is.
+            if (factor.tensor.addressing is not Addressing.SCALAR
+                    and not factor.tensor.has_values()):
+                return None, (f'operation {n} scales its product by '
+                              f'{factor.tensor.alias}, which is no scalar '
+                              f'the kernel is handed or holds')
+            why = claim(factor.tensor, Role.SCALAR)
+            if why:
+                return None, why
         for sub in (first, second, op.dest):
             t = sub.tensor
             if len(sub.bbox.lower()) != 2:
@@ -940,7 +969,8 @@ def classify(descrs: Sequence) -> Tuple[Optional[GroupSection], str]:
                 windows.append(f'operation {n} assigns a window of '
                                f'{dest.alias}, whose rest it would have to '
                                f'zero')
-        products.append(Product(op, kind, first, second, op.dest, op.add))
+        products.append(Product(op, kind, first, second, op.dest, op.add,
+                                scalar=factor))
 
     # An element's own tensor the section writes and reads: every write
     # ahead of every read, and read only where written -- an output read back
@@ -1054,6 +1084,9 @@ def _section(steps: Tuple[Step, ...], dtype) -> GroupSection:
             if not any(o is p.dest.tensor for o in outputs):
                 outputs.append(p.dest.tensor)
             continue
+        if p.scalar is not None and not any(
+                t is p.scalar.tensor for t in scalars):
+            scalars.append(p.scalar.tensor)
         for sub in (p.first, p.second):
             t = sub.tensor
             if t.is_tmp:
@@ -2670,6 +2703,16 @@ def tile_tmem(tile_n: int, products: int, budget: int = TMEM_BUDGET
     return None
 
 
+def scaled_product(section: GroupSection) -> Optional[str]:
+    """The first scaled product of `section` (`Product.scalar`), by its
+    destination, or None."""
+    for p in section.products:
+        if p.scalar is not None:
+            return (f'{p.dest.tensor.alias} (+)= {p.scalar.tensor.alias} '
+                    f'{p.first.tensor.alias} x {p.second.tensor.alias}')
+    return None
+
+
 def tile_refusal(section: GroupSection, context) -> Optional[str]:
     """Why the section cannot take the high-order tile (`Options.
     matrix_tile` `high`), or None where it can: an F32 section of one
@@ -2680,6 +2723,9 @@ def tile_refusal(section: GroupSection, context) -> Optional[str]:
     a whole element, its columns at most 64."""
     if tile_asked(context) != 'high':
         return 'the option is off'
+    scaled = scaled_product(section)
+    if scaled is not None:
+        return f'{scaled}, a scaled product, which the tile does not take yet'
     if section.dtype is not Datatype.F32:
         return (f'{section.dtype.name} sections have no asynchronous engine '
                 f'(the tile is 3xTF32)')
@@ -5093,6 +5139,13 @@ def fill(section: GroupSection, context,
         # leaves the rest of an assigned window as it is.
         return None, ('a chained section is the lanes form\'s alone (its '
                       'phases one after another, `GroupSection.phases`)')
+    scaled = scaled_product(section)
+    if scaled is not None:
+        # The lanes form and its slot form scale a product by its factor
+        # (`compute.multi_element._LaneTrip`); the warp form, the matrix
+        # tilings and the high-order tile do not yet.
+        return None, (f'{scaled}, a scaled product, is the lanes form\'s '
+                      f'and its slot form\'s alone so far')
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
     # The high-order tile ahead of everything where the options ask for it
     # and the section takes it (`tile_plan`); where it does not, the plans
@@ -5583,6 +5636,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'TILE_ACCUMULATORS', 'tile_passes', 'tile_pass_bounds',
            'tile_pass_chunks',
            'tile_lowered', 'tile_notes', 'tile_plan', 'tile_refusal',
+           'scaled_product',
            'tile_warps',
            'TF32_HALVES_BY_WHOLE', 'async_plan', 'async_terms',
            'precision_notes',

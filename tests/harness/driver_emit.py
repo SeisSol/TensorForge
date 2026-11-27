@@ -185,7 +185,7 @@ def device_layout_code(op, per_name: str = "") -> str:
                               f"{op.addressing!r} addressing")
 
 
-def collect_operands(generator) -> List[DriverOperand]:
+def collect_operands(generator, scalars=None) -> List[DriverOperand]:
     """Walk the global scope of the generator that built the kernel
     (`Generator.built`) and materialize operand metadata.
 
@@ -209,10 +209,13 @@ def collect_operands(generator) -> List[DriverOperand]:
             # A scalar literal (alpha) passes its value.  A runtime scalar --
             # SeisSol's `power(k)` in the time derivative -- has none: the
             # driver passes a fixed 0.5, deterministic and not 1, so a missed
-            # factor still shows in the numbers.
+            # factor still shows in the numbers -- or the value a case asks
+            # for by alias (`scalars`, a case's `SCALARS`).
             known = (getattr(t, 'has_values', lambda: False)()
                      and t.get_values() is not None)
             value = float(t.get_values()[0]) if known else 0.5
+            if scalars and t.alias in scalars:
+                value = float(scalars[t.alias])
             ops.append(DriverOperand(
                 kernel_name=sym.name, alias=t.alias,
                 is_source=True, is_sink=False,
@@ -517,7 +520,7 @@ int main(int argc, char** argv) {{
 """
 
 
-def emit(generator, backend: str, default_batch: int) -> str:
+def emit(generator, backend: str, default_batch: int, scalars=None) -> str:
     """Return full driver source text for one generated kernel."""
     if backend == "cuda":
         preamble = _PREAMBLE_CUDA
@@ -530,7 +533,7 @@ def emit(generator, backend: str, default_batch: int) -> str:
     else:
         raise NotImplementedError(f"backend {backend!r} not supported in MVP")
 
-    ops = collect_operands(generator)
+    ops = collect_operands(generator, scalars)
 
     for op in ops:
         if op.is_scalar:

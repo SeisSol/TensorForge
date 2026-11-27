@@ -2694,14 +2694,16 @@ def test_every_element_of_two_trips_on_the_oracle(shape, order, precision,
         assert error <= tolerance, (e, error)
 
 
-def _on_the_oracle(gen, count):
+def _on_the_oracle(gen, count, scalar_values=None):
     """`gen`'s kernel run on the host oracle over `count` elements, from the
     oracle's own fill of memory, the operators their description's numbers,
     and no access to shared memory that no barrier orders
     (`kernel_eval.Races`): `(tensors, inputs, scalars, after)` -- the
     description's tensors by alias; each one's box but an intermediate's,
-    element by element, as the kernel finds it; the scalar factors' values;
-    and `after(t)`, a tensor's box as the kernel leaves it."""
+    element by element, as the kernel finds it; the scalar factors' values
+    -- the oracle's fill, or those `scalar_values` names by alias, handed
+    to the kernel; and `after(t)`, a tensor's box as the kernel leaves
+    it."""
     import numpy as np
     from tensorforge.common.basic_types import Addressing
     from tensorforge.reference import kernel_eval
@@ -2738,8 +2740,13 @@ def _on_the_oracle(gen, count):
         if t.is_tmp:
             continue
         if not t.bbox.lower():
-            # A scalar passed by value: the oracle's fill of its one slot.
-            scalars[alias] = fill.read(t.name, 0)
+            # A scalar passed by value: the oracle's fill of its one slot,
+            # or the value asked for.
+            if scalar_values and alias in scalar_values:
+                preset[t.name] = float(scalar_values[alias])
+                scalars[alias] = float(scalar_values[alias])
+            else:
+                scalars[alias] = fill.read(t.name, 0)
         elif t.addressing.kind is Addressing.NONE:
             preset[t.name] = [float(v) for v in t.storage_values()]
             (r0, r1), (c0, c1) = box(t)
@@ -2764,15 +2771,31 @@ def _on_the_oracle(gen, count):
     return tensors, inputs, scalars, after
 
 
+def _factor(op, scalars):
+    """A scaled product's factor (`element_group.Product.scalar`): the
+    number the description holds, else the value the kernel was handed, by
+    alias in `scalars`; 1 for a product of the two alone."""
+    import numpy as np
+    from tensorforge.generators.element_group import _product_factor
+    factor = _product_factor(op)
+    if factor is None:
+        return 1.0
+    if factor.tensor.has_values():
+        return float(np.asarray(factor.tensor.get_values()).reshape(-1)[0])
+    return float(scalars[factor.tensor.alias])
+
+
 def _reference(descrs):
     """NumPy over the description, every element at once, in double
-    precision: each product into its window, an intermediate zero outside
-    what is written.  The harness's arrays are the tensors' boxes."""
+    precision: each product into its window -- a scaled one times its
+    factor, the description's number or the value in `scalars` by alias --
+    an intermediate zero outside what is written.  The harness's arrays
+    are the tensors' boxes."""
     import numpy as np
     from tensorforge.generators.descriptions import MultilinearDescr
     ops = [op for d in descrs for op in d.operations()]
 
-    def reference(inputs, dest_in):
+    def reference(inputs, dest_in, scalars=None):
         full = {}
 
         def whole(tensor, data):
@@ -2791,12 +2814,13 @@ def _reference(descrs):
         output = None
         for op in ops:
             assert isinstance(op, MultilinearDescr)
-            a, b = op.ops
+            a, b = op.ops[:2]
             (r0, k0), (r1, k1) = a.bbox.lower(), a.bbox.upper()
             c0, c1 = b.bbox.lower()[1], b.bbox.upper()[1]
             value = np.einsum('...ik,...kj->...ij',
                               array(a.tensor)[:, r0:r1, k0:k1],
-                              array(b.tensor)[:, k0:k1, c0:c1])
+                              array(b.tensor)[:, k0:k1, c0:c1]) * _factor(
+                                  op, scalars or {})
             dest = op.dest.tensor
             if not dest.is_tmp:
                 if output is None:
@@ -2849,12 +2873,13 @@ def _reference_all(descrs):
                 value = whole(src.tensor)[:, r0:r1, c0:c1] * (
                     1.0 if factor is None else scalars[factor.tensor.alias])
             else:
-                a, b = op.ops
+                a, b = op.ops[:2]
                 (r0, k0), (r1, k1) = a.bbox.lower(), a.bbox.upper()
                 c0, c1 = b.bbox.lower()[1], b.bbox.upper()[1]
                 value = np.einsum('...ik,...kj->...ij',
                                   whole(a.tensor)[:, r0:r1, k0:k1],
-                                  whole(b.tensor)[:, k0:k1, c0:c1])
+                                  whole(b.tensor)[:, k0:k1, c0:c1]) * _factor(
+                                      op, scalars)
             dest = op.dest.tensor
             if dest.is_tmp and not op.add:
                 full[dest.alias] = np.zeros(
