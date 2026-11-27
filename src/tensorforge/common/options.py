@@ -3026,12 +3026,23 @@ declare('multi_element',
             'layout, `generators.element_group`): a block of E warps, one a '
             'multiplication, takes E consecutive elements together, stages '
             'their operands side by side in shared memory and the '
-            'batch-constant operator once for the block.  `off` never; '
-            '`force` wherever the fill rule finds a plan; `auto` where it '
-            'finds one measured to pay (`element_group.auto_takes`): so far '
-            'the lanes form (`multi_element_fma`) on Intel under SPMD at '
-            'F32, where its plan holds the output in one row range '
-            '(`element_group.AUTO_LANES`) -- and nothing elsewhere.')
+            'batch-constant operator once for the block.  `off`, the '
+            'default, never -- but the high-order tile where it is asked for '
+            '(`matrix_tile`); `force` wherever the fill rule finds a plan; '
+            '`auto` in the form measured to pay (`element_group.auto_plan`). '
+            ' On NVIDIA the form a row of `element_group.FORM_CHOICES` names '
+            'for the kind of section, at its order, element type and '
+            'architecture -- the high-order tile, measured on GH200 and '
+            'GB200 at F32: the volume from o8, SeisSol\'s premultiplied '
+            'localFluxAll from o6 and neighboringFlux on GB200 from o10; '
+            'the per-element kernel where the slot form lost -- and the slot '
+            'form (`multi_element_fma` `slots`) where no row names the '
+            'section and its plan takes it (`AUTO_SLOTS`), at any order, '
+            'unmeasured ones included: the volume at o8 on sm_80 and sm_120, '
+            'say.  On Intel under SPMD at F32 the lanes form, where its plan '
+            'holds the output in one row range (`element_group.AUTO_LANES`); '
+            'nothing elsewhere.  Off by default, so that a kernel no job has '
+            'measured reaches only a build that asks for `auto`.')
 
 declare('multi_element_fma',
         default='auto',
@@ -3320,9 +3331,18 @@ declare('matrix_tile',
             'operator ring, and producer warps staging the inputs and '
             'filling the ring; on tcgen05 (sm_100a) the three roles '
             '(`matrix_roles` `three`) at as many elements as tensor memory\'s '
-            'lanes hold.  Where the section cannot take it, the plan says '
-            'why, and the kernel\'s comment (`element_group.tile_notes`).  '
-            'Not measured yet.')
+            'lanes hold -- on the target\'s asynchronous engine whatever '
+            '`matrix_engine` says.  Asked for, the tile wherever the section '
+            'takes it, under `multi_element` `off`, `auto` and `force` alike; '
+            'where it cannot, the plan says why, in the kernel\'s comment '
+            '(`element_group.tile_notes`) where the layout takes the section '
+            'otherwise: `off` builds per element, `auto` follows its table '
+            '(`element_group.FORM_CHOICES`), `force` the fill rule.  `auto` '
+            'takes the tile where its table names it, with the option off.  '
+            'Measured on GH200 and GB200 at o6 to o12 against the '
+            'per-element kernel: the volume 0.79 and 0.42 of its time at o6, '
+            '0.48 and 0.29 at o8, 0.29 and 0.14 at o10, 0.12 and 0.10 at '
+            'o12 (Vista 1169572 and 1173095, Horizon 107520 and 108215).')
 
 declare('matrix_spans',
         default='kept',

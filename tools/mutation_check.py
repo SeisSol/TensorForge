@@ -5354,17 +5354,20 @@ GROUPS = {
          sub(ME_GROUP, "    if context.get_user_options().multi_element_fma == 'warp':\n",
              '    if False:\n', 1)),
         ('`auto` in the option\'s FMA form',
-         sub(ME_GROUP, "        group, _ = fill(section, context, form=(\n"
-                       "            'slots' if taken.mapping is not None else 'lanes'))\n",
-             '        group, _ = fill(section, context)\n', 1)),
+         sub(ME_GROUP, "    group, why = fill(section, context, form=(\n"
+                       "        'slots' if taken.mapping is not None else 'lanes'))\n",
+             '    group, why = fill(section, context)\n', 1)),
         ('`force` under `auto`\'s rule',
-         sub(ME_GROUP, "    if mode == 'auto':\n        taken = auto_takes(section, context)[0]\n",
-             "    if mode in ('auto', 'force'):\n        taken = auto_takes(section, context)[0]\n", 1)),
+         sub(ME_GROUP, "    if mode != 'force':\n        declined = ''\n",
+             "    if True:\n        declined = ''\n", 1)),
         ('a kernel `auto` takes cut by fission',
-         sub(GEN, "    if opts.multi_element in ('force', 'auto'):\n",
-             "    if opts.multi_element == 'force':\n", 1)),
+         sub(GEN, "    if (opts.multi_element in ('force', 'auto')\n"
+                  "        or element_group.tile_asked(self._context) == 'high'):\n",
+             "    if (opts.multi_element == 'force'\n"
+             "        or element_group.tile_asked(self._context) == 'high'):\n", 1)),
         ('a description `auto` takes reassociated',
-         sub(GEN, "    elif options.multi_element != 'auto':\n      return False\n",
+         sub(GEN, "    elif (options.multi_element != 'auto'\n"
+                  "          and element_group.tile_asked(context) != 'high'):\n      return False\n",
              '    else:\n      return False\n', 1)),
         ('a cone needing the rows it writes, not the ones it reads',
          sub(ME_GROUP, '                    here = {k for i in here for k, _ in nonzeros.get(i, ())}\n',
@@ -5459,8 +5462,8 @@ GROUPS = {
         ('the work queue\'s loop taking a group',
          sub(ME_GROUP, '    if options.launch_control:\n', '    if False:\n', 1)),
         ('`auto` taking the layout as `force` does',
-         sub(ME_GROUP, "    if mode == 'auto':\n        taken = auto_takes(section, context)[0]\n",
-             "    if mode == 'never':\n        taken = auto_takes(section, context)[0]\n", 1)),
+         sub(ME_GROUP, "    if mode != 'force':\n        declined = ''\n",
+             "    if mode == 'never':\n        declined = ''\n", 1)),
         ('the layout on by default',
          sub(OPTIONS, "declare('multi_element',\n        default='off',\n",
              "declare('multi_element',\n        default='force',\n", 1)),
@@ -6920,7 +6923,7 @@ GROUPS = {
          sub(GEN, '            self._grid_one_round()\n            and self._context.get_user_options().resident_grid <= 0\n',
              '            False\n            and self._context.get_user_options().resident_grid <= 0\n', 1)),
         # `multi_element=auto` on NVIDIA (`element_group.AUTO_SLOTS`,
-        # `SLOT_DECLINES`), the slot form's defaults (`slot_read`,
+        # `FORM_CHOICES`), the slot form's defaults (`slot_read`,
         # `slot_one_round`) and its knobs (`tuning.SLOT_OUTPUT_READS`).
         ('`auto` not taking the slot form on NVIDIA',
          sub(ME_GROUP, '    if (context.target.backend, vendor) in SLOT_TARGETS:\n'
@@ -8369,9 +8372,9 @@ GROUPS = {
     # engines, and the tile taking a scaled section.
     'scaledtile': ('tests/test_scaled_products.py -n 6', [
         ("the tile refuses a scaled product again",
-         sub(ME_GROUP, "    if tile_asked(context) != 'high':\n        return 'the option is off'\n"
+         sub(ME_GROUP, "    a whole element, its columns at most 64.\"\"\"\n"
                        "    if section.dtype is not Datatype.F32:\n",
-             "    if tile_asked(context) != 'high':\n        return 'the option is off'\n"
+             "    a whole element, its columns at most 64.\"\"\"\n"
              "    if scaled_product(section) is not None:\n        return 'scaled'\n"
              "    if section.dtype is not Datatype.F32:\n", 1)),
         ("the folded A without its factors",
@@ -8651,6 +8654,81 @@ GROUPS = {
         ("a loop or written-out groups asked taken as auto",
          sub(ME_GROUP, "    asked = groups_asked(context)\n    if asked != 'auto':\n        return asked\n",
              "    asked = groups_asked(context)\n    if asked == 'never':\n        return asked\n", 1)),
+    ]),    # `multi_element=auto`'s table (H10-3): the forms its rows name, the
+    # fallback where the tile refuses (`auto_plan`), the table NVIDIA's
+    # (`form_choice`), the tile asked for without `force` (`plan`), on its
+    # engine whatever `matrix_engine` says (`tile_lowered`), the generator's
+    # gates for it, and what the kernel's comment says.
+    'formchoice': ('tests/test_form_choices.py -n 6', [
+        ("a row's tile not tried",
+         sub(ME_GROUP, "    if form == 'tile':\n        if declined is None:\n",
+             "    if False:\n        if declined is None:\n", 1)),
+        ("the row's fallback left to auto's rule",
+         sub(ME_GROUP, "        form = choice.fallback\n", "        form = None\n", 1)),
+        ("the table on every target",
+         sub(ME_GROUP, "    if (context.target.backend, vendor) not in SLOT_TARGETS:\n        return None\n"
+                       "    arch = str(getattr(context.target.hw, 'model', ''))\n",
+             "    if False:\n        return None\n"
+             "    arch = str(getattr(context.target.hw, 'model', ''))\n", 1)),
+        ("the tile asked for refused under `off`",
+         sub(ME_GROUP, "    if mode not in ('force', 'auto') and not asked:\n        return None\n",
+             "    if mode not in ('force', 'auto'):\n        return None\n", 1)),
+        ("the tile asked for left to `auto`'s table",
+         sub(ME_GROUP, "        if asked:\n            group, declined = fill(section, context, form='tile')\n",
+             "        if False:\n            group, declined = fill(section, context, form='tile')\n", 1)),
+        ("the tile's step on the engine the options say",
+         sub(ME_GROUP, "    lowered = lower(section, context, split=True, engine='auto',\n",
+             "    lowered = lower(section, context, split=True, engine=None,\n", 1)),
+        ("the tile's form falling through to the fill rule's",
+         sub(ME_GROUP, "        if form == 'tile':\n            # An F64 section's steps are DMMA's: the refusal's own words\n",
+             "        if False:\n            # An F64 section's steps are DMMA's: the refusal's own words\n", 1)),
+        ("auto's tile without its row",
+         sub(ME_GROUP, "                return dataclasses.replace(group, form_note=(\n"
+                       "                    f'the high-order tile (FORM_CHOICES: {choice.why})')), ''\n",
+             "                return group, ''\n", 1)),
+        ("auto's line on why not written",
+         sub(GEN, "      if self._element_group.form_note:\n",
+             "      if False:\n", 1)),
+        ("the tile's notes only where it is asked for",
+         sub(ME_GROUP, "    asked = tile_asked(context)\n    tile = group.section.tile\n    if tile is None:\n"
+                       "        if asked == 'off':\n",
+             "    asked = tile_asked(context)\n    if asked == 'off':\n        return []\n"
+             "    tile = group.section.tile\n    if tile is None:\n        if asked == 'off':\n", 1)),
+        ("the folded star unsaid where the tile implies it",
+         sub(ME_GROUP, "    if star_asked(context) != 'engine' and section.tile is None:\n",
+             "    if star_asked(context) != 'engine':\n", 1)),
+        ("B prepared unsaid where the tile implies it",
+         sub(ME_GROUP, "    if not ring_asked(context) and section.tile is None:\n",
+             "    if not ring_asked(context):\n", 1)),
+        ("the asked tile's kernel cut by fission",
+         sub(GEN, "    if (opts.multi_element in ('force', 'auto')\n"
+                  "        or element_group.tile_asked(self._context) == 'high'):\n",
+             "    if (opts.multi_element in ('force', 'auto')\n        or False):\n", 1)),
+        ("the asked tile's description reassociated",
+         sub(GEN, "          and element_group.tile_asked(context) != 'high'):\n      return False\n",
+             "          and True):\n      return False\n", 1)),
+        ("the request's reason not kept for auto's group",
+         sub(ME_GROUP, "            group = dataclasses.replace(group, tile_note=declined)\n",
+             "            group = dataclasses.replace(group, tile_note='')\n", 1)),
+        ("an F64 refusal in the steps' count",
+         sub(ME_GROUP, "            return None, (tile_refusal(section, context)\n"
+                       "                          if section.dtype is not Datatype.F32 else why)\n",
+             "            return None, why\n", 1)),
+        ("a tile's row with the per-element fallback not a decline",
+         sub(ME_GROUP, "    if entry is not None and 'element' in (entry.form, entry.fallback):\n",
+             "    if entry is not None and entry.form == 'element':\n", 1)),
+        ("the o8 volume's row the slot form",
+         sub(ME_GROUP, "    FormChoice((False, 3, 3, 120, False), (Datatype.F32,), TILE_ARCHS,\n"
+                       "               'tile',\n",
+             "    FormChoice((False, 3, 3, 120, False), (Datatype.F32,), TILE_ARCHS,\n"
+                       "               'slots',\n", 1)),
+        ("the premultiplied localFluxAll's o6 fallback the slot form",
+         sub(ME_GROUP, "               'form 1.54x and 1.29x (Vista 1173095, Horizon 108215)',\n"
+                       "               'element'),\n",
+             "               'form 1.54x and 1.29x (Vista 1173095, Horizon 108215)',\n"
+             "               'slots'),\n", 1)),
+        ("the tile's rows on sm_120 too",
+         sub(ME_GROUP, "TILE_ARCHS = ('sm_90', 'sm_100')\n", "TILE_ARCHS = ('sm_90', 'sm_100', 'sm_120')\n", 1)),
     ]),
 }
 

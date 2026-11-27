@@ -711,6 +711,10 @@ class ElementGroup:
     #: for (`tile_plan`), for the kernel's comment (`tile_notes`); '' where
     #: it did or nobody asked.
     tile_note: str = ''
+    #: The form `Options.multi_element` `auto` took the section in where a
+    #: row of `FORM_CHOICES` named the tile, and why (`auto_plan`), for the
+    #: kernel's comment; '' elsewhere.
+    form_note: str = ''
 
     @property
     def threads(self) -> int:
@@ -2740,15 +2744,14 @@ def scaled_product(section: GroupSection) -> Optional[str]:
 
 
 def tile_refusal(section: GroupSection, context) -> Optional[str]:
-    """Why the section cannot take the high-order tile (`Options.
-    matrix_tile` `high`), or None where it can: an F32 section of one
+    """Why the section cannot take the high-order tile -- asked for
+    (`Options.matrix_tile` `high`) or named by `auto`'s table
+    (`FORM_CHOICES`) -- or None where it can: an F32 section of one
     asynchronous step -- wgmma or tcgen05 -- with its star step folded in
     (`folded`), the only other steps that fold, and B streamed prepared
     (`Stage.prepared`, the operators carrying their numbers); D added a
     cell at a time, not by bulk reductions (yet); on wgmma a tile holding
     a whole element, its columns at most 64."""
-    if tile_asked(context) != 'high':
-        return 'the option is off'
     if section.dtype is not Datatype.F32:
         return (f'{section.dtype.name} sections have no asynchronous engine '
                 f'(the tile is 3xTF32)')
@@ -2805,9 +2808,12 @@ def tile_lowered(section: GroupSection, context, tile, ring: int = 0,
     # (`multi_element._tile_output`), wgmma's a row of D
     # (`multi_element._wgmma_bulk`).
     output = 'red' if tile is None else tile.output
-    lowered = lower(section, context, split=True, streamed=True,
-                    prepared=True, star='engine', output=output, tile=tile,
-                    ring=ring, wide=True)
+    # The target's asynchronous engine for the tile's step whatever
+    # `Options.matrix_engine` says, as the tile implies the folded star and
+    # the prepared ring: the tile is what was asked for.
+    lowered = lower(section, context, split=True, engine='auto',
+                    streamed=True, prepared=True, star='engine',
+                    output=output, tile=tile, ring=ring, wide=True)
     if operator_slots and lowered.ring_slots:
         lowered = _held(dataclasses.replace(lowered,
                                             ring_slots=operator_slots),
@@ -3034,14 +3040,15 @@ def _tile_output_note(section: GroupSection) -> str:
 
 
 def tile_notes(group: 'ElementGroup', context) -> List[str]:
-    """What the kernel's comment says of the high-order tile where the
-    options ask for it (`Options.matrix_tile`): its rows and warps, or why
-    the section did not take it (`ElementGroup.tile_note`)."""
+    """What the kernel's comment says of the high-order tile: its rows and
+    warps where the section takes it -- asked for (`Options.matrix_tile`)
+    or `auto`'s (`FORM_CHOICES`) -- and where the options ask for it and
+    the section did not take it, why (`ElementGroup.tile_note`)."""
     asked = tile_asked(context)
-    if asked == 'off':
-        return []
     tile = group.section.tile
     if tile is None:
+        if asked == 'off':
+            return []
         return [f'matrix_tile={asked} declined: '
                 f'{group.tile_note or "the plan took another layout"}']
     rows = (f'{tile.elements} elements, {tile.tiles} tile'
@@ -3546,10 +3553,11 @@ def precision_notes(section: GroupSection, context) -> List[str]:
 
 def star_notes(section: GroupSection, context) -> List[str]:
     """What the kernel's comment says of its star step where the options
-    ask for it folded (`Options.matrix_star` `engine`): which steps compute
-    their A themselves, where it goes, or why a step does not (and takes
-    the halves where they fit)."""
-    if star_asked(context) != 'engine':
+    ask for it folded (`Options.matrix_star` `engine`) or the high-order
+    tile implies it (`tile_lowered`): which steps compute their A
+    themselves, where it goes, or why a step does not (and takes the halves
+    where they fit)."""
+    if star_asked(context) != 'engine' and section.tile is None:
         return []
     notes = []
     for step in section.steps:
@@ -3922,11 +3930,11 @@ def ring_asked(context) -> bool:
 
 def ring_notes(section: GroupSection, context) -> List[str]:
     """What the kernel's comment says of its asynchronous steps' B where the
-    options ask for it prepared (`Options.matrix_ring`): the table each
-    step's B comes from -- the description's numbers, the operators'
-    pointers not read for it -- and its ring; or why a step keeps B
-    converted by the element warps."""
-    if not ring_asked(context):
+    options ask for it prepared (`Options.matrix_ring`) or the high-order
+    tile implies it (`tile_lowered`): the table each step's B comes from --
+    the description's numbers, the operators' pointers not read for it --
+    and its ring; or why a step keeps B converted by the element warps."""
+    if not ring_asked(context) and section.tile is None:
         return []
     from tensorforge.backend.instructions.compute.primitives import nvidia
     sm = nvidia.sm_of(context)
@@ -5116,7 +5124,10 @@ def fill(section: GroupSection, context,
     and the section fits it (`lanes_plan`): a group of a warp's lanes
     (`lane_elements`), an element each.  Its slot form likewise
     (`slots_plan`): a warp's elements, several lanes each, in each of the
-    block's warps.
+    block's warps.  The high-order tile (`tile_plan`) where the options ask
+    for it (`Options.matrix_tile` `high`), ahead of the forms below, and
+    alone where `form` is `tile` -- `auto`'s table's (`FORM_CHOICES`) or
+    the request's under `off` and `auto` (`plan`).
     Otherwise the size is the table's (`table_elements`) where the block
     holds it, halved while it does not -- in shared memory, in threads --
     and `MIN_ELEMENTS` the last size tried.  Each step's lowering is the
@@ -5165,11 +5176,17 @@ def fill(section: GroupSection, context,
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
     # The high-order tile ahead of everything where the options ask for it
     # and the section takes it (`tile_plan`); where it does not, the plans
-    # below, and `plan` says why in the group (`tile_notes`).
-    if tile_asked(context) == 'high':
-        found, _ = tile_plan(section, context, budget)
+    # below, and `plan` says why in the group (`tile_notes`).  As a form of
+    # its own, the tile or why not.
+    if form == 'tile' or tile_asked(context) == 'high':
+        found, why = tile_plan(section, context, budget)
         if found is not None:
             return found, ''
+        if form == 'tile':
+            # An F64 section's steps are DMMA's: the refusal's own words
+            # rather than their count.
+            return None, (tile_refusal(section, context)
+                          if section.dtype is not Datatype.F32 else why)
     scaled = scaled_product(section)
     if scaled is not None:
         # The lanes form and its slot form scale a product by its factor
@@ -5366,85 +5383,221 @@ AUTO_LANES: Dict[str, Tuple[Datatype, ...]] = {'intel': (Datatype.F32,)}
 
 #: Where `Options.multi_element` `auto` takes the slot form (`slots_plan`),
 #: by vendor: the element types of the sections it takes, but where a
-#: measurement declines one (`SLOT_DECLINES`).  Measured against the
+#: measurement declines one (`FORM_CHOICES`).  Measured against the
 #: per-element kernel (d), the time an element, SeisSol's elastic kernels at
 #: o4 and o6 with the stars dense and as SeisSol's GPU builds store them,
 #: the best placement and grid: on GH200 (Vista 1161223) the volume
 #: 0.43-0.58 of d's, the volume with sparse stars 0.39-0.62, the derivative
 #: 0.63-0.89, localFlux 0.72-0.78 at o4, localFluxAll 0.34-0.62; on GB200
 #: (Horizon 102368) 0.35-0.54, 0.29-0.51, 0.41-0.78, 0.53-0.67 and
-#: 0.39-0.62 -- and slower at o6 where `SLOT_DECLINES` says.
+#: 0.39-0.62 -- and slower where `FORM_CHOICES` says.
 AUTO_SLOTS: Dict[str, Tuple[Datatype, ...]] = {
     'nvidia': (Datatype.F32, Datatype.F64)}
 
 
 @dataclass(frozen=True)
-class SlotDecline:
-    """A kind of section the slot form ran slower than the per-element
-    kernel on, which `Options.multi_element` `auto` therefore builds per
-    element (`slot_decline`): what the section is (`slot_signature`), at
-    which element types and on which targets, and the measurement."""
+class FormChoice:
+    """A kind of section `Options.multi_element` `auto` builds in the form
+    measured fastest for it (`form_choice`, `auto_plan`): what the section
+    is (`slot_signature`), at which element types and on which targets,
+    the form, the measurement, and the form taken where that one refuses
+    the section by its own rule.
+
+    `form`: `tile`, the high-order tile (`tile_plan`); `slots`, the lanes
+    form's slot form as `auto`'s rule takes it (`auto_takes`); `element`,
+    no plan -- the per-element kernel.  `fallback`: the form where `form`
+    is the tile and the section does not take it (`tile_refusal`), measured
+    in the same job; None for `auto`'s rule."""
     #: Chained or not, its mixing products, its operator products, the
     #: rows of its output, and an operand of its mixing stored sparse or
     #: not (`slot_signature`).
     signature: Tuple[bool, int, int, int, bool]
     dtypes: Tuple[Datatype, ...]
-    #: The architectures it declines on, as prefixes of the target's
-    #: (`sm_90` takes `sm_90a`); None for every one.
+    #: The architectures it holds on, as prefixes of the target's (`sm_90`
+    #: takes `sm_90a`); None for every one.
     archs: Optional[Tuple[str, ...]]
+    form: str
     why: str
+    fallback: Optional[str] = None
 
 
-#: Where `auto` declines the slot form, measured, against the per-element
-#: kernel (d): a kind of section that lost on GH200 and on GB200 declines on
-#: every target, those not measured included -- what lost there looks like
-#: the form's own cost and not the part's -- and one that lost on one of them
-#: on that one alone.  An entry from a new measurement: the section's
-#: `slot_signature` (the SeisSol kernel's, as `tests/test_slot_mapping.py`
-#: reads its descriptions -- with the stars stored sparse, as SeisSol's GPU
-#: builds store them, another signature), its element types, None or the
-#: architectures it lost on, and in `why` the times and the jobs that
-#: measured them.
-SLOT_DECLINES: Tuple[SlotDecline, ...] = (
+#: The forms of the table (`FormChoice.form`, `FormChoice.fallback`).
+FORMS = ('tile', 'slots', 'element')
+
+#: The architectures the high-order tile has an engine on, by prefix:
+#: wgmma's sm_90a and tcgen05's sm_100a (`_async_engine`).
+TILE_ARCHS = ('sm_90', 'sm_100')
+
+#: What `auto` takes a kind of section in on NVIDIA (`SLOT_TARGETS`),
+#: measured against the per-element kernel (d) and each form against its
+#: own job's d, ns an element at 262144: the first row that matches
+#: (`form_choice`).  Where the slot form lost on GH200 and on GB200, the
+#: per-element kernel on every target, those not measured included -- what lost
+#: there looks like the form's own cost and not the part's -- and where it
+#: lost on one of them, on that one alone.  The high-order tile on the two
+#: architectures it runs on, F32 alone (3xTF32).  A row from a new
+#: measurement: the section's `slot_signature` (the SeisSol kernel's, as
+#: `tests/test_form_choices.py` reads its descriptions -- with the stars
+#: stored sparse, as SeisSol's GPU builds store them, another signature; the
+#: fluxes premultiplied, as those builds run them, others), its element
+#: types, None or the architectures, the form, in `why` the times and the
+#: jobs that measured them, and the fallback where the form is the tile.
+FORM_CHOICES: Tuple[FormChoice, ...] = (
     # localFlux, a face: a mixing product and two operator products.
-    SlotDecline((False, 1, 2, 56, False), (Datatype.F32, Datatype.F64), None,
-                'localFlux at o6 ran slower in the slot form than per element, '
-                'its best placement and grid against d: on GH200 1.07x in F32 '
-                'and 1.21x in F64 (Vista 1161223), on GB200 1.22x and 1.19x '
-                '(Horizon 102368) -- nine shuffles a row of the 56 rows of I it '
-                'mixes, and five idle lanes of 32, against the element form'),
+    FormChoice((False, 1, 2, 56, False), (Datatype.F32, Datatype.F64), None,
+               'element',
+               'localFlux at o6 ran slower in the slot form than per element, '
+               'its best placement and grid against d: on GH200 1.07x in F32 '
+               'and 1.21x in F64 (Vista 1161223), on GB200 1.22x and 1.19x '
+               '(Horizon 102368) -- nine shuffles a row of the 56 rows of I it '
+               'mixes, and five idle lanes of 32, against the element form'),
+    FormChoice((False, 1, 2, 120, False), (Datatype.F32, Datatype.F64), None,
+               'element',
+               'localFlux at o8 ran slower in the slot form than per element: '
+               'on GH200 1.18x in F32 and 2.03x in F64 (Vista 1173095), on '
+               'GB200 1.16x and 1.81x (Horizon 108215)'),
     # localFluxAll, four faces.
-    SlotDecline((False, 4, 8, 56, False), (Datatype.F64,), None,
-                'localFluxAll at o6 in F64 ran slower in the slot form than per '
-                'element, its best placement and grid against d: on GH200 '
-                '2.08x, 904 B of spill (Vista 1161223), on GB200 1.04x '
-                '(Horizon 102368)'),
+    FormChoice((False, 4, 8, 56, False), (Datatype.F64,), None, 'element',
+               'localFluxAll at o6 in F64 ran slower in the slot form than per '
+               'element, its best placement and grid against d: on GH200 '
+               '2.08x, 904 B of spill (Vista 1161223), on GB200 1.04x '
+               '(Horizon 102368)'),
     # The time derivative, an order a phase, its stars stored dense.
-    SlotDecline((True, 15, 15, 56, False), (Datatype.F64,), ('sm_90',),
-                'the derivative at o6 in F64 with its stars dense ran no faster '
-                'in the slot form than per element on GH200, its best placement '
-                'and grid against d: 1.01x (Vista 1161223 and 1167207) -- where '
-                'it was 0.78x on GB200 (Horizon 102368), and 0.83x on GH200 '
-                'with the stars sparse'),
+    FormChoice((True, 15, 15, 56, False), (Datatype.F64,), ('sm_90',),
+               'element',
+               'the derivative at o6 in F64 with its stars dense ran no faster '
+               'in the slot form than per element on GH200, its best placement '
+               'and grid against d: 1.01x (Vista 1161223 and 1167207) -- where '
+               'it was 0.78x on GB200 (Horizon 102368), and 0.83x on GH200 '
+               'with the stars sparse'),
+    FormChoice((True, 21, 21, 120, False), (Datatype.F32,), None, 'element',
+               'the derivative at o8 in F32 with its stars dense ran slower '
+               'in the slot form than per element: 1.25x on GH200 (Vista '
+               '1173095), 1.10x on GB200 (Horizon 108215)'),
+    FormChoice((True, 21, 21, 120, False), (Datatype.F64,), ('sm_100',),
+               'element',
+               'the derivative at o8 in F64 with its stars dense ran no '
+               'faster in the slot form than per element on GB200: 1.01x '
+               '(Horizon 108215) -- where it ran 0.97x on GH200 (Vista '
+               '1173095), which keeps it, at 1752 B of stack'),
     # On sm_120, the derivative at o4 with its stars dense and sparse.
-    SlotDecline((True, 9, 9, 20, False), (Datatype.F32,), ('sm_120',),
-                'the derivative at o4 in F32 with its stars dense ran slower in '
-                'the slot form than per element on sm_120, measured on a '
-                'DRAM-bound consumer card (an RTX 5070 Laptop GPU, batch '
-                '65536): 1.15x d in one round and 1.29x by the occupancy grid '
-                '(the l9d package\'s local run, 2026-11-22), 1.12x under `auto` '
-                '(the l9e package\'s, 2026-11-24) -- where it ran 0.57-0.80x of '
-                'd\'s time on GH200 and GB200'),
-    SlotDecline((True, 9, 9, 20, True), (Datatype.F32,), ('sm_120',),
-                'the derivative at o4 in F32 with its stars sparse ran slower in '
-                'the slot form than per element on sm_120, measured on a '
-                'DRAM-bound consumer card (an RTX 5070 Laptop GPU, batch '
-                '65536): 1.11x d in one round and 1.22x by the occupancy grid '
-                '(the l9d package\'s local run, 2026-11-22), 1.01x under `auto`, '
-                'within the run\'s noise (the l9e package\'s, 2026-11-24) -- '
-                'where it ran 0.41-0.88x of d\'s time on GH200 and GB200'),
+    FormChoice((True, 9, 9, 20, False), (Datatype.F32,), ('sm_120',),
+               'element',
+               'the derivative at o4 in F32 with its stars dense ran slower in '
+               'the slot form than per element on sm_120, measured on a '
+               'DRAM-bound consumer card (an RTX 5070 Laptop GPU, batch '
+               '65536): 1.15x d in one round and 1.29x by the occupancy grid '
+               '(the l9d package\'s local run, 2026-11-22), 1.12x under `auto` '
+               '(the l9e package\'s, 2026-11-24) -- where it ran 0.57-0.80x of '
+               'd\'s time on GH200 and GB200'),
+    FormChoice((True, 9, 9, 20, True), (Datatype.F32,), ('sm_120',),
+               'element',
+               'the derivative at o4 in F32 with its stars sparse ran slower in '
+               'the slot form than per element on sm_120, measured on a '
+               'DRAM-bound consumer card (an RTX 5070 Laptop GPU, batch '
+               '65536): 1.11x d in one round and 1.22x by the occupancy grid '
+               '(the l9d package\'s local run, 2026-11-22), 1.01x under `auto`, '
+               'within the run\'s noise (the l9e package\'s, 2026-11-24) -- '
+               'where it ran 0.41-0.88x of d\'s time on GH200 and GB200'),
+    # The volume, its stars dense: the slot form at o6, the tile from o8.
+    FormChoice((False, 3, 3, 56, False), (Datatype.F32,), TILE_ARCHS,
+               'slots',
+               'the volume at o6 with its stars dense: the slot form 0.43 of '
+               'd\'s time on GH200 and 0.40 on GB200, the tile 0.79 and 0.42 '
+               '(Vista 1173095, Horizon 108215)'),
+    FormChoice((False, 3, 3, 120, False), (Datatype.F32,), TILE_ARCHS,
+               'tile',
+               'the volume at o8 with its stars dense: the tile 0.48 of d\'s '
+               'time on GH200 and 0.29 on GB200, the slot form 0.83 and 0.59 '
+               '-- waiting on instruction fetch, 183 KB of code past the '
+               'instruction cache (Vista 1173095, Horizon 108215)',
+               'slots'),
+    FormChoice((False, 3, 3, 220, False), (Datatype.F32,), TILE_ARCHS,
+               'tile',
+               'the volume at o10 with its stars dense: the tile 0.29 of d\'s '
+               'time on GH200 (Vista 1169572) and 0.14 on GB200 (Horizon '
+               '107520); the slot form refuses it, kDivM past its literals',
+               'element'),
+    FormChoice((False, 3, 3, 364, False), (Datatype.F32,), TILE_ARCHS,
+               'tile',
+               'the volume at o12 with its stars dense: the tile 0.12 of d\'s '
+               'time on GH200 (Vista 1169572) and 0.10 on GB200 (Horizon '
+               '107520); the slot form refuses it, kDivM past its literals',
+               'element'),
+    FormChoice((False, 3, 3, 120, False), (Datatype.F64,), None, 'element',
+               'the volume at o8 in F64 with its stars dense ran no faster in '
+               'the slot form than per element: 0.99x on GH200 at 1168 B of '
+               'stack (Vista 1173095), 1.03x on GB200 (Horizon 108215)'),
+    # The volume, its stars sparse as SeisSol's GPU builds store them.
+    FormChoice((False, 3, 3, 20, True), (Datatype.F32,), TILE_ARCHS, 'slots',
+               'the volume at o4 with its stars sparse: the slot form 0.50 of '
+               'd\'s time on GH200 and 0.32 on GB200, the tile 1.59 and 0.81 '
+               '(Vista 1173095, Horizon 108215)'),
+    FormChoice((False, 3, 3, 56, True), (Datatype.F32,), TILE_ARCHS, 'slots',
+               'the volume at o6 with its stars sparse: the slot form 0.41 of '
+               'd\'s time on GH200 and 0.33 on GB200, the tile 0.81 and 0.43 '
+               '(Vista 1173095, Horizon 108215)'),
+    FormChoice((False, 3, 3, 120, True), (Datatype.F32,), TILE_ARCHS, 'tile',
+               'the volume at o8 with its stars sparse: the tile 0.51 of d\'s '
+               'time on GH200 and 0.29 on GB200, the slot form 0.73 and 0.53 '
+               '(Vista 1173095, Horizon 108215)',
+               'slots'),
+    # localFluxAll premultiplied, as SeisSol's GPU builds run it: four faces,
+    # a mixing product and an operator product each.
+    FormChoice((False, 4, 4, 56, False), (Datatype.F32,), TILE_ARCHS, 'tile',
+               'localFluxAll premultiplied at o6: the tile 0.60 of d\'s time '
+               'on GH200 and 0.50 on GB200, its faces written out; the slot '
+               'form 1.54x and 1.29x (Vista 1173095, Horizon 108215)',
+               'element'),
+    FormChoice((False, 4, 4, 120, False), (Datatype.F32,), TILE_ARCHS, 'tile',
+               'localFluxAll premultiplied at o8: the tile 0.57 of d\'s time '
+               'on GH200 and 0.45 on GB200, its faces written out; the slot '
+               'form declines (Vista 1173095, Horizon 108215)',
+               'element'),
+    FormChoice((False, 4, 4, 220, False), (Datatype.F32,), TILE_ARCHS, 'tile',
+               'localFluxAll premultiplied at o10: the tile 0.34 of d\'s time '
+               'on GH200 and 0.23 on GB200, its faces written out; the slot '
+               'form refuses (Vista 1173095, Horizon 108215)',
+               'element'),
+    FormChoice((False, 4, 4, 364, False), (Datatype.F32,), TILE_ARCHS, 'tile',
+               'localFluxAll premultiplied at o12: the tile 0.14 of d\'s time '
+               'on GH200 and 0.066 on GB200, its faces written out; the slot '
+               'form refuses (Vista 1173095, Horizon 108215)',
+               'element'),
+    # neighboringFlux premultiplied, a face: one mixing product, one
+    # operator product -- too little work a trip for the tile on GH200.
+    FormChoice((False, 1, 1, 56, False), (Datatype.F32,), None, 'element',
+               'neighboringFlux premultiplied at o6 ran no faster in the slot '
+               'form than per element, 1.06x on GH200 and 1.02x on GB200, the '
+               'tile 1.61x and 1.33x (Vista 1173095, Horizon 108215)'),
+    FormChoice((False, 1, 1, 120, False), (Datatype.F32,), ('sm_90',),
+               'element',
+               'neighboringFlux premultiplied at o8 on GH200: the slot form '
+               '1.04x d\'s time, the tile 1.20x (Vista 1173095) -- where the '
+               'slot form ran 0.93x on GB200 (Horizon 108215)'),
+    FormChoice((False, 1, 1, 120, False), (Datatype.F32,), ('sm_100',),
+               'slots',
+               'neighboringFlux premultiplied at o8 on GB200: the slot form '
+               '0.93 of d\'s time, the tile 1.18x (Horizon 108215)'),
+    FormChoice((False, 1, 1, 220, False), (Datatype.F32,), ('sm_100',),
+               'tile',
+               'neighboringFlux premultiplied at o10 on GB200: the tile 0.68 '
+               'of d\'s time (Horizon 108215); the slot form refuses',
+               'element'),
+    FormChoice((False, 1, 1, 364, False), (Datatype.F32,), ('sm_100',),
+               'tile',
+               'neighboringFlux premultiplied at o12 on GB200: the tile 0.28 '
+               'of d\'s time (Horizon 108215); the slot form refuses',
+               'element'),
+    FormChoice((False, 1, 1, 220, False), (Datatype.F32,), ('sm_90',),
+               'element',
+               'neighboringFlux premultiplied at o10 on GH200: the tile 1.23x '
+               'd\'s time (Vista 1173095); the slot form refuses'),
+    FormChoice((False, 1, 1, 364, False), (Datatype.F32,), ('sm_90',),
+               'element',
+               'neighboringFlux premultiplied at o12 on GH200: the tile 1.09x '
+               'd\'s time (Vista 1173095); the slot form refuses'),
 )
-
 
 #: The output's rows past which a section counts as long for the slot form's
 #: defaults (`slot_read`, `slot_one_round`): o6's 56 and not o4's 20.
@@ -5532,7 +5685,7 @@ def slot_one_round(group: Optional['ElementGroup'], context) -> bool:
 
 def slot_signature(section: GroupSection
                    ) -> Tuple[bool, int, int, int, bool]:
-    """What `SLOT_DECLINES` knows a section by: chained or not, its mixing
+    """What `FORM_CHOICES` knows a section by: chained or not, its mixing
     and its operator products, the rows of its output, and whether an
     operand of its mixing is stored sparse -- SeisSol's stars as its GPU
     builds store them, which take the derivative at o6 in F64 on GH200 from
@@ -5545,16 +5698,32 @@ def slot_signature(section: GroupSection
             kinds.count(Kind.OPERATOR), Cones(section).rows[1], bool(sparse))
 
 
-def slot_decline(section: GroupSection, context) -> Optional[SlotDecline]:
-    """The entry of `SLOT_DECLINES` that declines `section` on the context's
-    target, or None."""
+def form_choice(section: GroupSection, context) -> Optional[FormChoice]:
+    """The first row of `FORM_CHOICES` that names the form of `section` on
+    the context's target -- its signature, its element type, the target's
+    architecture among the row's -- or None.  The table is NVIDIA's
+    (`SLOT_TARGETS`): elsewhere `auto`'s rule is the vendor's own
+    (`AUTO_LANES`)."""
+    vendor = getattr(context.target.hw, 'vendor', None)
+    if (context.target.backend, vendor) not in SLOT_TARGETS:
+        return None
     arch = str(getattr(context.target.hw, 'model', ''))
     signature = slot_signature(section)
-    for entry in SLOT_DECLINES:
+    for entry in FORM_CHOICES:
         if (entry.signature == signature and section.dtype in entry.dtypes
                 and (entry.archs is None
                      or any(arch.startswith(a) for a in entry.archs))):
             return entry
+    return None
+
+
+def slot_decline(section: GroupSection, context) -> Optional[FormChoice]:
+    """The row of `FORM_CHOICES` that keeps `auto` off the slot form of
+    `section` on the context's target -- the per-element kernel its form,
+    or its fallback behind the tile -- or None."""
+    entry = form_choice(section, context)
+    if entry is not None and 'element' in (entry.form, entry.fallback):
+        return entry
     return None
 
 
@@ -5565,7 +5734,7 @@ def auto_takes(section: GroupSection,
 
     On NVIDIA its slot form (`AUTO_SLOTS`), chained sections included,
     unless another form is asked for (`Options.multi_element_fma`) or a
-    measurement declines it (`SLOT_DECLINES`).  Elsewhere the lanes form:
+    measurement declines it (`slot_decline`).  Elsewhere the lanes form:
     where the target's vendor takes the section's element type
     (`AUTO_LANES`), the lanes form is not declined (`Options.
     multi_element_fma` `warp`), and the plan holds the output in one row
@@ -5602,24 +5771,73 @@ def auto_takes(section: GroupSection,
     return lanes, ''
 
 
+def auto_plan(section: GroupSection, context,
+              declined: Optional[str] = None
+              ) -> Tuple[Optional[ElementGroup], str]:
+    """`Options.multi_element` `auto`'s group of `section`, or None and why
+    not.  The form the first row of `FORM_CHOICES` names (`form_choice`):
+    the high-order tile where the section takes it, the row's fallback
+    where it does not; the per-element kernel where the row or its fallback
+    says so.  `auto`'s rule (`auto_takes`) where no row names the section,
+    or the row's form or its fallback is the slot form: the slot form on
+    NVIDIA, the lanes form elsewhere.  `declined`: why the tile declined
+    the section where the options asked for it already (`plan`), so that
+    it is not planned twice."""
+    choice = form_choice(section, context)
+    form = None if choice is None else choice.form
+    if form == 'tile':
+        if declined is None:
+            group, declined = fill(section, context, form='tile')
+            if group is not None:
+                return dataclasses.replace(group, form_note=(
+                    f'the high-order tile (FORM_CHOICES: {choice.why})')), ''
+        declined = f'the high-order tile declined: {declined}'
+        form = choice.fallback
+    else:
+        declined = ''
+    if form == 'element':
+        return None, (f'{declined}; the per-element kernel, the row\'s '
+                      f'fallback' if declined else choice.why)
+    taken, why = auto_takes(section, context)
+    if taken is None:
+        return None, f'{declined}; {why}' if declined else why
+    group, why = fill(section, context, form=(
+        'slots' if taken.mapping is not None else 'lanes'))
+    if group is not None and declined:
+        by = ('the slot form, the row\'s fallback' if choice.fallback
+              else '`auto`\'s rule')
+        group = dataclasses.replace(group, form_note=(
+            f'{declined}; {by} (FORM_CHOICES: {choice.why})'))
+    return group, why
+
+
 def plan(descrs: Sequence, context) -> Optional[ElementGroup]:
     """The section's multi-element plan, or None: where
     `Options.multi_element` is `force`, every product classifies and the
-    fill rule finds a group; where `auto`, the group of the form
-    `auto_takes` takes the section in -- the slot form on NVIDIA, the lanes
-    form elsewhere."""
+    fill rule finds a group; where `auto`, the group `auto_plan` takes the
+    section in -- the form `FORM_CHOICES` names, the slot form on NVIDIA,
+    the lanes form elsewhere.  The high-order tile where the options ask
+    for it (`Options.matrix_tile` `high`) and the section takes it, under
+    `off` and `auto` as under `force`: where it does not, `off` builds per
+    element and `auto` follows its table."""
     mode = context.get_user_options().multi_element
-    if mode not in ('force', 'auto'):
+    asked = tile_asked(context) == 'high'
+    if mode not in ('force', 'auto') and not asked:
         return None
     section, _ = classify(descrs)
     if section is None:
         return None
-    if mode == 'auto':
-        taken = auto_takes(section, context)[0]
-        if taken is None:
-            return None
-        group, _ = fill(section, context, form=(
-            'slots' if taken.mapping is not None else 'lanes'))
+    if mode != 'force':
+        declined = ''
+        if asked:
+            group, declined = fill(section, context, form='tile')
+            if group is not None or mode != 'auto':
+                return group
+        group, _ = auto_plan(section, context, declined if asked else None)
+        if group is not None and asked:
+            # Why the tile the options asked for was not taken, for the
+            # kernel's comment (`tile_notes`).
+            group = dataclasses.replace(group, tile_note=declined)
         return group
     group, _ = fill(section, context)
     if (group is not None and group.section.tile is None
@@ -5691,6 +5909,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'SlotMapping',
            'plan_exchange', 'slot_needs', 'slot_registers', 'slot_terms',
            'slots_plan', 'split_mapping', 'wrapped_mapping', 'AUTO_SLOTS',
-           'SLOT_AHEAD_ROWS', 'SLOT_DECLINES', 'SLOT_GH200_RULES', 'SlotDecline',
+           'SLOT_AHEAD_ROWS', 'FORM_CHOICES', 'FORMS', 'SLOT_GH200_RULES',
+           'FormChoice', 'TILE_ARCHS', 'auto_plan', 'form_choice',
            'slot_decline',
            'slot_one_round', 'slot_read', 'slot_signature']

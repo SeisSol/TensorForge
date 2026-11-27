@@ -1937,9 +1937,11 @@ class Generator:
     hw = self._context.target.hw
     if getattr(opts, 'fission', 0) != 'auto':
       return False
-    if opts.multi_element in ('force', 'auto'):
+    if (opts.multi_element in ('force', 'auto')
+        or element_group.tile_asked(self._context) == 'high'):
       # The multi-element layout plans the kernel's one section whole
-      # (`element_group.plan`), and a piece would be a section of its own.
+      # (`element_group.plan`), and a piece would be a section of its own --
+      # the high-order tile's, asked for, under `off` too.
       flat = [op for descr in self._descr_list for op in descr.operations()]
       if element_group.plan(flat, self._context) is not None:
         return False
@@ -4068,22 +4070,26 @@ class Generator:
         f'{self._generate_launcher_proto(with_defaults=True)};\n')
 
   def _lanes_take(self, context) -> bool:
-    """Whether the multi-element layout's lanes form takes the description
-    as yateto writes it (`element_group.plan`): then it is not reassociated
+    """Whether the multi-element layout takes the description as yateto
+    writes it (`element_group.plan`): then it is not reassociated
     (`Options.reassociate_products`).  The rewrite puts the operator product
     first and mixes its intermediate after it, which a lane would hold
     whole -- the order the lanes form refuses, and AMD's default.  Under
-    `force` where the lanes form or its slot form is asked for, and under
-    `auto`, whose rule takes the lanes form (`element_group.auto_takes`)."""
+    `force` where the lanes form or its slot form is asked for and takes
+    it; under `auto` and where the high-order tile is asked for, every plan
+    -- the tile's too, which folds the mixing into its operator step."""
     options = context.get_user_options()
     if options.multi_element == 'force':
       if element_group.fma_form(context) not in ('lanes', 'slots'):
         return False
-    elif options.multi_element != 'auto':
+    elif (options.multi_element != 'auto'
+          and element_group.tile_asked(context) != 'high'):
       return False
     flat = [op for descr in self._descr_list for op in descr.operations()]
     group = element_group.plan(flat, context)
-    return group is not None and group.lanes is not None
+    if group is None:
+      return False
+    return group.lanes is not None or options.multi_element != 'force'
 
   def _lane_map(self):
     """The batch loop's lanes of an element where the multi-element
@@ -5357,6 +5363,8 @@ class Generator:
       for note in element_group.tile_notes(self._element_group,
                                            self._context):
         writer(f'// tile: {note}')
+      if self._element_group.form_note:
+        writer(f'// multi_element=auto: {self._element_group.form_note}')
     groups = self._launch_groups()
     if len(groups) > 1:
       writer(f'// launches: {len(groups)}, cut at the grid barriers, one after '

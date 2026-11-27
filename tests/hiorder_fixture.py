@@ -23,7 +23,9 @@ import numpy as np
 import seissol_suite as fx
 
 PATTERNS = fx.STORE / 'hiorder-kdivm.npz'
+FLUX_PATTERNS = fx.STORE / 'premultiplied-flux.npz'
 ORDERS = (10, 12)
+FLUX_ORDERS = (6, 8, 10, 12)
 SYSTEM = 'elastic-linearck'
 
 
@@ -32,10 +34,11 @@ def basis(order: int) -> int:
     return order * (order + 1) * (order + 2) // 6
 
 
-def pattern(order: int, name: str) -> np.ndarray:
+def pattern(order: int, name: str, store=PATTERNS) -> np.ndarray:
     """The nonzero pattern of the operator `name` at `order`, a boolean
-    matrix of the basis's functions square."""
-    found = np.load(PATTERNS)
+    matrix of the basis's functions square; the premultiplied fluxes' from
+    their own `store` (`FLUX_PATTERNS`)."""
+    found = np.load(store)
     rows, cols = (int(x) for x in found[f'o{order}/{name}/shape'])
     bits = np.unpackbits(found[f'o{order}/{name}/bits'])[:rows * cols]
     return bits.reshape(rows, cols).astype(bool)
@@ -101,3 +104,83 @@ def description(order: int, precision: str = 's',
         operator['bbox'] = [[r0, 0], [r1, m]]
         tmp['bbox'] = [[0, 0], [m, 9]]
     return desc
+
+
+#: SeisSol's premultiplied flux kernels, as its GPU builds run them
+#: (PREMULTIPLY_FLUX), by name: each term's matrix of the element (A) and
+#: its operator.
+FLUXES = {
+    'gpu_localFluxAllPre': tuple((f'AplusTAll({i})', f'plusFluxMatrices({i})')
+                                 for i in range(4)),
+    'gpu_neighboringFluxPre[0]': (('AminusT', 'minusFluxMatrices(0)'),)}
+
+
+def volume_description(order: int, precision: str = 's') -> dict:
+    """The gpu_volume description at `order`: the store's to order 8, this
+    fixture's at 10 and 12 (`description`)."""
+    if order in ORDERS:
+        return description(order, precision)
+    return fx.description(SYSTEM, f'{SYSTEM}-o{order}-{precision}',
+                          'gpu_volume')
+
+
+def flux_description(kernel: str, order: int, precision: str = 's') -> dict:
+    """The premultiplied flux kernel `kernel` (`FLUXES`) at `order` (6 to
+    12): gpu_localFluxAllPre, Q += sum_{i<4} plusFluxMatrices(i) (I
+    AplusTAll(i)), and gpu_neighboringFluxPre[0], Q += minusFluxMatrices(0)
+    (I AminusT).  The volume's description at the order made a sum of such
+    terms, each the volume's first -- I times a 9x9 matrix of the element,
+    an operator times that -- its operator stored on all of the basis's
+    functions, its entries on the operator's pattern at the order
+    (`FLUX_PATTERNS`, which tools/hiorder_fixture.py packs from the modal
+    basis's rDivM, fMrT, fP and rT), seeded as the volume's are.  The store
+    holds the fluxes as yateto sends them, unpremultiplied, whose two, three
+    and five asynchronous steps the high-order tile does not take."""
+    if order not in FLUX_ORDERS:
+        raise ValueError(f'order {order}: the fixture holds {FLUX_ORDERS}')
+    base = volume_description(order, precision)
+    named = {t['name']: t for t in base['tensors']}
+    first, second = base['operations'][0], base['operations'][1]
+    n = basis(order)
+    npad = named['I']['storage']['shape'][0]
+    tensors = [copy.deepcopy(named['I']), copy.deepcopy(named['Q'])]
+    operations = []
+    for t, (aname, fname) in enumerate(FLUXES[kernel]):
+        a = copy.deepcopy(named['star(0)'])
+        a['name'] = aname
+        tmp = copy.deepcopy(named['_tmp0'])
+        tmp['name'] = f'_tmp{t}'
+        tmp['storage'].update(shape=[npad, 9], sizes=[npad, 9])
+        f = copy.deepcopy(named['kDivM(0)'])
+        f['name'] = fname
+        f['storage'].update(shape=[npad, n], sizes=[npad, n])
+        where = pattern(order, fname, FLUX_PATTERNS)
+        numbers = seeded(order, fname, where)
+        f['values'] = {'kind': 'entries', 'data': [
+            [[int(i), int(j)], float(numbers[i, j])]
+            for i, j in np.argwhere(where)]}
+        s0 = copy.deepcopy(named['_scalar0'])
+        s0['name'] = f'_scalar{2 * t}'
+        s1 = copy.deepcopy(named['_scalar1'])
+        s1['name'] = f'_scalar{2 * t + 1}'
+        tensors += [a, tmp, s0, f, s1]
+        mix = copy.deepcopy(first)
+        mix['result']['name'] = tmp['name']
+        mix['result']['bbox'] = [[0, 0], [n, 9]]
+        mix['args'][0]['bbox'] = [[0, 0], [n, 9]]
+        mix['args'][1]['name'] = aname
+        mix['linear']['alpha']['name'] = s0['name']
+        # Its rows of Q from the first that holds an entry to the last.
+        found = np.nonzero(where.any(axis=1))[0]
+        r0, r1 = int(found.min()), int(found.max()) + 1
+        product = copy.deepcopy(second)
+        product['result']['bbox'] = [[r0, 0], [r1, 9]]
+        product['args'][0]['name'] = fname
+        product['args'][0]['bbox'] = [[r0, 0], [r1, n]]
+        product['args'][1]['name'] = tmp['name']
+        product['args'][1]['bbox'] = [[0, 0], [n, 9]]
+        product['linear']['alpha']['name'] = s1['name']
+        operations += [mix, product]
+    out = copy.deepcopy(base)
+    out['tensors'], out['operations'] = tensors, operations
+    return out

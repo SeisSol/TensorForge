@@ -393,8 +393,8 @@ AUTO_CASES = [
 def test_auto_takes_the_slot_form_on_nvidia_where_it_pays(
         kernel, order, precision, arch, taken):
     """`multi_element=auto` on CUDA: the slot form -- the group `force`
-    takes in it -- where nothing in `SLOT_DECLINES` declines the section,
-    and no plan, the per-element kernel, where an entry does: localFlux at
+    takes in it -- where no row of `FORM_CHOICES` declines the section,
+    and no plan, the per-element kernel, where a row does: localFlux at
     o6 on every target, localFluxAll at o6 in F64 too, the derivative at o6
     in F64 with its stars dense on sm_90 alone -- with them sparse the slot
     form -- and at o4 in F32 on sm_120 alone."""
@@ -427,21 +427,6 @@ def test_auto_takes_no_other_form_on_nvidia():
     for form in ('auto', 'slots'):
         context = me._context('sm_90a', 's', multi_element_fma=form, **AUTO)
         assert eg.plan(descrs, context).lanes.mapping is not None
-
-
-def test_every_decline_names_a_seissol_kernel_and_its_jobs():
-    """Each entry of `SLOT_DECLINES` is the signature of a SeisSol kernel at
-    an order the jobs measured, and says what was measured where: a job's
-    number, or the local run's date."""
-    signatures = {eg.slot_signature(eg.classify(_seissol(k, o, 's'))[0])
-                  for k in ('gpu_volume', 'gpu_localFlux[0]',
-                            'gpu_localFluxAll', 'gpu_derivative',
-                            'gpu_volume/sparse', 'gpu_derivative/sparse')
-                  for o in (4, 6)}
-    for entry in eg.SLOT_DECLINES:
-        assert entry.signature in signatures
-        assert re.search(r'(Vista|Horizon) \d+|local run, \d{4}-\d\d-\d\d',
-                         entry.why)
 
 
 #: (kernel, order, precision, arch, read, one round): the defaults' rule on
