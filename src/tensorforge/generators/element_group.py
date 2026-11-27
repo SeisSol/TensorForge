@@ -2389,16 +2389,42 @@ def pool_mixers(bands: int) -> int:
     return bands + 1
 
 
+#: Whether the plan refuses the pool everywhere (`pool_refusal`,
+#: `POOL_P3`): its implementation stays, reachable where a test turns this
+#: off, for a pool that pays.
+POOL_REFUSED = True
+
+#: Why: P3 (Horizon 107909, a GB200).  A's slots are numbered per trip
+#: (`_Fold.round`: a block's slot its number modulo the slots), so that where
+#: a trip has 1 mod 4 blocks slot 0 takes a trip's last block and the next
+#: one's first back to back, and a quarter's other mixers draw that next
+#: trip's fifth block -- slot 0 again -- whose wait passes on the parity of
+#: a phase two short while the two before are unconsumed: o6's 5 and o10's
+#: 21 blocks wrong under a perturbed timing (the tensor memory check, many
+#: trips), o8's 11 right (tests/pool_model.py's per-trip numbering).  And no
+#: faster where right: o8 6.17 ns an element against the bands' 6.01, the
+#: mma warp's issue path the limit, its waits for A 0.3 % of the kernel's
+#: samples.
+POOL_P3 = ('P3 (Horizon 107909) found it wrong under perturbed timing at o6 '
+           'and o10 -- A\'s slots numbered per trip, a quarter\'s mixers '
+           'alias slot 0 where a trip has 1 mod 4 blocks -- and no faster at '
+           'o8, 6.17 ns an element against the bands\' 6.01, the mma warp\'s '
+           'issue path the limit')
+
+
 def pool_refusal(engine: str, schedule: str, groups: str, handoffs: str,
                  aslots: int, bands: int) -> Optional[str]:
     """Why the tile mixes no pool where the options ask for one
-    (`Options.matrix_pool` `on`), or None: on wgmma, whose warpgroups each
-    fill their own A; where the tiles go by claims, a trip's tile no stride
-    says; with the group's blocks written out, a block its band's by
-    number; with one ring for A and B, its full side the bands' and the
-    operator warp's; and where A's ring has fewer slots than a quarter has
-    mixers -- a mixer's wait for a slot would pass on the parity of a phase
-    two short of it (tests/pool_model.py)."""
+    (`Options.matrix_pool` `on`), or None: everywhere since P3
+    (`POOL_REFUSED`, `POOL_P3`); and where a test lets the pool be, on
+    wgmma, whose warpgroups each fill their own A; where the tiles go by
+    claims, a trip's tile no stride says; with the group's blocks written
+    out, a block its band's by number; with one ring for A and B, its full
+    side the bands' and the operator warp's; and where A's ring has fewer
+    slots than a quarter has mixers -- a mixer's wait for a slot would pass
+    on the parity of a phase two short of it (tests/pool_model.py)."""
+    if POOL_REFUSED:
+        return POOL_P3
     if engine != 'tcgen05':
         return 'wgmma\'s warpgroups each fill their own A'
     if schedule != 'static':
@@ -5627,6 +5653,7 @@ __all__ = ['ASYNC_LOWERINGS', 'ASYNC_N', 'AUTO_LANES', 'Buffer', 'Cones',
            'tile_handoffs', 'wait_asked', 'tile_wait', 'input_issue_asked',
            'tile_input_issue', 'input_ahead_asked', 'tile_input_ahead',
            'pool_asked', 'pool_mixers', 'pool_refusal', 'tile_pool',
+           'POOL_REFUSED', 'POOL_P3',
            'TILE_BANDS', 'TILE_BOX_ROWS', 'TILE_BULK_ROWS', 'TILE_TCGEN05',
            'TMEM_BUDGET',
            'tile_dslots', 'tile_groups', 'tile_output', 'TILE_UNROLLED_ROWS',

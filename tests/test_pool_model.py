@@ -92,3 +92,43 @@ def test_fewer_a_slots_at_two_bands():
         quarters=2, bands=2, trips=2, blocks=5, aslots=2))
     assert found['errors'].get('A empty alias', 0) > 0
     assert found['deadlocks'] > 0
+
+
+#: The kernel's shapes at one quarter -- its two band warps and its epilogue
+#: warp on A's four slots, two trips -- by their blocks a trip: o6's 5 and
+#: o10's 21 (1 mod 4), o8's 11 (3 mod 4).
+SHAPES = {'o6': 5, 'o10': 21, 'o8': 11}
+
+
+def _shape(order, numbering):
+    return pool_model.violations(pool_model.Model(
+        quarters=1, bands=2, trips=2, blocks=SHAPES[order], aslots=4,
+        numbering=numbering))
+
+
+@pytest.mark.parametrize('order', ['o6', 'o10'])
+def test_the_kernels_per_trip_numbering_aliases_at_one_mod_four(order):
+    """A's slots numbered per trip, as the kernel numbers them: at o6's and
+    o10's blocks, 1 mod 4, slot 0 takes a trip's last block and the next
+    one's first back to back, and the quarter's other mixers draw the next
+    trip's fifth block -- slot 0 again -- whose wait passes on the parity of
+    a phase two short: what P3 found wrong (`element_group.POOL_P3`)."""
+    found = _shape(order, 'trip')
+    assert found['errors'].get('A empty alias', 0) > 0
+    assert found['deadlocks'] > 0
+
+
+@pytest.mark.parametrize('order', ['o6', 'o10'])
+def test_ring_numbering_is_clean_on_the_same_shapes(order):
+    """The same shapes with A's slots numbered as a ring over the trips: no
+    aliasing wait, no deadlock."""
+    found = _shape(order, 'ring')
+    assert found['deadlocks'] == 0 and found['errors'] == {}
+
+
+@pytest.mark.parametrize('numbering', ['trip', 'ring'])
+def test_o8s_eleven_blocks_are_clean_under_both_numberings(numbering):
+    """o8's 11 blocks, 3 mod 4: no quarter's mixers get two uses of a slot
+    ahead under either numbering -- right at o8, as P3 found it."""
+    found = _shape('o8', numbering)
+    assert found['deadlocks'] == 0 and found['errors'] == {}

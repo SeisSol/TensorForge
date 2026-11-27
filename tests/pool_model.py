@@ -23,7 +23,14 @@ give D's slot back once every quarter has.
 
 No wait on the trip barrier can alias: a warp's next arrival there needs the
 phase it waits for.  A wait for an A slot can, where A's ring has fewer
-slots than a quarter has mixers (`element_group.pool_refusal`).
+slots than a quarter has mixers (`element_group.pool_refusal`) -- and, with
+A's slots numbered per trip as the kernel numbers them (`numbering`
+`trip`: a block's slot its number in the trip modulo the slots), where a
+trip has 1 mod 4 blocks on four slots: slot 0 takes a trip's last block and
+the next trip's first back to back, and a quarter's other mixers reach the
+next trip's fifth block, slot 0 again, two uses ahead -- what P3 found
+wrong at o6 and o10 (`element_group.POOL_P3`).  Numbered as a ring over
+the trips (`ring`, the default), no such wait.
 
 `violations` reports every state from which no agent can go on before all
 are done (a deadlock); a wait that passes on the parity of a phase two short
@@ -47,7 +54,14 @@ class Model:
 
     def __init__(self, quarters: int = 2, bands: int = 1, trips: int = 3,
                  blocks: int = 2, aslots: int = 2, dslots: int = 2,
-                 reset: str = 'after', drain: str = 'behind'):
+                 reset: str = 'after', drain: str = 'behind',
+                 numbering: str = 'ring'):
+        #: How A's slots are numbered: `ring` over the trips (an item's slot
+        #: its number over every trip modulo the slots), or `trip` as the
+        #: kernel numbers them (`compute.multi_element._Fold.round`): from 0
+        #: again each trip, a slot's use the trip's uses of it before and the
+        #: block's own (`slot_use`).
+        self.numbering = numbering
         self.quarters, self.bands, self.trips = quarters, bands, trips
         self.blocks, self.aslots, self.dslots = blocks, aslots, dslots
         self.reset = reset
@@ -67,6 +81,15 @@ class Model:
     #   (holding an item), `bar` (arrived, waiting for the barrier's phase
     #   `trip`), `reset` (behind the barrier, to reset), `end` (behind the
     #   last trip, draining), `done`.
+
+    def slot_use(self, item: int) -> Tuple[int, int]:
+        """Item `item`'s slot of A's ring and its use of it (`numbering`)."""
+        if self.numbering == 'ring':
+            return item % self.aslots, item // self.aslots
+        trip, block = divmod(item, self.blocks)
+        slot = block % self.aslots
+        per = (self.blocks - 1 - slot) // self.aslots + 1
+        return slot, trip * per + block // self.aslots
 
     def start(self):
         ctr = tuple((0, p) for q in range(self.quarters) for p in range(2))
@@ -152,7 +175,7 @@ class Model:
                         state, i, ('wait', trip, trip * self.blocks + value,
                                    drained), ctr=tuple(nc)), errors))
             elif pc == 'wait':
-                s, use = item % self.aslots, item // self.aslots
+                s, use = self.slot_use(item)
                 alias = False
                 if use > 0:
                     ready, alias = self._passes(aempty[s], use - 1)
@@ -225,7 +248,7 @@ class Model:
                     state, i, ('done', trip, -1, drained)), []))
         if mma < self.items:
             trip, block = divmod(mma, self.blocks)
-            s, use = mma % self.aslots, mma // self.aslots
+            s, use = self.slot_use(mma)
             d, duse = trip % self.dslots, trip // self.dslots
             ok, errors = True, []
             if block == 0 and duse > 0:

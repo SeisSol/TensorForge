@@ -2524,8 +2524,9 @@ def test_the_wait_forms_build(form, tmp_path):
 #: both; A's ring and B's as one, alone and with both, and so with the mma
 #: warp waiting by try_wait with a suspend-time hint and by test_wait; and
 #: I's bulk copies by the lane elect.sync picks, in chunks and whole, and
-#: the next trip's I asked of L2 a trip ahead, alone and with it; and A
-#: mixed in a pool, I in chunks and whole (`test_hiorder_pool`).
+#: the next trip's I asked of L2 a trip ahead, alone and with it; and the
+#: mixer pool asked for, I in chunks and whole -- declined since P3, the
+#: bands' kernel (`element_group.POOL_P3`).
 GPU_VARIANTS = {'': {}, 'unrolled': {'matrix_groups': 'unrolled'},
                 'loop': {'matrix_groups': 'loop'},
                 'whole': {'matrix_input_chunks': 'whole'},

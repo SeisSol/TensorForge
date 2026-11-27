@@ -3515,18 +3515,17 @@ declare('matrix_pool',
         doc='Whether the high-order tile on tcgen05 mixes A in a pool '
             '(`matrix_tile` `high`, `element_group.TileRows.pool`): `off`, '
             'the default, the star bands a block each in turn '
-            '(`matrix_bands`), the epilogue warpgroup waiting for D; `on`, '
-            'the bands\' warps and the epilogue\'s mixers alike, each '
-            'taking the trip\'s blocks by tickets of its quarter of tensor '
-            'memory\'s lanes and filling that quarter of the block\'s A, the '
-            'mixers meeting when the trip\'s tickets run out and the '
-            'epilogue draining D behind them (`multi_element._Pool`).  '
-            'Declined on wgmma, where the tiles go by claims '
-            '(`tile_schedule`), with the group\'s blocks written out '
-            '(`matrix_groups` `unrolled`), with one ring for A and B '
-            '(`matrix_handoffs` `one`), and where A\'s ring has fewer slots '
-            'than a quarter has mixers, whose waits would pass on the '
-            'parity of a phase two short (tests/pool_model.py).')
+            '(`matrix_bands`), the epilogue warpgroup waiting for D; `on` '
+            'asks for the bands\' warps and the epilogue\'s mixing alike, '
+            'each taking the trip\'s blocks by tickets of its quarter of '
+            'tensor memory\'s lanes (`multi_element._Pool`) -- and is '
+            'declined everywhere since P3 (Horizon 107909, a GB200; '
+            '`element_group.POOL_P3`): wrong under perturbed timing at o6 '
+            'and o10, A\'s slots numbered per trip, so that a quarter\'s '
+            'mixers alias slot 0 where a trip has 1 mod 4 blocks; and no '
+            'faster at o8, 6.17 ns an element against the bands\' 6.01, the '
+            'mma warp\'s issue path the limit.  The kernel is then the '
+            'bands\', the comment saying why.')
 
 declare('matrix_handoffs',
         default='two',

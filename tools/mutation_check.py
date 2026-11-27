@@ -8354,6 +8354,19 @@ GROUPS = {
          sub(ME_SECTION, "        key = (id(product), k, self.slot)\n        if key not in self.times:\n",
              "        key = (id(product), self.slot)\n        if key not in self.times:\n", 1)),
     ]),
+    # The mixer pool refused since P3 (`element_group.POOL_REFUSED`,
+    # `POOL_P3`), and the pool model's per-trip numbering of A's slots, P3's
+    # failure as a regression record.
+    'poolrefusal': ('tests/test_pool_refusal.py tests/test_pool_model.py -n 4', [
+        ("the pool's refusal dropped",
+         sub(ME_GROUP, "POOL_REFUSED = True\n", "POOL_REFUSED = False\n", 1)),
+        ("the refusal's note dropped",
+         sub(ME_GROUP, "    if POOL_REFUSED:\n        return POOL_P3\n",
+             "    if POOL_REFUSED:\n        return 'declined'\n", 1)),
+        ("the model's per-trip numbering the ring's",
+         sub(Path('tests/pool_model.py'), "        if self.numbering == 'ring':\n",
+             "        if True:\n", 1)),
+    ]),
     'hipool': ('tests/test_hiorder_pool.py -n 6', [
         ("the options' pool unread",
          sub(ME_GROUP, "    return getattr(context.get_user_options(), 'matrix_pool', 'off')\n",
