@@ -8320,10 +8320,6 @@ GROUPS = {
                        "        # The lanes form and its slot form scale a product by its factor\n",
              "    scaled = None\n    if scaled is not None:\n"
              "        # The lanes form and its slot form scale a product by its factor\n", 1)),
-        ("the tile takes a scaled product",
-         sub(ME_GROUP, "    scaled = scaled_product(section)\n    if scaled is not None:\n"
-                       "        return f'{scaled}, a scaled product, which the tile does not take yet'\n",
-             "", 1)),
         ("the lanes form's mixing without its factor",
          sub(ME_SECTION, "                if p.scalar is not None:\n"
                          "                    # A scaled product: its factor in the small operand's\n",
@@ -8366,6 +8362,33 @@ GROUPS = {
         ("the model's per-trip numbering the ring's",
          sub(Path('tests/pool_model.py'), "        if self.numbering == 'ring':\n",
              "        if True:\n", 1)),
+    ]),
+    # Scaled products in the high-order tile (H10-2): the factors of a folded
+    # product's star step and of the product itself in its A
+    # (`compute.multi_element._star_numbers`, `_star_factor`), on both
+    # engines, and the tile taking a scaled section.
+    'scaledtile': ('tests/test_scaled_products.py -n 6', [
+        ("the tile refuses a scaled product again",
+         sub(ME_GROUP, "    if tile_asked(context) != 'high':\n        return 'the option is off'\n"
+                       "    if section.dtype is not Datatype.F32:\n",
+             "    if tile_asked(context) != 'high':\n        return 'the option is off'\n"
+             "    if scaled_product(section) is not None:\n        return 'scaled'\n"
+             "    if section.dtype is not Datatype.F32:\n", 1)),
+        ("the folded A without its factors",
+         sub(ME_SECTION, "        factor = _star_factor(trip, m, p)\n        if factor is not None:\n",
+             "        factor = _star_factor(trip, m, p)\n        if False:\n", 1)),
+        ("the star step's factor dropped from the folded A",
+         sub(ME_SECTION, "    factors = [_scalar(trip, p.scalar.tensor) for p in (mixing, product)\n",
+             "    factors = [_scalar(trip, p.scalar.tensor) for p in (product,)\n", 1)),
+        ("the product's own factor dropped from the folded A",
+         sub(ME_SECTION, "    factors = [_scalar(trip, p.scalar.tensor) for p in (mixing, product)\n",
+             "    factors = [_scalar(trip, p.scalar.tensor) for p in (mixing,)\n", 1)),
+        ("two factors taken for one",
+         sub(ME_SECTION, "    return trip.builder.op('mul', trip.fp, factors[0], factors[1], hint='f')\n",
+             "    return factors[0]\n", 1)),
+        ("each product's A scaled by the first product's factors",
+         sub(ME_SECTION, "        factor = _star_factor(trip, m, p)\n",
+             "        factor = _star_factor(trip, star_mixes(section, step)[0].products[0], step.products[0])\n", 1)),
     ]),
     'hipool': ('tests/test_hiorder_pool.py -n 6', [
         ("the options' pool unread",

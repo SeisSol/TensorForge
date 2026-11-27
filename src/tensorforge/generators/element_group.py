@@ -2749,9 +2749,6 @@ def tile_refusal(section: GroupSection, context) -> Optional[str]:
     a whole element, its columns at most 64."""
     if tile_asked(context) != 'high':
         return 'the option is off'
-    scaled = scaled_product(section)
-    if scaled is not None:
-        return f'{scaled}, a scaled product, which the tile does not take yet'
     if section.dtype is not Datatype.F32:
         return (f'{section.dtype.name} sections have no asynchronous engine '
                 f'(the tile is 3xTF32)')
@@ -5165,13 +5162,6 @@ def fill(section: GroupSection, context,
         # leaves the rest of an assigned window as it is.
         return None, ('a chained section is the lanes form\'s alone (its '
                       'phases one after another, `GroupSection.phases`)')
-    scaled = scaled_product(section)
-    if scaled is not None:
-        # The lanes form and its slot form scale a product by its factor
-        # (`compute.multi_element._LaneTrip`); the warp form, the matrix
-        # tilings and the high-order tile do not yet.
-        return None, (f'{scaled}, a scaled product, is the lanes form\'s '
-                      f'and its slot form\'s alone so far')
     budget = hw.max_local_mem_size_per_block - SHARED_RESERVE
     # The high-order tile ahead of everything where the options ask for it
     # and the section takes it (`tile_plan`); where it does not, the plans
@@ -5180,6 +5170,14 @@ def fill(section: GroupSection, context,
         found, _ = tile_plan(section, context, budget)
         if found is not None:
             return found, ''
+    scaled = scaled_product(section)
+    if scaled is not None:
+        # The lanes form and its slot form scale a product by its factor
+        # (`compute.multi_element._LaneTrip`), and the high-order tile
+        # (`_star_numbers`); the warp form and the matrix tilings do not
+        # yet.
+        return None, (f'{scaled}, a scaled product, is the lanes forms\' '
+                      f'and the high-order tile\'s alone so far')
     # The matrix tiling, with B in TF32 halves where that costs no group
     # size -- the halves take twice B's room -- then the FMA forms.  An
     # asynchronous engine's tiling is followed by mma_sync's, for a group

@@ -5,8 +5,9 @@
 scalar`): yateto's alpha, a product times a scalar -- `dest (+)= s first x
 second` -- as the frontend hands it on, one more operand over no axis.  The
 lanes form and its slot form scale a product by its factor
-(`compute.multi_element._LaneTrip`); the warp form, the matrix tilings and
-the high-order tile refuse it so far.
+(`compute.multi_element._LaneTrip`), and the high-order tile on both engines
+(`_star_numbers`: the factors in the folded A); the warp form and the
+matrix tilings refuse it so far.
 
 Checked numerically on the host oracle against NumPy in double precision,
 with factors 0.37, 2.5 and -1.3 a product, never 1 and never the same for
@@ -119,21 +120,22 @@ def test_a_product_of_the_two_alone_has_no_factor():
                          ids=['numbers', 'by-value'])
 def test_the_other_forms_refuse_a_scaled_product(by_value):
     """The volume at o4 scaled: the warp form and the matrix tilings refuse
-    it (`fill`), and so does the high-order tile, the kernel's comment
-    saying why (`tile_refusal`); the lanes form and its slot form take
-    it."""
+    it (`fill`); the lanes form, its slot form and the high-order tile take
+    it, the tile on both engines."""
     descrs = _descrs('volume', 4, 's', by_value)
     section, _ = eg.classify(descrs)
     context = me._context('sm_100a', 's', multi_element='force')
     group, why = eg.fill(section, context)
     assert group is None
-    assert why.endswith('a scaled product, is the lanes form\'s and its '
-                        'slot form\'s alone so far')
-    tile = me._context('sm_100a', 's', multi_element='force',
-                       matrix_engine='auto', matrix_tile='high')
-    assert eg.tile_refusal(section, tile).endswith(
-        'a scaled product, which the tile does not take yet')
-    assert eg.plan(descrs, tile) is None
+    assert why.endswith('a scaled product, is the lanes forms\' and the '
+                        'high-order tile\'s alone so far')
+    for arch in ('sm_90a', 'sm_100a'):
+        # The plan's: `tile_refusal` reads a section as lowered.
+        tile = me._context(arch, 's', multi_element='force',
+                           matrix_engine='auto', matrix_tile='high')
+        group = eg.plan(descrs, tile)
+        assert group is not None and group.section.tile is not None
+        assert eg.tile_refusal(group.section, tile) is None
     for options in (SLOTS, LANES):
         group = eg.plan(descrs, me._context('sm_100a', 's', **options))
         assert group is not None and group.lanes is not None
@@ -216,6 +218,104 @@ def test_the_factors_are_parameters_where_the_kernel_is_handed_them():
         return len([n for n in head.split(',')
                     if 'const float m' in n and '*' not in n])
     assert handed(True) == handed(False) + 18
+
+
+# -- the high-order tile -------------------------------------------------------- #
+
+#: The high-order tile asked for (`test_hiorder_tile.HIGH`), both engines'.
+TILE = {'multi_element': 'force', 'matrix_engine': 'auto',
+        'matrix_tile': 'high'}
+
+#: The tile's cases on the oracle: the volume at o4 and o6 on wgmma (sm_90a)
+#: and tcgen05 (sm_100a), I as the options leave it, and in chunks of 16
+#: rows on tcgen05.
+TILE_ORACLE = [(4, 'sm_90a', {}), (4, 'sm_100a', {}), (6, 'sm_90a', {}),
+               (6, 'sm_100a', {}),
+               (4, 'sm_100a', {'matrix_input_chunks': 16}),
+               (6, 'sm_100a', {'matrix_input_chunks': 16})]
+
+
+def _output(gen, tensors):
+    return next(t for t in tensors.values() if not t.is_tmp
+                and t.addressing.kind is not Addressing.NONE
+                and any(d.writes().tensor is t for outer in gen.descr_list
+                        for d in outer.operations()))
+
+
+@pytest.mark.parametrize('by_value', [False, True],
+                         ids=['numbers', 'by-value'])
+@pytest.mark.parametrize(
+    'order,arch,options', TILE_ORACLE,
+    ids=[f'o{o}-{a}' + (f'-k{x["matrix_input_chunks"]}' if x else '')
+         for o, a, x in TILE_ORACLE])
+def test_the_tile_scales_on_the_oracle(order, arch, options, by_value):
+    """The volume with every product scaled in the high-order tile, on the
+    host oracle over 31 elements -- three trips of fourteen, the last one's
+    eleven past the batch masked -- against NumPy without a race: the star
+    step's factor and the operator product's both in the folded A
+    (`compute.multi_element._star_numbers`), each 0.37, 2.5 or -1.3, the
+    description's numbers or handed to the kernel."""
+    descrs = _descrs('volume', order, 's', by_value)
+    section, _ = eg.classify(descrs)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        gen = me._generate(descrs, me._context(arch, 's', **TILE, **options))
+    group = gen._element_group
+    assert group is not None and group.section.tile is not None
+    values = _factors(section)
+    assert bool(values) is by_value
+    tensors, inputs, scalars, after = me._on_the_oracle(
+        gen, 31, scalar_values=values)
+    output = _output(gen, tensors)
+    got = after(output)
+    want = me._reference(descrs)(inputs, inputs[output.alias], scalars)
+    for e in range(31):
+        scale = np.abs(want[e]).max() or 1.0
+        error = np.abs(got[e] - want[e]).max() / scale
+        assert error <= 1e-6, (e, error)
+
+
+def _volume_case(order, by_value):
+    """The harness's case of the scaled volume in the high-order tile: the
+    factors the description's numbers or handed to the kernel at the values
+    `SCALARS` names."""
+    descrs = _descrs('volume', order, 's', by_value)
+    section, _ = eg.classify(descrs)
+    values = _factors(section)
+    reference = me._reference(descrs)
+    return types.SimpleNamespace(
+        NAME=(f'scaled_products_tile_volume_o{order}s_'
+              f'{"values" if by_value else "numbers"}'),
+        DTYPE=me._dtype('s'), BATCH=4099, TOL=me._normwise(),
+        OPTIONS=dict(TILE), INPUT_TRANSFORM=me._described(descrs),
+        SCALARS=values,
+        descr_list=lambda: _descrs('volume', order, 's', by_value),
+        reference=lambda inputs, dest_in: reference(inputs, dest_in,
+                                                    values))
+
+
+@pytest.mark.parametrize('by_value', [False, True],
+                         ids=['numbers', 'by-value'])
+@pytest.mark.parametrize('order', [6, 8, 10, 12])
+def test_the_scaled_tile_computes_on_the_gpu(order, by_value, target,
+                                             cache_root, tensorforge_include):
+    """On a GH200 (wgmma) or GB200 (tcgen05): the scaled volume in the
+    high-order tile against NumPy over a batch ending in a partial group,
+    several trips a block -- the factors as numbers and handed to the
+    kernel."""
+    from harness.runner import run_case
+    if target.backend != 'cuda' or target.arch not in ('sm_90', 'sm_100'):
+        pytest.skip('no GPU with wgmma or tcgen05')
+    import dataclasses
+    import test_multi_element_async as tma
+    special = dataclasses.replace(target, arch=target.arch + 'a')
+    tma._nvcc_builds(special.arch)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        result = run_case(_volume_case(order, by_value), special, cache_root,
+                          tensorforge_include)
+    assert result.passed, (result.max_abs_err, result.max_rel_err,
+                           result.detail)
 
 
 # -- on the GPU ----------------------------------------------------------------- #

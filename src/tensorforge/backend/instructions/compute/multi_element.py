@@ -2676,19 +2676,40 @@ def _star_numbers(trip, step, element, column) -> list:
     GroupSection.star`): for each product of `step`, its star step's small
     operand's column `column` of the thread's element `element` -- the
     volume's 27, a star's column for each direction -- read once a trip
-    from the group's buffers."""
+    from the group's buffers.  Scaled products' factors (`element_group.
+    Product.scalar`) are in them: the star step's product's and `step`'s
+    product's, both scaling that product's A (`_star_factor`)."""
     from tensorforge.generators.element_group import star_mixes
     b, section = trip.builder, trip.section
     numbers = []
-    for mix in star_mixes(section, step):
+    for mix, p in zip(star_mixes(section, step), step.products):
         m = mix.products[0]
         small = section.buffer(m.second.tensor)
         source = trip.buffers[id(small.tensor)]
         base = b.op('mul', INDEX, element, small.per_element, hint='b')
-        numbers.append([b.load(source, _index(b, 'add', base, _box_index(
+        values = [b.load(source, _index(b, 'add', base, _box_index(
             b, q, column, (small.rows[0], small.cols[0]), small.pitch), 'a'),
-            type_=trip.fp, hint='s') for q in range(*m.depth)])
+            type_=trip.fp, hint='s') for q in range(*m.depth)]
+        factor = _star_factor(trip, m, p)
+        if factor is not None:
+            values = [b.op('mul', trip.fp, v, factor, hint='s')
+                      for v in values]
+        numbers.append(values)
     return numbers
+
+
+def _star_factor(trip, mixing, product):
+    """The factor of a folded product's A (`_star_numbers`): the star
+    step's product's (`mixing`) times the asynchronous step's (`product`),
+    each a number or the value the kernel is handed (`_scalar`) -- a
+    product of the two alone none -- or None where neither is scaled."""
+    factors = [_scalar(trip, p.scalar.tensor) for p in (mixing, product)
+               if p.scalar is not None]
+    if not factors:
+        return None
+    if len(factors) == 1:
+        return factors[0]
+    return trip.builder.op('mul', trip.fp, factors[0], factors[1], hint='f')
 
 
 def _star_block(trip, step, numbers, element, k0, rows, live,
