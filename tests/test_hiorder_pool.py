@@ -7,7 +7,11 @@ plan takes it and why it declines it, the kernel's text -- the counters,
 the two pool regions, the mixers' barrier and the reset behind it -- the
 host oracle under several schedules against the star bands, and o8's
 build.  The protocol itself, every interleaving at a small size, its rules
-dropped one at a time: tests/test_pool_model.py."""
+dropped one at a time: tests/test_pool_model.py.
+
+The plan refuses the pool everywhere since P3 (`element_group.
+POOL_REFUSED`, tests/test_pool_refusal.py); these tests let it be, so that
+its implementation stays tested for a pool that pays."""
 
 from __future__ import annotations
 
@@ -22,6 +26,13 @@ from tensorforge.generators import element_group as eg
 
 #: The pool asked for.
 POOL = {'matrix_pool': 'on'}
+
+
+@pytest.fixture(autouse=True)
+def _the_pool_let_be(monkeypatch):
+    """The plan's refusal of the pool since P3 lifted (`element_group.
+    POOL_REFUSED`): the implementation under test."""
+    monkeypatch.setattr(eg, 'POOL_REFUSED', False)
 
 
 def _group(order=8, arch='sm_100a', **options):

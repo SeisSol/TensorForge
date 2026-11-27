@@ -8296,6 +8296,77 @@ GROUPS = {
     # refusals and its shared memory, the kernel's counters, regions, the
     # mixers' barrier and the reset behind it.  The protocol's own rules
     # dropped: tests/test_pool_model.py.
+    # Scaled products (H10-1, `element_group.Product.scalar`): yateto's
+    # alpha classified, the lanes form and its slot form scaling each
+    # product by its factor -- a number folded or multiplied in, a scalar
+    # handed to the kernel multiplied into the operand -- and the other
+    # forms refusing it.
+    'scaledproducts': ('tests/test_scaled_products.py -n 6', [
+        ("a scaled product's factor dropped by the classification",
+         sub(ME_GROUP, "        products.append(Product(op, kind, first, second, op.dest, op.add,\n"
+                       "                                scalar=factor))\n",
+             "        products.append(Product(op, kind, first, second, op.dest, op.add,\n"
+             "                                scalar=None))\n", 1)),
+        ("a scaled product refused as before",
+         sub(ME_GROUP, "        factor = _product_factor(op)\n        if len(op.ops) != (2 if factor is None else 3):\n",
+             "        factor = None\n        if len(op.ops) != (2 if factor is None else 3):\n", 1)),
+        ("the products' factors handed to the kernel not among the section's scalars",
+         sub(ME_GROUP, "        if p.scalar is not None and not any(\n"
+                       "                t is p.scalar.tensor for t in scalars):\n"
+                       "            scalars.append(p.scalar.tensor)\n",
+             "", 1)),
+        ("the warp form takes a scaled product",
+         sub(ME_GROUP, "    scaled = scaled_product(section)\n    if scaled is not None:\n"
+                       "        # The lanes form and its slot form scale a product by its factor\n",
+             "    scaled = None\n    if scaled is not None:\n"
+             "        # The lanes form and its slot form scale a product by its factor\n", 1)),
+        ("the tile takes a scaled product",
+         sub(ME_GROUP, "    scaled = scaled_product(section)\n    if scaled is not None:\n"
+                       "        return f'{scaled}, a scaled product, which the tile does not take yet'\n",
+             "", 1)),
+        ("the lanes form's mixing without its factor",
+         sub(ME_SECTION, "                if p.scalar is not None:\n"
+                         "                    # A scaled product: its factor in the small operand's\n",
+             "                if False:\n"
+             "                    # A scaled product: its factor in the small operand's\n", 1)),
+        ("the slot form's mixing without its factor",
+         sub(ME_SECTION, "                if p.scalar is not None:\n"
+                         "                    # A scaled product: its factor in the lane's\n",
+             "                if False:\n"
+             "                    # A scaled product: its factor in the lane's\n", 1)),
+        ("an operator product's factor handed to the kernel not multiplied in",
+         sub(ME_SECTION, "                if scaled and not folded:\n"
+                         "                    x = self.scaled(product, k, x)\n",
+             "", 1)),
+        ("an operator product's number not folded with its factor",
+         sub(ME_SECTION, "                    v = self.number(product, i, k, value * _factor_value(\n"
+                         "                        product) if folded else value)\n",
+             "                    v = self.number(product, i, k, value)\n", 1)),
+        ("a folded factor multiplied in besides",
+         sub(ME_SECTION, "                if scaled and not folded:\n"
+                         "                    x = self.scaled(product, k, x)\n",
+             "                if scaled:\n"
+             "                    x = self.scaled(product, k, x)\n", 1)),
+        ("one factor for every product",
+         sub(ME_SECTION, "        key = ('factor', id(product.scalar.tensor))\n",
+             "        key = ('factor', 0)\n", 1)),
+        ("a scaled operand taken for every contraction index",
+         sub(ME_SECTION, "        key = (id(product), k, self.slot)\n        if key not in self.times:\n",
+             "        key = (id(product), self.slot)\n        if key not in self.times:\n", 1)),
+    ]),
+    # The mixer pool refused since P3 (`element_group.POOL_REFUSED`,
+    # `POOL_P3`), and the pool model's per-trip numbering of A's slots, P3's
+    # failure as a regression record.
+    'poolrefusal': ('tests/test_pool_refusal.py tests/test_pool_model.py -n 4', [
+        ("the pool's refusal dropped",
+         sub(ME_GROUP, "POOL_REFUSED = True\n", "POOL_REFUSED = False\n", 1)),
+        ("the refusal's note dropped",
+         sub(ME_GROUP, "    if POOL_REFUSED:\n        return POOL_P3\n",
+             "    if POOL_REFUSED:\n        return 'declined'\n", 1)),
+        ("the model's per-trip numbering the ring's",
+         sub(Path('tests/pool_model.py'), "        if self.numbering == 'ring':\n",
+             "        if True:\n", 1)),
+    ]),
     'hipool': ('tests/test_hiorder_pool.py -n 6', [
         ("the options' pool unread",
          sub(ME_GROUP, "    return getattr(context.get_user_options(), 'matrix_pool', 'off')\n",

@@ -4904,6 +4904,9 @@ class _LaneTrip:
         self.small: Dict[tuple, object] = {}
         #: Entries read or computed at one contraction index.
         self.here: Dict[tuple, object] = {}
+        #: A walk's operands of scaled products times their factors, by
+        #: `(product, index, slot)` (`scaled`).
+        self.times: Dict[tuple, object] = {}
         #: The output's columns at the warp's rows, as its steps add into
         #: them (`_column`): (row, slot) -> value, None for zero.
         self.acc: Dict[tuple, object] = {}
@@ -5129,6 +5132,14 @@ class _LaneTrip:
                 if key not in self.small:
                     self.small[key] = self.own(p.second.tensor, q, self.col)
                 s = self.small[key]
+                if p.scalar is not None:
+                    # A scaled product: its factor in the small operand's
+                    # column, once a pass.
+                    key = ('scaled', id(p), q, self.slot)
+                    if key not in self.small:
+                        self.small[key] = b.op('mul', fp, s, self.factor(p),
+                                               hint='s')
+                    s = self.small[key]
                 part = (b.op('mul', fp, g, s, hint='t') if part is None
                         else b.op('fma', fp, g, s, part, hint='t',
                                   attrs=self.fma_attrs))
@@ -5148,6 +5159,33 @@ class _LaneTrip:
                       b.op('lt', BOOL, self.col, c1, hint='in'), hint='in')
         return b.op('select', self.fp, inside, value,
                     b.const(0.0, self.fp), hint='w')
+
+    def factor(self, product):
+        """A scaled product's factor (`element_group.Product.scalar`): its
+        number where the description has it, else the value the kernel is
+        handed (`_scalar`) -- once a pass."""
+        key = ('factor', id(product.scalar.tensor))
+        if key not in self.small:
+            self.small[key] = _scalar(self, product.scalar.tensor)
+        return self.small[key]
+
+    def folds(self, product) -> bool:
+        """Whether a scaled operator product's factor is folded into its
+        operator's numbers -- a number the description holds, and the
+        numbers literals (`number`) -- rather than multiplied into its
+        operand (`scaled`)."""
+        return (product.scalar.tensor.has_values()
+                and self.values == 'literal')
+
+    def scaled(self, product, k, x):
+        """`x`, a scaled operator product's operand at contraction index `k`
+        of the column being written, times the product's factor: once a
+        walk, for every row the index's numbers add into (`walk`)."""
+        key = (id(product), k, self.slot)
+        if key not in self.times:
+            self.times[key] = self.builder.op('mul', self.fp, x,
+                                              self.factor(product), hint='a')
+        return self.times[key]
 
     def materialized(self, product) -> bool:
         """Whether an operator step writes the product's operand."""
@@ -5174,6 +5212,7 @@ class _LaneTrip:
         # ptxas write the code out twice.
         b.begin_operation(force=True)
         self.reanchor()
+        self.times = {}
 
         def add(row, v, x, product, j):
             if x is None:
@@ -5187,15 +5226,23 @@ class _LaneTrip:
 
         def each(product, i, k, value, operand):
             """The number `(i, k)` of `product`, once, into every column's
-            row `i`, times the column's operand at `k` (`operand`)."""
+            row `i`, times the column's operand at `k` (`operand`) -- a
+            scaled product's factor folded into the number where it is a
+            literal one (`folds`), else into the operand, once an index
+            (`scaled`)."""
             v = None
+            scaled = product.scalar is not None
+            folded = scaled and self.folds(product)
             for j in slots:
                 self.slot = j
                 x = operand(j)
                 if x is None:
                     continue
+                if scaled and not folded:
+                    x = self.scaled(product, k, x)
                 if v is None:
-                    v = self.number(product, i, k, value)
+                    v = self.number(product, i, k, value * _factor_value(
+                        product) if folded else value)
                 add(i, v, x, product, j)
 
         held = [p for p in step.products if self.materialized(p)]
@@ -5392,9 +5439,16 @@ def _scaled(trip, step) -> None:
         _write(trip, dest, list(rows), values)
 
 
+def _factor_value(product) -> float:
+    """A scaled product's factor as the description holds it."""
+    import numpy as np
+    return float(np.asarray(product.scalar.tensor.get_values()).reshape(-1)[0])
+
+
 def _scalar(trip, tensor):
-    """A scaled copy's factor: its number where the description has it,
-    else the value the kernel is handed (`element_group.Role.SCALAR`)."""
+    """A scaled copy's factor, or a scaled product's: its number where the
+    description has it, else the value the kernel is handed
+    (`element_group.Role.SCALAR`)."""
     b = trip.builder
     if tensor.has_values():
         import numpy as np
@@ -5651,6 +5705,14 @@ class _SlotTrip(_LaneTrip):
             for term in self.terms[id(p)]:
                 x = self.brought(p.first.tensor, row, term)
                 c = self.coefficient(p, term)
+                if p.scalar is not None:
+                    # A scaled product: its factor in the lane's
+                    # coefficient, once a trip.
+                    key = ('scaled', id(p), term)
+                    if key not in self.small:
+                        self.small[key] = b.op('mul', fp, c, self.factor(p),
+                                               hint='c')
+                    c = self.small[key]
                 part = (b.op('mul', fp, x, c, hint='t') if part is None
                         else b.op('fma', fp, x, c, part, hint='t',
                                   attrs=self.fma_attrs))
